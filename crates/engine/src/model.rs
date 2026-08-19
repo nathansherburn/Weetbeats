@@ -13,6 +13,7 @@ pub const PROJECT_VERSION: u32 = 1;
 
 /// A note in a pattern. `step` and `length` are in steps, `pitch` is MIDI.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct Note {
     pub step: u32,
     pub pitch: u8,
@@ -34,6 +35,7 @@ impl Note {
 
 /// Where a track's sound comes from.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct SampleRef {
     /// Absolute for now. Stage 2 makes this relative to the project folder.
     pub path: String,
@@ -42,6 +44,7 @@ pub struct SampleRef {
 
 /// One row of the grid.
 #[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct Track {
     /// Unique among live tracks, and also the track's slot in the audio engine.
     pub id: u16,
@@ -107,6 +110,7 @@ impl Track {
 
 /// A pattern: a fixed number of steps, and the tracks that play in it.
 #[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct Pattern {
     pub name: String,
     pub steps: u32,
@@ -125,6 +129,7 @@ impl Default for Pattern {
 
 /// Everything the app knows about the song. Stage 2 turns `pattern` into a list.
 #[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct Project {
     pub version: u32,
     pub bpm: f32,

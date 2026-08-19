@@ -71,8 +71,8 @@ fn taper(buf: &mut [f32]) {
     let n = buf.len();
     let fade_in = frames(0.001).min(n / 2);
     let fade_out = frames(0.004).min(n / 2);
-    for i in 0..fade_in {
-        buf[i] *= i as f32 / fade_in as f32;
+    for (i, s) in buf.iter_mut().take(fade_in).enumerate() {
+        *s *= i as f32 / fade_in as f32;
     }
     for i in 0..fade_out {
         buf[n - 1 - i] *= i as f32 / fade_out as f32;

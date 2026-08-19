@@ -1,0 +1,434 @@
+/* Weetbeats. Dark, tight, and out of the way of the grid. */
+
+:root {
+  --bg: #131118;
+  --panel: #1b1823;
+  --panel-2: #221e2c;
+  --line: #2e2839;
+  --text: #ece8f4;
+  --dim: #8b8399;
+  --accent: #ff4d87;
+  --accent-soft: #ff4d8733;
+  --lit: #ffd75e;
+  --ok: #6ee7a8;
+  --row: 46px;
+  --headers: 296px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.4 ui-sans-serif, -apple-system, "SF Pro Text", system-ui, sans-serif;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+/* --- transport --- */
+
+.transport {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  padding: 10px 16px 10px 88px; /* room for the traffic lights */
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  flex: none;
+  height: 56px;
+}
+
+.brand {
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-size: 12px;
+  color: var(--accent);
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+.play {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  display: grid;
+  place-items: center;
+  font-size: 13px;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.play:hover {
+  border-color: var(--accent);
+}
+
+.play.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #1a0b12;
+}
+
+.dial {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dial-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--dim);
+}
+
+.dial output {
+  font-variant-numeric: tabular-nums;
+  width: 30px;
+  color: var(--dim);
+}
+
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 108px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--line);
+  outline: none;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--text);
+  cursor: pointer;
+}
+
+input[type="range"]:active::-webkit-slider-thumb {
+  background: var(--accent);
+}
+
+.meter {
+  width: 74px;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.meter-fill {
+  height: 100%;
+  width: 0;
+  background: linear-gradient(90deg, var(--ok), var(--lit) 78%, var(--accent));
+  transition: width 0.06s linear;
+}
+
+.status {
+  margin-left: auto;
+  color: var(--dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.status .warn {
+  color: var(--accent);
+}
+
+/* --- layout --- */
+
+main {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+/* --- sample browser --- */
+
+.browser {
+  width: 246px;
+  flex: none;
+  border-right: 1px solid var(--line);
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.browser-head {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.ghost {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 7px 10px;
+  transition: border-color 0.12s;
+}
+
+.ghost:hover {
+  border-color: var(--accent);
+}
+
+input[type="search"] {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 9px;
+  color: var(--text);
+  font: inherit;
+  outline: none;
+}
+
+input[type="search"]:focus {
+  border-color: var(--accent);
+}
+
+.browser-root {
+  padding: 8px 12px 0;
+  font-size: 10px;
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sample-list {
+  list-style: none;
+  margin: 0;
+  padding: 6px;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.sample-list li {
+  padding: 6px 9px;
+  border-radius: 5px;
+  cursor: grab;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.sample-list li:hover {
+  background: var(--panel-2);
+}
+
+.sample-list li.playing {
+  background: var(--accent-soft);
+}
+
+.sample-list li .folder {
+  color: var(--dim);
+  font-size: 10px;
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 80px;
+}
+
+.hint {
+  margin: 0;
+  padding: 10px 12px;
+  font-size: 11px;
+  color: var(--dim);
+  border-top: 1px solid var(--line);
+}
+
+/* --- pattern --- */
+
+.pattern {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  position: relative;
+}
+
+.pattern.drop-target::after {
+  content: "";
+  position: absolute;
+  inset: 6px;
+  border: 2px dashed var(--accent);
+  border-radius: 10px;
+  pointer-events: none;
+}
+
+.pattern-head {
+  display: flex;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  flex: none;
+}
+
+.head-tracks {
+  width: var(--headers);
+  flex: none;
+  padding: 8px 12px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--dim);
+  border-right: 1px solid var(--line);
+}
+
+.ruler {
+  height: 29px;
+  display: block;
+}
+
+.pattern-body {
+  flex: 1;
+  display: flex;
+  overflow-y: auto;
+  overflow-x: auto;
+  min-height: 0;
+}
+
+.track-headers {
+  width: var(--headers);
+  flex: none;
+  border-right: 1px solid var(--line);
+  background: var(--panel);
+  position: sticky;
+  left: 0;
+  z-index: 2;
+}
+
+.track {
+  height: var(--row);
+  border-bottom: 1px solid var(--line);
+  padding: 0 9px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* The name comes first and gets whatever room is left: it is the one thing you read. */
+.track .name {
+  flex: 1;
+  min-width: 64px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.track .name:hover {
+  color: var(--accent);
+}
+
+.track canvas.wave {
+  width: 34px;
+  height: 18px;
+  opacity: 0.45;
+  flex: none;
+}
+
+.tick {
+  width: 19px;
+  height: 19px;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--dim);
+  font-size: 9px;
+  font-weight: 700;
+  display: grid;
+  place-items: center;
+  flex: none;
+  padding: 0;
+}
+
+.tick:hover {
+  border-color: var(--dim);
+  color: var(--text);
+}
+
+.tick.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #1a0b12;
+}
+
+.tick.solo.on {
+  background: var(--lit);
+  border-color: var(--lit);
+  color: #241c00;
+}
+
+.tick.kill:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.track input[type="range"] {
+  width: 46px;
+  flex: none;
+}
+
+.grid-wrap {
+  flex: 1;
+  min-width: 0;
+}
+
+.grid {
+  display: block;
+}
+
+.empty {
+  position: absolute;
+  inset: 30px 0 0 var(--headers);
+  display: grid;
+  place-content: center;
+  text-align: center;
+  color: var(--dim);
+  pointer-events: none;
+}
+
+.empty p {
+  margin: 4px;
+}
+
+.empty .small {
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.empty.hidden {
+  display: none;
+}
