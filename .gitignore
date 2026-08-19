@@ -1,0 +1,7 @@
+/target
+**/target
+node_modules
+.DS_Store
+/dist
+src-tauri/gen
+*.beat
