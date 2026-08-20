@@ -8,7 +8,7 @@ repository.workspace = true
 publish = false
 
 [build-dependencies]
-tauri-build = "2"
+tauri-build = { version = "2", features = [] }
 
 [dependencies]
 weetbeats-engine.workspace = true

@@ -51,6 +51,7 @@ pub fn spawn(
                     return;
                 }
                 // Hold the stream for the life of the app. Dropping it stops the sound.
+                let _stream = stream;
                 loop {
                     std::thread::park();
                 }

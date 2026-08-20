@@ -63,12 +63,15 @@ pub fn startup(app: AppHandle, state: State<'_, Arc<AppState>>) -> Startup {
 
 /// Where the drums that ship with the app live.
 ///
-/// Bundled as a resource, so in a built `.app` they sit inside it. Running from a checkout
-/// there is no bundle, so fall back to the folder in the repo.
+/// Bundled as a resource under `drums`, so in a built `.app` they sit inside it. The name
+/// differs from the folder in the repo because Tauri stages resources into the Cargo target
+/// directory, where `starter-pack` is already taken by the tool that generates them.
+///
+/// Running from a checkout there is no bundle, so fall back to the folder in the repo.
 fn starter_pack(app: &AppHandle) -> Option<PathBuf> {
     if let Ok(path) = app
         .path()
-        .resolve("starter-pack", tauri::path::BaseDirectory::Resource)
+        .resolve("drums", tauri::path::BaseDirectory::Resource)
     {
         if path.is_dir() {
             return Some(path);

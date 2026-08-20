@@ -36,7 +36,7 @@
       "icons/icon.icns"
     ],
     "resources": {
-      "../assets/starter-pack": "starter-pack"
+      "../assets/starter-pack": "drums"
     },
     "category": "Music",
     "shortDescription": "A tiny, fun, free music maker.",
