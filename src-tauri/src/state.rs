@@ -25,6 +25,9 @@ pub struct AppState {
     pub shared: Arc<Shared>,
     pub audio: AudioInfo,
     stream_errors: Arc<AtomicU32>,
+    /// Where the file picker opened last, so it does not send you back to your home
+    /// folder every time.
+    last_folder: Mutex<Option<PathBuf>>,
 }
 
 impl AppState {
@@ -53,6 +56,7 @@ impl AppState {
             shared,
             audio,
             stream_errors,
+            last_folder: Mutex::new(None),
         };
         state.send(Command::SetMasterGain(
             state.project.lock().unwrap().master_gain,
@@ -81,6 +85,16 @@ impl AppState {
 
     pub fn stream_errors(&self) -> u32 {
         self.stream_errors.load(Ordering::Relaxed)
+    }
+
+    pub fn last_folder(&self) -> Option<PathBuf> {
+        self.last_folder.lock().ok()?.clone()
+    }
+
+    pub fn remember_folder(&self, folder: &Path) {
+        if let Ok(mut last) = self.last_folder.lock() {
+            *last = Some(folder.to_path_buf());
+        }
     }
 
     /// Decode a sample, or hand back the one already in the cache.

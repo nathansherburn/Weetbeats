@@ -2,7 +2,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod audio;
-mod browser;
 mod commands;
 mod state;
 
@@ -25,9 +24,8 @@ fn main() {
         .manage(Arc::new(state))
         .invoke_handler(tauri::generate_handler![
             commands::startup,
-            commands::choose_folder,
-            commands::preview,
-            commands::add_track,
+            commands::add_instruments,
+            commands::add_dropped,
             commands::remove_track,
             commands::set_step,
             commands::set_track_gain,
@@ -39,7 +37,6 @@ fn main() {
             commands::set_playing,
             commands::panic_stop,
             commands::playhead,
-            commands::waveform,
         ])
         .run(tauri::generate_context!())
         .expect("Weetbeats could not start");

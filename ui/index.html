@@ -37,19 +37,12 @@
     </header>
 
     <main>
-      <aside class="browser">
-        <div class="browser-head">
-          <button id="choose" class="ghost">Choose folder&hellip;</button>
-          <input id="filter" type="search" placeholder="Search samples" autocomplete="off" />
-        </div>
-        <div class="browser-root" id="browserRoot"></div>
-        <ul id="samples" class="sample-list"></ul>
-        <p class="hint">Click to hear it. Drag it right to make a track.</p>
-      </aside>
-
       <section class="pattern" id="pattern">
         <div class="pattern-head">
-          <div class="head-tracks">tracks</div>
+          <div class="head-tracks">
+            <span class="head-label">tracks</span>
+            <button id="add" class="add" title="Add an instrument">+ Add</button>
+          </div>
           <canvas id="ruler" class="ruler"></canvas>
         </div>
         <div class="pattern-body" id="patternBody">
@@ -59,8 +52,8 @@
           </div>
         </div>
         <div class="empty" id="empty">
-          <p>Drag a sample in here.</p>
-          <p class="small">Then tick some boxes and hit space.</p>
+          <button id="addBig" class="add-big">Add an instrument</button>
+          <p class="small">Or drop a sound on the window. Then tick some boxes and hit space.</p>
         </div>
       </section>
     </main>

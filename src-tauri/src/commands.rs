@@ -9,10 +9,10 @@ use std::sync::Arc;
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
+use weetbeats_engine::sample::{is_audio_file, AUDIO_EXTENSIONS};
 use weetbeats_engine::{Command, EngineNote, Note, Project, SampleRef, Track, DEFAULT_PITCH};
 
 use crate::audio::AudioInfo;
-use crate::browser::{self, Listing};
 use crate::state::AppState;
 
 /// What the front end gets when it starts up.
@@ -21,7 +21,6 @@ use crate::state::AppState;
 pub struct Startup {
     pub project: Project,
     pub audio: AudioInfo,
-    pub samples: Listing,
 }
 
 /// A new row, with the waveform to draw in it.
@@ -30,6 +29,15 @@ pub struct Startup {
 pub struct NewTrack {
     pub track: Track,
     pub peaks: Vec<f32>,
+}
+
+/// The result of one trip to the file picker. Files that would not decode are reported
+/// rather than silently skipped, and they do not stop the ones that would.
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Added {
+    pub tracks: Vec<NewTrack>,
+    pub failed: Vec<String>,
 }
 
 /// Polled every frame while playing. Kept small on purpose.
@@ -45,19 +53,10 @@ pub struct PlayheadPayload {
 }
 
 #[tauri::command]
-pub fn startup(app: AppHandle, state: State<'_, Arc<AppState>>) -> Startup {
-    let samples = match starter_pack(&app) {
-        Some(dir) => browser::scan(&dir),
-        None => Listing {
-            root: String::new(),
-            entries: Vec::new(),
-            truncated: false,
-        },
-    };
+pub fn startup(state: State<'_, Arc<AppState>>) -> Startup {
     Startup {
         project: state.project.lock().unwrap().clone(),
         audio: state.audio.clone(),
-        samples,
     }
 }
 
@@ -81,46 +80,93 @@ fn starter_pack(app: &AppHandle) -> Option<PathBuf> {
     in_repo.is_dir().then_some(in_repo)
 }
 
+/// Open the system file picker and turn everything chosen into a track.
+///
+/// The picker is modal and driven by the main thread, so it is opened from a blocking
+/// task. Waiting for it on the main thread would deadlock the window.
+///
+/// Multi-select is on, because adding a kit is the normal case and one file at a time
+/// would be four trips through the dialog.
 #[tauri::command]
-pub async fn choose_folder(app: AppHandle) -> Option<Listing> {
-    // The picker is modal and driven by the main thread, so it is opened from a blocking
-    // task. Waiting for it on the main thread would deadlock the window.
+pub async fn add_instruments(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Added, String> {
+    let state = Arc::clone(state.inner());
+    // Open where they were last, or at the drums that ship with the app the first time,
+    // which is the only thing keeping the starter pack discoverable now the browser is gone.
+    let start_dir = state.last_folder().or_else(|| starter_pack(&app));
+
     let picked = tauri::async_runtime::spawn_blocking(move || {
-        app.dialog()
+        let mut dialog = app
+            .dialog()
             .file()
-            .set_title("Choose a folder of samples")
-            .blocking_pick_folder()
+            .set_title("Add an instrument")
+            .add_filter("Audio", AUDIO_EXTENSIONS);
+        if let Some(dir) = start_dir {
+            dialog = dialog.set_directory(dir);
+        }
+        dialog.blocking_pick_files()
     })
     .await
-    .ok()
-    .flatten()?;
+    .map_err(|e| format!("the file picker did not open: {e}"))?;
 
-    let path = picked.into_path().ok()?;
-    tauri::async_runtime::spawn_blocking(move || browser::scan(&path))
+    let Some(picked) = picked else {
+        // Cancelled. Not an error, just nothing to add.
+        return Ok(Added::default());
+    };
+
+    let paths: Vec<PathBuf> = picked
+        .into_iter()
+        .filter_map(|p| p.into_path().ok())
+        .collect();
+    tauri::async_runtime::spawn_blocking(move || add_all(&state, paths))
         .await
-        .ok()
+        .map_err(|e| format!("could not load the samples: {e}"))
 }
 
-/// Decoding reads a file, so it happens on a blocking thread. A short drum sample is
-/// nothing, but a two minute stereo wav would otherwise hold up every other command.
-#[tauri::command]
-pub async fn preview(path: String, state: State<'_, Arc<AppState>>) -> Result<(), String> {
-    let state = Arc::clone(state.inner());
-    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
-        let sample = state.load_sample(Path::new(&path))?;
-        state.send(Command::Preview { sample, gain: 0.9 });
-        Ok(())
-    })
-    .await
-    .map_err(|e| format!("could not load the sample: {e}"))?
+/// Add every path that decodes, and say what happened to the ones that do not.
+///
+/// Nothing here is silent. A drop that quietly does nothing is worse than an error,
+/// because there is no way to tell it apart from the app being broken.
+fn add_all(state: &AppState, paths: Vec<PathBuf>) -> Added {
+    let mut added = Added::default();
+    if let Some(folder) = paths.first().and_then(|p| p.parent()) {
+        state.remember_folder(folder);
+    }
+    for path in paths {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("that")
+            .to_string();
+        if path.is_dir() {
+            added.failed.push(format!(
+                "{name} is a folder — open it and pick the sounds inside"
+            ));
+        } else if !is_audio_file(&path) {
+            added.failed.push(format!("{name} is not a sound file"));
+        } else {
+            match add_track_now(state, path) {
+                Ok(track) => added.tracks.push(track),
+                Err(e) => added.failed.push(e),
+            }
+        }
+    }
+    added
 }
 
+/// Files dropped onto the window from the Finder. Same job as the picker, different door.
 #[tauri::command]
-pub async fn add_track(path: String, state: State<'_, Arc<AppState>>) -> Result<NewTrack, String> {
+pub async fn add_dropped(
+    paths: Vec<String>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Added, String> {
     let state = Arc::clone(state.inner());
-    tauri::async_runtime::spawn_blocking(move || add_track_now(&state, PathBuf::from(path)))
+    let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+    tauri::async_runtime::spawn_blocking(move || add_all(&state, paths))
         .await
-        .map_err(|e| format!("could not load the sample: {e}"))?
+        .map_err(|e| format!("could not load the samples: {e}"))
 }
 
 fn add_track_now(state: &AppState, path: PathBuf) -> Result<NewTrack, String> {
@@ -275,15 +321,4 @@ pub fn playhead(state: State<'_, Arc<AppState>>) -> PlayheadPayload {
         peak: playhead.peak,
         stream_errors: state.stream_errors(),
     }
-}
-
-/// The waveform for a sample, for drawing on a track row.
-#[tauri::command]
-pub async fn waveform(path: String, state: State<'_, Arc<AppState>>) -> Result<Vec<f32>, String> {
-    let state = Arc::clone(state.inner());
-    tauri::async_runtime::spawn_blocking(move || {
-        state.load_sample(Path::new(&path)).map(|s| s.peaks.clone())
-    })
-    .await
-    .map_err(|e| format!("could not load the sample: {e}"))?
 }

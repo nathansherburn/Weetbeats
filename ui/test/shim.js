@@ -15,10 +15,30 @@ const fake = {
   peaks: Array.from({ length: 96 }, (_, i) => Math.abs(Math.sin(i / 7)) * 0.9),
 };
 
-const entries = [
-  "01 kick", "02 snare", "03 clap", "04 hat closed",
-  "05 hat open", "06 rim", "07 tom", "08 cowbell",
-].map((name) => ({ path: `/pack/${name}.wav`, name, folder: "" }));
+// What the file picker "returns". A test sets this before clicking Add.
+fake.picks = ["/pack/01 kick.wav"];
+
+// Mirrors add_all in commands.rs, including what it refuses and what it says about it.
+function addAll(paths) {
+  const added = { tracks: [], failed: [] };
+  for (const path of paths) {
+    const base = path.split("/").pop();
+    if (!/\.(wav|mp3|flac|ogg|oga|aiff?|aifc|m4a|mp4|aac|caf|wave)$/i.test(path)) {
+      added.failed.push(`${base} is not a sound file`);
+      continue;
+    }
+    if (fake.tracks.size >= 32) {
+      added.failed.push("that is 32 tracks, which is all of them");
+      continue;
+    }
+    const id = fake.nextId++;
+    const name = path.split("/").pop().replace(/\.[^.]+$/, "");
+    const track = { id, name, sample: { path, name }, gain: 0.8, muted: false, soloed: false, notes: [] };
+    fake.tracks.set(id, track);
+    added.tracks.push({ track, peaks: fake.peaks });
+  }
+  return added;
+}
 
 const handlers = {
   startup: () => ({
@@ -29,20 +49,10 @@ const handlers = {
       pattern: { name: "Pattern 1", steps: fake.steps, tracks: [] },
     },
     audio: { device: "Test Output", sampleRate: 48000, channels: 2, format: "f32" },
-    samples: { root: "/pack", entries, truncated: false },
   }),
-  choose_folder: () => ({ root: "/other", entries: entries.slice(0, 2), truncated: false }),
-  preview: () => null,
   audition: () => null,
-  waveform: () => fake.peaks,
-  add_track: ({ path }) => {
-    if (fake.tracks.size >= 32) throw "that is 32 tracks, which is all of them";
-    const id = fake.nextId++;
-    const name = path.split("/").pop().replace(/\.wav$/, "");
-    const track = { id, name, sample: { path, name }, gain: 0.8, muted: false, soloed: false, notes: [] };
-    fake.tracks.set(id, track);
-    return { track, peaks: fake.peaks };
-  },
+  add_instruments: () => addAll(fake.picks),
+  add_dropped: ({ paths }) => addAll(paths),
   remove_track: ({ id }) => { fake.tracks.delete(id); return null; },
   set_step: ({ id, step, on }) => {
     const track = fake.tracks.get(id);
@@ -69,6 +79,9 @@ const handlers = {
   }),
 };
 
+// The native drag-drop events the webview sends instead of HTML5 ones.
+const listeners = new Map();
+
 window.__TAURI__ = {
   core: {
     invoke: async (name, args = {}) => {
@@ -78,6 +91,18 @@ window.__TAURI__ = {
       return handler(args);
     },
   },
+  event: {
+    listen: async (name, cb) => {
+      listeners.set(name, cb);
+      return () => listeners.delete(name);
+    },
+  },
+};
+
+// Lets a test fire a native drop without a real Finder.
+window.__weetbeats_drop = (paths) => {
+  listeners.get("tauri://drag-enter")?.({ payload: { paths } });
+  listeners.get("tauri://drag-drop")?.({ payload: { paths } });
 };
 
 // Lets a test walk the playhead without waiting on real time.

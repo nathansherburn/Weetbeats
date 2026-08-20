@@ -49,51 +49,56 @@ const check = (name, ok, detail = "") => {
 
   await page.addInitScript(SHIM);
   await page.goto(url);
-  await page.waitForFunction(() => document.querySelectorAll("#samples li").length > 0);
+  await page.waitForSelector("#add");
 
-  // --- the browser lists what Rust found
-  check("sample list renders", (await page.locator("#samples li").count()) === 8);
+  // --- nothing on screen but the invitation to add something
   check("empty state is showing", await page.locator("#empty").isVisible());
+  check("no sample browser", (await page.locator("#samples").count()) === 0);
 
-  // --- search filters it
-  await page.fill("#filter", "hat");
-  check("search filters the list", (await page.locator("#samples li").count()) === 2);
-  await page.fill("#filter", "");
-
-  // --- clicking previews
-  await page.locator("#samples li", { hasText: "01 kick" }).click();
-  await page.waitForFunction(() =>
-    window.__weetbeats_calls.some((c) => c.name === "preview"));
-  const preview = await page.evaluate(() =>
-    window.__weetbeats_calls.find((c) => c.name === "preview").args.path);
-  check("clicking a sample previews it", preview === "/pack/01 kick.wav", preview);
-
-  // --- dragging one in makes a track (drag and drop, driven by hand)
-  const drop = async (name) => {
-    await page.evaluate(async (sampleName) => {
-      const li = [...document.querySelectorAll("#samples li")]
-        .find((n) => n.textContent.includes(sampleName));
-      const dt = new DataTransfer();
-      li.dispatchEvent(new DragEvent("dragstart", { dataTransfer: dt, bubbles: true }));
-      const pattern = document.getElementById("pattern");
-      pattern.dispatchEvent(new DragEvent("dragover", { dataTransfer: dt, bubbles: true, cancelable: true }));
-      pattern.dispatchEvent(new DragEvent("drop", { dataTransfer: dt, bubbles: true, cancelable: true }));
-    }, name);
-    await page.waitForFunction(
-      (n) => document.querySelectorAll("#trackHeaders .track").length === n,
-      undefined,
-      { timeout: 3000 },
-    ).catch(() => {});
-  };
-
-  await drop("01 kick");
+  // --- the button opens the picker and makes a track from whatever comes back
+  await page.evaluate(() => { window.__weetbeats_state.picks = ["/pack/01 kick.wav"]; });
+  await page.locator("#addBig").click();
   await page.waitForSelector("#trackHeaders .track");
-  check("dropping a sample adds a track", (await page.locator("#trackHeaders .track").count()) === 1);
+  check("the big button adds a track", (await page.locator("#trackHeaders .track").count()) === 1);
+  check("it went through the picker",
+    await page.evaluate(() => window.__weetbeats_calls.some((c) => c.name === "add_instruments")));
   check("empty state goes away", !(await page.locator("#empty").isVisible()));
+  check("the track is named after the file",
+    (await page.locator("#trackHeaders .track .name").first().textContent()) === "01 kick");
 
-  await drop("02 snare");
-  await drop("04 hat closed");
-  check("three tracks", (await page.locator("#trackHeaders .track").count()) === 3);
+  // --- one trip to the picker can bring back a whole kit
+  await page.evaluate(() => {
+    window.__weetbeats_state.picks = ["/pack/02 snare.wav", "/pack/04 hat closed.wav"];
+  });
+  await page.locator("#add").click();
+  await page.waitForFunction(() => document.querySelectorAll("#trackHeaders .track").length === 3);
+  check("multi-select adds one track each", (await page.locator("#trackHeaders .track").count()) === 3);
+
+  // --- cancelling the picker changes nothing
+  await page.evaluate(() => { window.__weetbeats_state.picks = []; });
+  await page.locator("#add").click();
+  await page.waitForTimeout(150);
+  check("cancelling adds nothing", (await page.locator("#trackHeaders .track").count()) === 3);
+
+  // --- a file dropped on the window comes in the same door
+  await page.evaluate(() => window.__weetbeats_drop(["/elsewhere/clap.wav"]));
+  await page.waitForFunction(() => document.querySelectorAll("#trackHeaders .track").length === 4);
+  const dropped = await page.evaluate(() =>
+    window.__weetbeats_calls.filter((c) => c.name === "add_dropped").at(-1).args.paths);
+  check("dropping a file adds a track", dropped[0] === "/elsewhere/clap.wav", String(dropped));
+
+  // --- dropping something that is not audio says so rather than doing nothing
+  await page.evaluate(() => window.__weetbeats_drop(["/elsewhere/notes.txt"]));
+  await page.waitForFunction(() =>
+    document.getElementById("status").textContent.includes("not a sound file"));
+  check("dropping a non-audio file adds nothing",
+    (await page.locator("#trackHeaders .track").count()) === 4);
+  check("and it says why", (await page.locator("#status").textContent()).includes("notes.txt"),
+    await page.locator("#status").textContent());
+
+  // --- back to three rows, so the grid checks below have known dimensions
+  await page.locator("#trackHeaders .track").last().locator(".tick.kill").click();
+  await page.waitForFunction(() => document.querySelectorAll("#trackHeaders .track").length === 3);
 
   // --- the grid canvas is sized for the steps and rows
   const size = await page.evaluate(() => {
@@ -174,14 +179,13 @@ const check = (name, ok, detail = "") => {
     window.__weetbeats_calls.filter((c) => c.name === "set_playing").at(-1).args.playing);
   check("space stops it", stopped === false);
 
-  // --- space in the search box types a space instead of playing
+  // --- space with a slider focused still plays; only text fields should swallow it
   await page.evaluate(() => { window.__weetbeats_calls.length = 0; });
-  await page.click("#filter");
+  await page.locator("#bpm").focus();
   await page.keyboard.press("Space");
-  const playedWhileTyping = await page.evaluate(() =>
-    window.__weetbeats_calls.some((c) => c.name === "set_playing"));
-  check("space while searching does not play", !playedWhileTyping);
-  await page.fill("#filter", "");
+  check("space works with a slider focused",
+    await page.evaluate(() => window.__weetbeats_calls.some((c) => c.name === "set_playing")));
+  await page.locator("body").press("Space");
 
   // --- mute, solo, volume, delete
   await page.evaluate(() => { window.__weetbeats_calls.length = 0; });

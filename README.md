@@ -2,8 +2,8 @@
 
 Delicious, ambitious, nutritious beats.
 
-A tiny, fun, free music maker for macOS. Point it at a folder of samples, tick boxes, make
-songs. Open source, free forever.
+A tiny, fun, free music maker for macOS. Add a few sounds, tick boxes, make songs.
+Open source, free forever.
 
 > **First time you open it:** right click the app, choose Open, then click Open again.
 > Weetbeats is not signed, so macOS blocks it until you say otherwise.
@@ -12,9 +12,10 @@ songs. Open source, free forever.
 
 Stage 1 of [the build plan](docs/BUILD_PLAN.md) is done: a working step sequencer.
 
-- Pick a folder of samples, or use the drums that ship with it
-- Click a sample to hear it, drag it right to make a track
+- Add instruments from the system file picker, or drop sounds on the window
+- Eight drums ship with it, and the picker opens on them the first time
 - Sixteen boxes a row, click or drag across them to paint a beat
+- Click a track's name to hear it
 - Play, stop, tempo, master volume
 - Per track: volume, mute, solo, delete
 

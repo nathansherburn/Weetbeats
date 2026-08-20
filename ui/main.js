@@ -5,12 +5,17 @@
  * so a click can light a box up straight away, but Rust owns the project: every change
  * goes there too, and the audio thread hears about it from Rust.
  *
+ * Instruments come in through the system file picker, which Rust opens. There is no file
+ * browser in here, and no HTML5 drag and drop: the webview's own drag handler swallows
+ * those events before the page sees them, so dropping a file is a native event instead.
+ *
  * The grid is one canvas rather than a box per step. Sixteen steps by a few tracks would
  * survive as elements, but the piano roll in stage 4 will not, and this is the same
  * drawing code either way.
  */
 
 const { invoke } = window.__TAURI__.core;
+const { listen } = window.__TAURI__.event;
 
 const CELL = 42; // width of one step
 const GAP = 4; // gap between steps
@@ -24,8 +29,6 @@ const state = {
   playing: false,
   step: 0,
   progress: 0,
-  samples: [],
-  filter: "",
   audio: null,
   needsDraw: true,
 };
@@ -37,14 +40,11 @@ const el = {
   master: document.getElementById("master"),
   meter: document.getElementById("meterFill"),
   status: document.getElementById("status"),
-  choose: document.getElementById("choose"),
-  filter: document.getElementById("filter"),
-  samples: document.getElementById("samples"),
-  browserRoot: document.getElementById("browserRoot"),
+  add: document.getElementById("add"),
+  addBig: document.getElementById("addBig"),
   headers: document.getElementById("trackHeaders"),
   grid: document.getElementById("grid"),
   ruler: document.getElementById("ruler"),
-  pattern: document.getElementById("pattern"),
   empty: document.getElementById("empty"),
 };
 
@@ -68,7 +68,6 @@ async function boot() {
   state.audio = startup.audio;
   state.bpm = startup.project.bpm;
   state.steps = startup.project.pattern.steps;
-  setSamples(startup.samples);
 
   el.bpm.value = String(Math.round(state.bpm));
   el.bpmValue.textContent = String(Math.round(state.bpm));
@@ -78,94 +77,54 @@ async function boot() {
   requestAnimationFrame(tick);
 }
 
-function setSamples(listing) {
-  state.samples = listing.entries;
-  // Only the tail of the path is worth the space; the whole thing is in the tooltip.
-  const tail = (listing.root || "").split("/").filter(Boolean).slice(-2).join("/");
-  el.browserRoot.textContent = listing.truncated
-    ? `${tail} — first ${listing.entries.length}`
-    : tail;
-  el.browserRoot.title = listing.root || "";
-  drawSampleList();
-}
-
-// --- sample browser -------------------------------------------------------
-
-function drawSampleList() {
-  const needle = state.filter.toLowerCase();
-  const shown = needle
-    ? state.samples.filter(
-        (s) =>
-          s.name.toLowerCase().includes(needle) ||
-          s.folder.toLowerCase().includes(needle),
-      )
-    : state.samples;
-
-  el.samples.replaceChildren(
-    ...shown.map((sample) => {
-      const li = document.createElement("li");
-      li.draggable = true;
-      li.title = sample.path;
-
-      const name = document.createElement("span");
-      name.textContent = sample.name;
-      li.append(name);
-
-      if (sample.folder) {
-        const folder = document.createElement("span");
-        folder.className = "folder";
-        folder.textContent = sample.folder;
-        li.append(folder);
-      }
-
-      li.addEventListener("click", () => {
-        invoke("preview", { path: sample.path }).catch(showError);
-        li.classList.add("playing");
-        setTimeout(() => li.classList.remove("playing"), 180);
-      });
-      li.addEventListener("dragstart", (e) => {
-        e.dataTransfer.setData("text/weetbeats-sample", sample.path);
-        e.dataTransfer.effectAllowed = "copy";
-      });
-      return li;
-    }),
-  );
-}
-
-el.filter.addEventListener("input", () => {
-  state.filter = el.filter.value;
-  drawSampleList();
-});
-
-el.choose.addEventListener("click", async () => {
-  const listing = await invoke("choose_folder").catch(showError);
-  if (listing) {
-    state.filter = "";
-    el.filter.value = "";
-    setSamples(listing);
-  }
-});
-
 // --- tracks ---------------------------------------------------------------
 
-async function addTrack(path) {
+/*
+ * One trip to the picker can bring back a whole kit, so this takes a list. Rust has
+ * already made the tracks and told the audio thread about them; all that is left is to
+ * draw the rows.
+ */
+let adding = false;
+
+async function addInstruments(command, args) {
+  // One dialog at a time. Without this a double click opens two pickers.
+  if (adding) return;
+  adding = true;
+  el.add.disabled = true;
+  el.addBig.disabled = true;
   try {
-    const added = await invoke("add_track", { path });
-    state.tracks.push({
-      id: added.track.id,
-      name: added.track.name,
-      gain: added.track.gain,
-      muted: added.track.muted,
-      soloed: added.track.soloed,
-      steps: new Set(added.track.notes.map((n) => n.step)),
-      peaks: added.peaks,
-    });
-    drawTrackHeaders();
-    resize();
+    const added = await invoke(command, args);
+    for (const item of added.tracks) {
+      state.tracks.push({
+        id: item.track.id,
+        name: item.track.name,
+        gain: item.track.gain,
+        muted: item.track.muted,
+        soloed: item.track.soloed,
+        steps: new Set(item.track.notes.map((n) => n.step)),
+        peaks: item.peaks,
+      });
+    }
+    if (added.tracks.length) {
+      drawTrackHeaders();
+      resize();
+    }
+    if (added.failed.length) {
+      // One line is enough; the rest would just scroll past.
+      const more = added.failed.length > 1 ? ` (and ${added.failed.length - 1} more)` : "";
+      showError(added.failed[0] + more);
+    }
   } catch (e) {
     showError(e);
+  } finally {
+    adding = false;
+    el.add.disabled = false;
+    el.addBig.disabled = false;
   }
 }
+
+el.add.addEventListener("click", () => addInstruments("add_instruments"));
+el.addBig.addEventListener("click", () => addInstruments("add_instruments"));
 
 function drawTrackHeaders() {
   el.empty.classList.toggle("hidden", state.tracks.length > 0);
@@ -255,26 +214,20 @@ function drawWaveform(canvas, peaks) {
   }
 }
 
-// --- dragging a sample into the pattern -----------------------------------
+// --- dropping a file on the window ------------------------------------------
 
-el.pattern.addEventListener("dragover", (e) => {
-  if (e.dataTransfer.types.includes("text/weetbeats-sample")) {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "copy";
-    el.pattern.classList.add("drop-target");
-  }
-});
-el.pattern.addEventListener("dragleave", (e) => {
-  if (!el.pattern.contains(e.relatedTarget)) {
-    el.pattern.classList.remove("drop-target");
-  }
-});
-el.pattern.addEventListener("drop", (e) => {
-  const path = e.dataTransfer.getData("text/weetbeats-sample");
-  el.pattern.classList.remove("drop-target");
-  if (path) {
-    e.preventDefault();
-    addTrack(path);
+/*
+ * The webview installs its own drag handler, which is why HTML5 dragstart and drop never
+ * fire in here. The native events it sends instead carry real filesystem paths, which is
+ * better anyway: a path can be handed straight to Rust.
+ */
+listen("tauri://drag-enter", () => document.body.classList.add("drop-target"));
+listen("tauri://drag-leave", () => document.body.classList.remove("drop-target"));
+listen("tauri://drag-drop", (event) => {
+  document.body.classList.remove("drop-target");
+  const paths = event.payload?.paths ?? [];
+  if (paths.length) {
+    addInstruments("add_dropped", { paths });
   }
 });
 
@@ -442,7 +395,9 @@ el.master.addEventListener("input", () => {
 });
 
 window.addEventListener("keydown", (e) => {
-  const typing = e.target.matches("input, textarea");
+  // Only a text field has any use for a space. A focused slider does not, and having it
+  // swallow the play key after you nudge the tempo is maddening.
+  const typing = e.target.matches("input:not([type=range]), textarea, [contenteditable]");
   if (e.code === "Space" && !typing) {
     e.preventDefault();
     setPlaying(!state.playing);

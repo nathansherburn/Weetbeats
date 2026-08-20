@@ -168,105 +168,37 @@ main {
   min-height: 0;
 }
 
-/* --- sample browser --- */
+/* --- add instrument --- */
 
-.browser {
-  width: 246px;
-  flex: none;
-  border-right: 1px solid var(--line);
-  background: var(--panel);
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
-
-.browser-head {
-  padding: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  border-bottom: 1px solid var(--line);
-}
-
-.ghost {
+.add {
   background: var(--panel-2);
   border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 7px 10px;
-  transition: border-color 0.12s;
-}
-
-.ghost:hover {
-  border-color: var(--accent);
-}
-
-input[type="search"] {
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 6px 9px;
-  color: var(--text);
-  font: inherit;
-  outline: none;
-}
-
-input[type="search"]:focus {
-  border-color: var(--accent);
-}
-
-.browser-root {
-  padding: 8px 12px 0;
-  font-size: 10px;
-  color: var(--dim);
-  text-transform: uppercase;
-  letter-spacing: 0.07em;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.sample-list {
-  list-style: none;
-  margin: 0;
-  padding: 6px;
-  overflow-y: auto;
-  flex: 1;
-  min-height: 0;
-}
-
-.sample-list li {
-  padding: 6px 9px;
   border-radius: 5px;
-  cursor: grab;
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  white-space: nowrap;
-}
-
-.sample-list li:hover {
-  background: var(--panel-2);
-}
-
-.sample-list li.playing {
-  background: var(--accent-soft);
-}
-
-.sample-list li .folder {
   color: var(--dim);
-  font-size: 10px;
-  margin-left: auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 80px;
-}
-
-.hint {
-  margin: 0;
-  padding: 10px 12px;
+  padding: 3px 9px;
   font-size: 11px;
-  color: var(--dim);
-  border-top: 1px solid var(--line);
+  transition: border-color 0.12s, color 0.12s;
+}
+
+.add:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.add-big {
+  background: var(--accent);
+  border: none;
+  border-radius: 8px;
+  color: #1a0b12;
+  font-size: 14px;
+  font-weight: 600;
+  padding: 11px 22px;
+  pointer-events: auto;
+  transition: filter 0.12s;
+}
+
+.add-big:hover {
+  filter: brightness(1.08);
 }
 
 /* --- pattern --- */
@@ -279,13 +211,14 @@ input[type="search"]:focus {
   position: relative;
 }
 
-.pattern.drop-target::after {
+body.drop-target::after {
   content: "";
-  position: absolute;
+  position: fixed;
   inset: 6px;
   border: 2px dashed var(--accent);
   border-radius: 10px;
   pointer-events: none;
+  z-index: 10;
 }
 
 .pattern-head {
@@ -298,12 +231,19 @@ input[type="search"]:focus {
 .head-tracks {
   width: var(--headers);
   flex: none;
-  padding: 8px 12px;
+  padding: 5px 9px;
+  border-right: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.head-label {
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.09em;
   color: var(--dim);
-  border-right: 1px solid var(--line);
 }
 
 .ruler {
@@ -412,16 +352,18 @@ input[type="search"]:focus {
 
 .empty {
   position: absolute;
-  inset: 30px 0 0 var(--headers);
+  inset: 30px 0 0 0;
   display: grid;
   place-content: center;
+  justify-items: center;
+  gap: 12px;
   text-align: center;
   color: var(--dim);
   pointer-events: none;
 }
 
 .empty p {
-  margin: 4px;
+  margin: 0;
 }
 
 .empty .small {
