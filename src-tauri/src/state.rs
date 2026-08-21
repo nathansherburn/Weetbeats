@@ -15,7 +15,7 @@ use weetbeats_engine::{
     MAX_TRACKS,
 };
 
-use crate::audio::{self, AudioInfo};
+use crate::audio;
 
 /// Must match the identifier in `tauri.conf.json`: it names the folder the app keeps its
 /// own things in.
@@ -55,7 +55,6 @@ pub struct AppState {
     /// the audio thread to let go of one: it is never the last owner.
     cache: Mutex<HashMap<PathBuf, Arc<Sample>>>,
     pub shared: Arc<Shared>,
-    pub audio: AudioInfo,
     stream_errors: Arc<AtomicU32>,
     /// Where the file picker opened last, so it does not send you back to your home
     /// folder every time.
@@ -71,6 +70,8 @@ impl AppState {
         let (trash_tx, trash_rx) = rtrb::RingBuffer::new(TRASH_CAPACITY);
         let stream_errors = Arc::new(AtomicU32::new(0));
 
+        // What the device turned out to be is worth knowing when something is wrong with it,
+        // and nowhere near worth a corner of the window.
         let audio = audio::spawn(
             rx,
             TrashBin::new(trash_tx, Arc::clone(&shared)),
@@ -83,6 +84,10 @@ impl AppState {
                 .map(|p| p.steps)
                 .unwrap_or(DEFAULT_STEPS),
         )?;
+        eprintln!(
+            "Weetbeats: {} at {}Hz, {} channels, {}",
+            audio.device, audio.sample_rate, audio.channels, audio.format
+        );
 
         let state = AppState {
             project: Mutex::new(project),
@@ -95,7 +100,6 @@ impl AppState {
             trash: Mutex::new(trash_rx),
             cache: Mutex::new(HashMap::new()),
             shared,
-            audio,
             stream_errors,
             last_folder: Mutex::new(None),
         };
@@ -218,11 +222,11 @@ impl AppState {
             }
         }
 
-        self.send(Command::SetSongLen(project.song.len() as u16));
-        for (index, pattern) in project.song.iter().enumerate() {
-            self.send(Command::SetSongSlot {
+        self.send(Command::SetSongLen(project.bars() as u16));
+        for index in 0..project.bars() {
+            self.send(Command::SetSongBar {
                 index: index as u16,
-                pattern: *pattern,
+                patterns: project.bar_mask(index),
             });
         }
         self.send(Command::SetActivePattern(
@@ -269,17 +273,28 @@ impl AppState {
     }
 
     /// Tell the audio thread the song again, from the top. Cheap: a song is a few hundred
-    /// slots at most, and it means the front end never has to describe an edit, only the
+    /// bars at most, and it means the front end never has to describe an edit, only the
     /// result.
     pub fn push_song(&self) {
         let project = self.project.lock().unwrap();
-        self.send(Command::SetSongLen(project.song.len() as u16));
-        for (index, pattern) in project.song.iter().enumerate() {
-            self.send(Command::SetSongSlot {
+        self.send(Command::SetSongLen(project.bars() as u16));
+        for index in 0..project.bars() {
+            self.send(Command::SetSongBar {
                 index: index as u16,
-                pattern: *pattern,
+                patterns: project.bar_mask(index),
             });
         }
+    }
+
+    /// One bar of the song, plus how long the song is now. What painting a bar sends, so a
+    /// drag across the song is two commands a bar rather than the whole song each time.
+    pub fn push_song_bar(&self, index: usize) {
+        let project = self.project.lock().unwrap();
+        self.send(Command::SetSongBar {
+            index: index as u16,
+            patterns: project.bar_mask(index),
+        });
+        self.send(Command::SetSongLen(project.bars() as u16));
     }
 
     // --- the project folder ------------------------------------------------

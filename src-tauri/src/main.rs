@@ -3,6 +3,7 @@
 
 mod audio;
 mod commands;
+mod menu;
 mod state;
 
 use std::sync::Arc;
@@ -24,6 +25,11 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
+        .setup(|app| {
+            menu::install(app.handle())?;
+            Ok(())
+        })
+        .on_menu_event(menu::handle)
         .on_window_event(move |_window, event| {
             // The saver writes every second or so anyway; this is so closing the window
             // never loses the last thing you did.
@@ -48,17 +54,13 @@ fn main() {
             commands::set_pattern_steps,
             commands::open_pattern,
             commands::close_pattern,
-            commands::set_song_slot,
-            commands::clear_song_slot,
+            commands::set_song_bar,
+            commands::remove_song_bar,
             commands::seek_song,
             commands::set_bpm,
-            commands::set_master_gain,
             commands::set_playing,
             commands::panic_stop,
             commands::playhead,
-            commands::save_project,
-            commands::save_project_as,
-            commands::open_project,
         ])
         .run(tauri::generate_context!())
         .expect("Weetbeats could not start");

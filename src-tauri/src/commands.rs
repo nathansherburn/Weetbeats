@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Serialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use weetbeats_engine::folder;
 use weetbeats_engine::sample::{is_audio_file, AUDIO_EXTENSIONS};
@@ -18,15 +18,13 @@ use weetbeats_engine::{
     Command, EngineNote, Note, Pattern, Project, SampleRef, Track, DEFAULT_PITCH,
 };
 
-use crate::audio::AudioInfo;
 use crate::state::AppState;
 
 /// What the front end gets when it starts up, and again when a project is opened.
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Startup {
     pub project: Project,
-    pub audio: AudioInfo,
     /// The project's name, which is its folder's.
     pub name: String,
     /// Where it lives, for showing on hover.
@@ -39,7 +37,7 @@ pub struct Startup {
 }
 
 /// The shape of one track's sample, for drawing.
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Waveform {
     pub track: u16,
@@ -69,7 +67,7 @@ pub struct Added {
 #[serde(rename_all = "camelCase")]
 pub struct Arrangement {
     pub patterns: Vec<Pattern>,
-    pub song: Vec<u16>,
+    pub song: Vec<Vec<u16>>,
 }
 
 /// Polled every frame while playing. Kept small on purpose.
@@ -79,9 +77,9 @@ pub struct PlayheadPayload {
     pub playing: bool,
     pub step: u32,
     pub progress: f32,
-    /// Which pattern is sounding, and where the song is up to.
-    pub pattern: u32,
-    pub slot: u32,
+    /// Which patterns are sounding, one bit each, and which bar of the song is playing.
+    pub patterns: u32,
+    pub bar: u32,
     pub voices: u32,
     pub peak: f32,
     pub stream_errors: u32,
@@ -113,7 +111,6 @@ fn startup_payload(state: &AppState, message: Option<String>) -> Startup {
     };
     Startup {
         project: state.project.lock().unwrap().clone(),
-        audio: state.audio.clone(),
         name: state.name(),
         folder: dir.display().to_string(),
         waveforms,
@@ -513,37 +510,37 @@ pub fn close_pattern(state: State<'_, Arc<AppState>>) {
 
 // --- the song ---------------------------------------------------------------
 
-/// Put a pattern in a song slot. An index past the end appends, which is how the song
-/// grows. Returns the song as it now is.
+/// Put a pattern in a bar of the song, or take it out. Returns whether it is in there now,
+/// which the front end checks against what it drew.
+///
+/// One call a bar, so painting across the song is the same shape of thing as painting across
+/// a pattern: press, drag, and every bar the pointer crosses gets one of these.
 #[tauri::command]
-pub fn set_song_slot(index: u32, pattern: u16, state: State<'_, Arc<AppState>>) -> Vec<u16> {
-    state
+pub fn set_song_bar(bar: u32, pattern: u16, on: bool, state: State<'_, Arc<AppState>>) -> bool {
+    let now_on = state
         .project
         .lock()
         .unwrap()
-        .set_song_slot(index as usize, pattern);
+        .set_bar_pattern(bar as usize, pattern, on);
+    state.push_song_bar(bar as usize);
+    state.touch();
+    now_on
+}
+
+/// Take a whole bar out of the song, so everything after it moves up one.
+#[tauri::command]
+pub fn remove_song_bar(bar: u32, state: State<'_, Arc<AppState>>) -> Vec<Vec<u16>> {
+    state.project.lock().unwrap().remove_bar(bar as usize);
+    // Everything shifted, so the whole song goes across rather than one bar.
     state.push_song();
     state.touch();
     state.project.lock().unwrap().song.clone()
 }
 
-/// Take a slot out of the song, closing the gap.
+/// Drag the scrubber: play the song from this bar.
 #[tauri::command]
-pub fn clear_song_slot(index: u32, state: State<'_, Arc<AppState>>) -> Vec<u16> {
-    state
-        .project
-        .lock()
-        .unwrap()
-        .clear_song_slot(index as usize);
-    state.push_song();
-    state.touch();
-    state.project.lock().unwrap().song.clone()
-}
-
-/// Drag the scrubber: play the song from this slot.
-#[tauri::command]
-pub fn seek_song(index: u32, state: State<'_, Arc<AppState>>) {
-    state.send(Command::SeekSong(index.min(u16::MAX as u32) as u16));
+pub fn seek_song(bar: u32, state: State<'_, Arc<AppState>>) {
+    state.send(Command::SeekSong(bar.min(u16::MAX as u32) as u16));
 }
 
 // --- transport --------------------------------------------------------------
@@ -557,15 +554,6 @@ pub fn set_bpm(bpm: f32, state: State<'_, Arc<AppState>>) -> f32 {
     drop(project);
     state.touch();
     bpm
-}
-
-#[tauri::command]
-pub fn set_master_gain(gain: f32, state: State<'_, Arc<AppState>>) {
-    let mut project = state.project.lock().unwrap();
-    project.master_gain = gain.clamp(0.0, 1.5);
-    state.send(Command::SetMasterGain(project.master_gain));
-    drop(project);
-    state.touch();
 }
 
 #[tauri::command]
@@ -588,8 +576,8 @@ pub fn playhead(state: State<'_, Arc<AppState>>) -> PlayheadPayload {
         playing: playhead.playing,
         step: playhead.step,
         progress: playhead.progress,
-        pattern: playhead.pattern,
-        slot: playhead.song_slot,
+        patterns: playhead.patterns,
+        bar: playhead.bar,
         voices: playhead.active_voices,
         peak: playhead.peak,
         stream_errors: state.stream_errors(),
@@ -598,41 +586,55 @@ pub fn playhead(state: State<'_, Arc<AppState>>) -> PlayheadPayload {
 }
 
 // --- the project folder -----------------------------------------------------
+//
+// None of this is a command any more: opening and saving live in the File menu, which is a
+// native menu built in `main.rs`. A menu event has no reply to return, so these tell the
+// front end what happened by emitting an event at it instead.
+
+/// A project the front end should draw from scratch: opened, or saved somewhere new.
+pub const PROJECT_EVENT: &str = "project";
+/// The project has been written out, and here is what it is called.
+pub const SAVED_EVENT: &str = "saved";
+/// Something went wrong, in words fit for the status line.
+pub const TROUBLE_EVENT: &str = "trouble";
+
+fn app_state(app: &AppHandle) -> Arc<AppState> {
+    Arc::clone(app.state::<Arc<AppState>>().inner())
+}
+
+fn grumble(app: &AppHandle, trouble: String) {
+    let _ = app.emit(TROUBLE_EVENT, trouble);
+}
 
 /// Write the project out now. It is written every second or so anyway; this is for the
 /// person who wants to press the button.
-#[tauri::command]
-pub fn save_project(state: State<'_, Arc<AppState>>) -> Result<String, String> {
-    state.save_now()?;
-    Ok(state.name())
+pub fn save(app: &AppHandle) {
+    let state = app_state(app);
+    match state.save_now() {
+        Ok(()) => {
+            let _ = app.emit(SAVED_EVENT, state.name());
+        }
+        Err(e) => grumble(app, e),
+    }
 }
 
 /// Copy the project, samples and all, to a folder of the user's choosing, and carry on
 /// working in the new one.
-#[tauri::command]
-pub async fn save_project_as(
-    app: AppHandle,
-    state: State<'_, Arc<AppState>>,
-) -> Result<Option<Startup>, String> {
-    let state = Arc::clone(state.inner());
+pub fn save_as(app: &AppHandle) {
+    let state = app_state(app);
     let name = format!("{}.{}", state.name(), folder::PROJECT_EXTENSION);
+    let picked = app
+        .dialog()
+        .file()
+        .set_title("Save the project")
+        .set_file_name(name)
+        .blocking_save_file();
 
-    let picked = tauri::async_runtime::spawn_blocking(move || {
-        app.dialog()
-            .file()
-            .set_title("Save the project")
-            .set_file_name(name)
-            .blocking_save_file()
-    })
-    .await
-    .map_err(|e| format!("the save dialog did not open: {e}"))?;
-
-    let Some(picked) = picked else {
-        return Ok(None);
+    let Some(picked) = picked else { return };
+    let mut target = match picked.into_path() {
+        Ok(path) => path,
+        Err(e) => return grumble(app, format!("that is not a folder we can save to: {e}")),
     };
-    let mut target = picked
-        .into_path()
-        .map_err(|e| format!("that is not a folder we can save to: {e}"))?;
     if target.extension().and_then(|e| e.to_str()) != Some(folder::PROJECT_EXTENSION) {
         // A project is a folder with a name that says what it is.
         let name = folder::name_of(&target);
@@ -640,65 +642,60 @@ pub async fn save_project_as(
     }
 
     let from = state.dir();
-    let state = Arc::clone(&state);
-    tauri::async_runtime::spawn_blocking(move || {
-        state.save_now()?;
-        folder::copy_folder(&from, &target)?;
-        state.set_dir(target);
-        state.save_now()?;
-        Ok(Some(startup_payload(&state, None)))
-    })
-    .await
-    .map_err(|e| format!("could not save the project: {e}"))?
+    if let Err(e) = state
+        .save_now()
+        .and_then(|()| folder::copy_folder(&from, &target))
+    {
+        return grumble(app, e);
+    }
+    state.set_dir(target);
+    if let Err(e) = state.save_now() {
+        return grumble(app, e);
+    }
+    let _ = app.emit(PROJECT_EVENT, startup_payload(&state, None));
 }
 
 /// Open another project folder. The one we are in is written out first, so nothing is lost
 /// by wandering off.
-#[tauri::command]
-pub async fn open_project(
-    app: AppHandle,
-    state: State<'_, Arc<AppState>>,
-) -> Result<Option<Startup>, String> {
-    let state = Arc::clone(state.inner());
-    let start_dir = state.dir().parent().map(|p| p.to_path_buf());
-
-    let picked = tauri::async_runtime::spawn_blocking(move || {
-        let mut dialog = app.dialog().file().set_title("Open a project");
-        if let Some(dir) = start_dir {
-            dialog = dialog.set_directory(dir);
-        }
-        dialog.blocking_pick_folder()
-    })
-    .await
-    .map_err(|e| format!("the picker did not open: {e}"))?;
-
-    let Some(picked) = picked else {
-        return Ok(None);
+pub fn open(app: &AppHandle) {
+    let state = app_state(app);
+    let mut dialog = app.dialog().file().set_title("Open a project");
+    if let Some(above) = state.dir().parent() {
+        dialog = dialog.set_directory(above);
+    }
+    let Some(picked) = dialog.blocking_pick_folder() else {
+        return;
     };
-    let target = picked
-        .into_path()
-        .map_err(|e| format!("that is not a folder we can open: {e}"))?;
-
-    tauri::async_runtime::spawn_blocking(move || {
-        if !folder::is_project(&target) {
-            return Err(format!(
+    let target = match picked.into_path() {
+        Ok(path) => path,
+        Err(e) => return grumble(app, format!("that is not a folder we can open: {e}")),
+    };
+    if !folder::is_project(&target) {
+        return grumble(
+            app,
+            format!(
                 "{} is not a Weetbeats project — look for a folder ending in .{}",
                 folder::name_of(&target),
                 folder::PROJECT_EXTENSION
-            ));
-        }
-        // Write what we have out before reading anything, so opening the folder we are
-        // already in cannot swap live work for an older copy of itself.
-        state.save_now()?;
-        let opened = folder::load(&target)?;
-        state.send(Command::StopAll);
-        *state.project.lock().unwrap() = opened;
-        state.set_dir(target);
-        state.tidy_samples();
-        state.push_project();
-        let message = state.complaint.lock().unwrap().take();
-        Ok(Some(startup_payload(&state, message)))
-    })
-    .await
-    .map_err(|e| format!("could not open the project: {e}"))?
+            ),
+        );
+    }
+
+    // Write what we have out before reading anything, so opening the folder we are already
+    // in cannot swap live work for an older copy of itself.
+    if let Err(e) = state.save_now() {
+        return grumble(app, e);
+    }
+    let opened = match folder::load(&target) {
+        Ok(project) => project,
+        Err(e) => return grumble(app, e),
+    };
+
+    state.send(Command::StopAll);
+    *state.project.lock().unwrap() = opened;
+    state.set_dir(target);
+    state.tidy_samples();
+    state.push_project();
+    let message = state.complaint.lock().unwrap().take();
+    let _ = app.emit(PROJECT_EVENT, startup_payload(&state, message));
 }

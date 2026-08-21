@@ -1,18 +1,20 @@
 /*
  * Weetbeats front end.
  *
- * Two views, one workspace. The song is patterns down the left and a scrubber across the
- * top, where one slot holds one whole pattern, however long that pattern is. Click a
- * pattern and the workspace becomes the step grid for it; click it again, or hit escape,
- * and you are back at the song. The patterns panel never goes away, because it is how you
- * get from one pattern to the next.
+ * Two views, one workspace. The song sits underneath: bars across the top, patterns down
+ * the left, and any number of patterns in the same bar so a kick pattern, a hat pattern and
+ * a snare pattern add up to a beat. A pattern opens on top of the song like a window, with
+ * its step grid and a close button; click the pattern again, or hit escape, and you are back
+ * at the song. The patterns panel never goes away, because it is how you get from one
+ * pattern to the next.
  *
  * It holds a copy of the project so a click can light a box up straight away, but Rust owns
  * it: every change goes there too, and the audio thread hears about it from Rust.
  *
- * Instruments come in through the system file picker, which Rust opens. There is no file
- * browser in here, and no HTML5 drag and drop: the webview's own drag handler swallows
- * those events before the page sees them, so dropping a file is a native event instead.
+ * Instruments come in through the system file picker, and opening and saving are in the File
+ * menu, both of which Rust drives. There is no file browser in here, and no HTML5 drag and
+ * drop: the webview's own drag handler swallows those events before the page sees them, so
+ * dropping a file is a native event instead.
  *
  * The grids are canvases rather than a box per step. Sixteen steps by a few tracks would
  * survive as elements, but the piano roll in stage 4 will not, and this is the same drawing
@@ -25,38 +27,42 @@ const { listen } = window.__TAURI__.event;
 const CELL = 42; // width of one step in the pattern editor
 const GAP = 4; // gap between steps
 const ROW = 46; // must match --row in the stylesheet
+const HEADERS = 296; // the instrument column: must match --headers
 const LANE = 34; // one pattern's row, in the panel and in the song: must match --lane
 const HEAD = 30; // the strip along the top of both views: must match --head
-const STEPS_PER_BAR = 4; // sixteenth notes, so four steps to a beat
-const DEFAULT_STEPS = 16;
+const STEPS_PER_BEAT = 4; // sixteenth notes
+const STEPS_PER_BAR = 16; // a bar of the song, and the length of a new pattern
 const MAX_STEPS = 64; // as far as the engine will play
 
-// The song is drawn in real time, so a longer pattern is a longer block. Small enough that
-// a whole song fits on screen, big enough to read a name in.
+// The song is drawn in real time, so a bar is always the same width and a pattern painted
+// across two bars is twice as wide as one painted across one.
 const SONG_STEP = 4;
-const MIN_SLOT = 34;
+const BAR_PX = STEPS_PER_BAR * SONG_STEP;
+
+// Pixels of drag per step of a number field.
+const DRAG_PIXELS = 3;
 
 const state = {
   bpm: 120,
   tracks: [], // { id, name, gain, muted, soloed, peaks }
   patterns: [], // { id, name, steps, notes: Map<trackId, Set<step>> }
-  song: [], // pattern ids, in the order they play
+  song: [], // one entry per bar: the pattern ids playing in it
   open: null, // the pattern the editor has, or null for the song view
   playing: false,
   step: 0,
   progress: 0,
-  slot: 0, // where the song is up to
-  sounding: null, // the pattern making noise right now
-  audio: null,
+  bar: 0, // which bar of the song is playing
+  sounding: 0, // patterns making noise right now, one bit each
   needsDraw: true,
 };
 
 const el = {};
 for (const id of [
-  "play", "bpm", "bpmValue", "master", "meterFill", "status", "projectName", "openProject",
-  "saveAs", "addPattern", "patternList", "song", "songScroll", "scrubber", "lanes",
-  "songHint", "editor", "add", "addBig", "steps", "fewerSteps", "moreSteps",
-  "trackHeaders", "grid", "ruler", "empty",
+  "play", "bpm", "meterFill", "status", "projectName", "songMode", "addPattern",
+  "patternList", "song",
+  "songScroll", "scrubber", "lanes", "songHint", "editor", "editorScroll", "closePattern",
+  "add", "addBig", "steps", "fewerSteps", "moreSteps", "trackHeaders", "grid", "ruler",
+  "empty",
 ]) {
   el[id] = document.getElementById(id);
 }
@@ -72,6 +78,12 @@ const PALETTE = {
   lit: colour("--lit", "#ffd75e"),
 };
 
+/*
+ * The webview's own right click menu offers a page reload and nothing else of use, and it
+ * gets in the way of right clicking to rub a box out.
+ */
+window.addEventListener("contextmenu", (e) => e.preventDefault());
+
 // --- start up -------------------------------------------------------------
 
 async function boot() {
@@ -85,7 +97,6 @@ async function boot() {
  */
 function applyStartup(startup) {
   const project = startup.project;
-  state.audio = startup.audio;
   state.bpm = project.bpm;
   const waveforms = new Map((startup.waveforms ?? []).map((w) => [w.track, w.peaks]));
   state.tracks = project.tracks.map((track) => ({
@@ -93,11 +104,9 @@ function applyStartup(startup) {
     peaks: waveforms.get(track.id) ?? [],
   }));
   state.patterns = project.patterns.map(readPattern);
-  state.song = project.song.slice();
+  state.song = project.song.map((bar) => bar.slice());
 
   el.bpm.value = String(Math.round(state.bpm));
-  el.bpmValue.textContent = String(Math.round(state.bpm));
-  el.master.value = String(Math.round(project.masterGain * 100));
   el.projectName.textContent = startup.name;
   el.projectName.title = startup.folder;
 
@@ -132,7 +141,7 @@ function openPatternNow() {
 }
 
 function stepsOf(id) {
-  return patternById(id)?.steps ?? DEFAULT_STEPS;
+  return patternById(id)?.steps ?? STEPS_PER_BAR;
 }
 
 /* The steps a track has ticked in a pattern, made on the spot if it has none yet. */
@@ -175,6 +184,13 @@ function togglePattern(id) {
   }
 }
 
+el.closePattern.addEventListener("click", closePattern);
+
+/* The panel's heading is a way back to the song, for when no pattern is open to close. */
+el.songMode.addEventListener("click", () => {
+  if (state.open !== null) closePattern();
+});
+
 // --- the patterns panel ---------------------------------------------------
 
 function drawPatternPanel() {
@@ -183,8 +199,6 @@ function drawPatternPanel() {
       const row = document.createElement("div");
       row.className = "prow";
       row.dataset.id = String(pattern.id);
-      row.classList.toggle("open", state.open === pattern.id);
-      row.classList.toggle("playing", state.playing && state.sounding === pattern.id);
 
       const name = document.createElement("span");
       name.className = "pname";
@@ -205,7 +219,8 @@ function drawPatternPanel() {
         e.stopPropagation();
         rearrange("duplicate_pattern", { id: pattern.id }, (after) => {
           // The copy is the one after the original, and it is what you want to work on.
-          const copied = after.patterns[after.patterns.findIndex((p) => p.id === pattern.id) + 1];
+          const at = after.patterns.findIndex((p) => p.id === pattern.id);
+          const copied = after.patterns[at + 1];
           if (copied) openPattern(copied.id);
         });
       });
@@ -234,20 +249,27 @@ function drawPatternPanel() {
       return row;
     }),
   );
+  markPatternRows();
   syncScroll(el.patternList, el.songScroll);
 }
 
 /*
- * Which pattern is open and which one is making noise, without rebuilding the rows. The
- * pattern that is sounding changes every slot while a song plays, and replacing the panel
- * a second at a time would throw away a rename halfway through being typed.
+ * Which pattern is open and which ones are making noise, without rebuilding the rows. What
+ * is sounding changes every bar while a song plays, and replacing the panel a second at a
+ * time would throw away a rename halfway through being typed.
  */
 function markPatternRows() {
+  el.songMode.classList.toggle("on", state.open === null);
   for (const row of el.patternList.children) {
     const id = Number(row.dataset.id);
     row.classList.toggle("open", state.open === id);
-    row.classList.toggle("playing", state.playing && state.sounding === id);
+    row.classList.toggle("playing", state.playing && isSounding(id));
   }
+}
+
+/* The engine reports what is sounding as one bit per pattern. */
+function isSounding(id) {
+  return ((state.sounding >>> id) & 1) === 1;
 }
 
 /* Double click a name to change it. Enter or clicking away keeps it, escape drops it. */
@@ -271,12 +293,12 @@ function startRename(row, pattern) {
       pattern.name = await invoke("rename_pattern", { id: pattern.id, name: input.value });
     }
     drawPatternPanel();
-    drawSong();
+    state.needsDraw = true;
   };
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter") finish(true);
     if (e.key === "Escape") {
-      // Do not let escape out of here: in the pattern editor it closes the pattern.
+      // Do not let escape out of here: everywhere else it closes the pattern.
       e.stopPropagation();
       finish(false);
     }
@@ -300,7 +322,7 @@ async function rearrange(command, args, then) {
   try {
     const after = await invoke(command, args);
     state.patterns = after.patterns.map(readPattern);
-    state.song = after.song.slice();
+    state.song = after.song.map((bar) => bar.slice());
     if (then) then(after);
     if (state.open !== null && patternById(state.open) === null) closePattern();
     drawPatternPanel();
@@ -323,12 +345,91 @@ function syncScroll(from, to) {
 el.patternList.addEventListener("scroll", () => syncScroll(el.patternList, el.songScroll));
 el.songScroll.addEventListener("scroll", () => syncScroll(el.songScroll, el.patternList));
 
+// --- numbers you can drag, scroll or type ---------------------------------
+
+/*
+ * A field for a number, worked the way a number wants to be worked: drag it up and down,
+ * scroll it, or click it and type. A slider cannot be typed into and takes four times the
+ * room; a stepper is a lot of clicking to get from 120 to 174.
+ */
+function numberField(input, { min, max, onChange }) {
+  const read = () => {
+    const value = Number(input.value);
+    return Number.isFinite(value) ? value : min;
+  };
+  const commit = (value) => {
+    const settled = Math.max(min, Math.min(max, Math.round(value)));
+    input.value = String(settled);
+    onChange(settled);
+  };
+
+  let dragging = false;
+  let startY = 0;
+  let startValue = 0;
+  let moved = 0;
+
+  input.addEventListener("pointerdown", (e) => {
+    // Already typing in it, so a click is a click.
+    if (document.activeElement === input) return;
+    // No caret, no text selection, no focus: this press is a drag until proven otherwise.
+    e.preventDefault();
+    dragging = true;
+    moved = 0;
+    startY = e.clientY;
+    startValue = read();
+    input.setPointerCapture(e.pointerId);
+  });
+
+  input.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    const dy = startY - e.clientY;
+    moved = Math.max(moved, Math.abs(dy));
+    commit(startValue + Math.round(dy / DRAG_PIXELS));
+  });
+
+  const release = () => {
+    if (!dragging) return;
+    dragging = false;
+    // A press that went nowhere is a click, and a click means "let me type".
+    if (moved < DRAG_PIXELS) {
+      input.focus();
+      input.select();
+    }
+  };
+  input.addEventListener("pointerup", release);
+  input.addEventListener("pointercancel", release);
+
+  input.addEventListener(
+    "wheel",
+    (e) => {
+      e.preventDefault();
+      commit(read() - Math.sign(e.deltaY));
+    },
+    { passive: false },
+  );
+
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") input.blur();
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      commit(read() + 1);
+    }
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      commit(read() - 1);
+    }
+  });
+  input.addEventListener("change", () => commit(read()));
+  input.addEventListener("blur", () => commit(read()));
+}
+
 // --- pattern length -------------------------------------------------------
 
 async function setSteps(steps) {
   const pattern = openPatternNow();
   if (!pattern) return;
   const asked = Math.max(1, Math.min(MAX_STEPS, Math.round(steps) || 1));
+  if (asked === pattern.steps) return;
   const actual = await invoke("set_pattern_steps", { id: pattern.id, steps: asked });
   pattern.steps = actual;
   // Rust drops the notes that fall off the end, so drop them here too rather than keeping
@@ -343,10 +444,9 @@ async function setSteps(steps) {
   resize();
 }
 
-el.steps.addEventListener("change", () => setSteps(Number(el.steps.value)));
-// The buttons move in bars, because that is how music is counted.
-el.fewerSteps.addEventListener("click", () => setSteps(stepsOf(state.open) - STEPS_PER_BAR));
-el.moreSteps.addEventListener("click", () => setSteps(stepsOf(state.open) + STEPS_PER_BAR));
+numberField(el.steps, { min: 1, max: MAX_STEPS, onChange: setSteps });
+el.fewerSteps.addEventListener("click", () => setSteps(stepsOf(state.open) - 1));
+el.moreSteps.addEventListener("click", () => setSteps(stepsOf(state.open) + 1));
 
 // --- instruments ----------------------------------------------------------
 
@@ -500,6 +600,16 @@ listen("tauri://drag-drop", (event) => {
   }
 });
 
+// --- what the File menu did -------------------------------------------------
+
+/*
+ * Opening and saving are in the menu bar, which is Rust's. A menu item has nothing to return
+ * to, so Rust tells us what happened instead.
+ */
+listen("project", (event) => applyStartup(event.payload));
+listen("saved", (event) => showSaved(event.payload));
+listen("trouble", (event) => showError(event.payload));
+
 // --- sizing the canvases --------------------------------------------------
 
 function size(canvas, w, h) {
@@ -524,14 +634,34 @@ function gridHeight() {
   return Math.max(ROW, state.tracks.length * ROW);
 }
 
+/*
+ * Bars to draw: the song, one spare on the end, and enough to fill the window either way.
+ * Empty bars are as good a place to put a pattern as any, so they are all drawn and all
+ * clickable.
+ */
+function songBars() {
+  const room = Math.ceil(el.songScroll.clientWidth / BAR_PX);
+  return Math.max(state.song.length + 1, room);
+}
+
 function resize() {
   size(el.grid, gridWidth(), gridHeight());
   size(el.ruler, gridWidth(), HEAD - 1);
-  size(el.lanes, songWidth(), Math.max(LANE, state.patterns.length * LANE));
-  size(el.scrubber, songWidth(), HEAD - 1);
+  size(el.lanes, songBars() * BAR_PX, Math.max(LANE, state.patterns.length * LANE));
+  size(el.scrubber, songBars() * BAR_PX, HEAD - 1);
   el.songHint.classList.toggle("hidden", state.song.length > 0);
   state.needsDraw = true;
   drawRuler();
+}
+
+/* The song got longer or shorter, so only resize when it actually changed shape. */
+function songChanged() {
+  if (drawnWidth(el.lanes) !== songBars() * BAR_PX) {
+    resize();
+  } else {
+    el.songHint.classList.toggle("hidden", state.song.length > 0);
+    state.needsDraw = true;
+  }
 }
 
 window.addEventListener("resize", resize);
@@ -545,10 +675,10 @@ function drawRuler() {
   ctx.font = "10px ui-sans-serif, system-ui, sans-serif";
   ctx.textBaseline = "middle";
   for (let step = 0; step < steps; step++) {
-    const onBeat = step % STEPS_PER_BAR === 0;
+    const onBeat = step % STEPS_PER_BEAT === 0;
     ctx.fillStyle = onBeat ? PALETTE.dim : PALETTE.line;
     if (onBeat) {
-      ctx.fillText(String(step / STEPS_PER_BAR + 1), step * CELL + GAP + 2, 15);
+      ctx.fillText(String(step / STEPS_PER_BEAT + 1), step * CELL + GAP + 2, 15);
     } else {
       ctx.fillRect(step * CELL + GAP, 14, 3, 1);
     }
@@ -579,7 +709,7 @@ function drawGrid() {
       const w = CELL - GAP * 2;
       const h = ROW - GAP * 2 - 1;
       const on = steps ? steps.has(step) : false;
-      const onBeat = step % STEPS_PER_BAR === 0;
+      const onBeat = step % STEPS_PER_BEAT === 0;
 
       if (on) {
         const live = state.playing && state.step === step;
@@ -643,12 +773,18 @@ function paint(cell, on) {
   });
 }
 
+/* True when a press is the right button, which always rubs out rather than draws. */
+function erasing(event) {
+  return event.button === 2 || (event.buttons & 2) === 2;
+}
+
 el.grid.addEventListener("pointerdown", (e) => {
   const cell = cellAt(e);
   if (!cell) return;
   // Drag across boxes to paint, like FL Studio: what the first box becomes is what the
-  // rest become, so a drag never toggles boxes back and forth under your finger.
-  painting = !notesFor(cell.pattern, cell.track).has(cell.step);
+  // rest become, so a drag never toggles boxes back and forth under your finger. The right
+  // button always rubs out, which saves aiming at the box you meant to remove.
+  painting = erasing(e) ? false : !notesFor(cell.pattern, cell.track).has(cell.step);
   el.grid.setPointerCapture(e.pointerId);
   paint(cell, painting);
 });
@@ -666,47 +802,38 @@ el.grid.addEventListener("pointercancel", stopPainting);
 
 // --- the song -------------------------------------------------------------
 
+function barPatterns(bar) {
+  return state.song[bar] ?? [];
+}
+
+function barHas(bar, id) {
+  return barPatterns(bar).includes(id);
+}
+
 /*
- * Where every slot starts and how wide it is. A slot is one whole pattern, so its width is
- * that pattern's length: change a pattern's length and its block in the song changes with
- * it. The last one is empty and is how the song gets longer.
+ * Put a pattern in a bar, or take it out, the same way Rust does: bars before it are filled
+ * in as empty so a pattern can be dropped in at bar twelve, and empty bars on the end are
+ * not part of the song.
  */
-function songLayout() {
-  const slots = [];
-  let x = 0;
-  for (const id of state.song) {
-    const w = Math.max(MIN_SLOT, stepsOf(id) * SONG_STEP);
-    slots.push({ x, w, pattern: id });
-    x += w;
+function setBar(bar, id, on) {
+  if (on) {
+    while (state.song.length <= bar) state.song.push([]);
+    if (!state.song[bar].includes(id)) {
+      state.song[bar].push(id);
+      state.song[bar].sort((a, b) => a - b);
+    }
+  } else if (bar < state.song.length) {
+    state.song[bar] = state.song[bar].filter((p) => p !== id);
+    while (state.song.length && state.song[state.song.length - 1].length === 0) {
+      state.song.pop();
+    }
   }
-  slots.push({ x, w: DEFAULT_STEPS * SONG_STEP, pattern: null });
-  return slots;
-}
-
-function songWidth() {
-  const slots = songLayout();
-  const last = slots[slots.length - 1];
-  return last.x + last.w;
-}
-
-function slotAt(clientX, canvas) {
-  const rect = canvas.getBoundingClientRect();
-  const x = clientX - rect.left;
-  const slots = songLayout();
-  for (let i = 0; i < slots.length; i++) {
-    if (x >= slots[i].x && x < slots[i].x + slots[i].w) return i;
-  }
-  return null;
 }
 
 /* Where the playhead is across the song, in pixels. */
 function songPlayheadX() {
-  const slots = songLayout();
-  const slot = slots[Math.min(state.slot, slots.length - 1)];
-  const pattern = patternById(state.sounding);
-  if (!slot || !pattern) return null;
-  const through = (state.step + state.progress) / Math.max(1, pattern.steps);
-  return slot.x + slot.w * Math.min(1, through);
+  const through = (state.step + state.progress) / STEPS_PER_BAR;
+  return (state.bar + Math.min(1, through)) * BAR_PX;
 }
 
 function drawSong() {
@@ -722,28 +849,27 @@ function drawScrubber() {
   ctx.font = "10px ui-sans-serif, system-ui, sans-serif";
   ctx.textBaseline = "middle";
 
-  const slots = songLayout();
-  for (let i = 0; i < slots.length; i++) {
-    const slot = slots[i];
+  const bars = songBars();
+  for (let bar = 0; bar < bars; bar++) {
+    // Every fourth bar gets a brighter mark: that is where a phrase usually turns over.
+    const phrase = bar % 4 === 0;
     ctx.fillStyle = PALETTE.line;
-    ctx.fillRect(slot.x, 8, 1, height - 8);
-    if (slot.pattern !== null) {
-      ctx.fillStyle = i === state.slot && state.playing ? PALETTE.lit : PALETTE.dim;
-      ctx.fillText(String(i + 1), slot.x + 5, 15);
+    ctx.fillRect(bar * BAR_PX, phrase ? 6 : 10, 1, height - 6);
+    ctx.fillStyle = state.playing && bar === state.bar ? PALETTE.lit : PALETTE.dim;
+    if (phrase || bars < 40) {
+      ctx.fillText(String(bar + 1), bar * BAR_PX + 5, 15);
     }
   }
 
   if (state.playing) {
     const x = songPlayheadX();
-    if (x !== null) {
-      ctx.fillStyle = PALETTE.lit;
-      ctx.beginPath();
-      ctx.moveTo(x - 4, 2);
-      ctx.lineTo(x + 4, 2);
-      ctx.lineTo(x, 9);
-      ctx.closePath();
-      ctx.fill();
-    }
+    ctx.fillStyle = PALETTE.lit;
+    ctx.beginPath();
+    ctx.moveTo(x - 4, 2);
+    ctx.lineTo(x + 4, 2);
+    ctx.lineTo(x, 9);
+    ctx.closePath();
+    ctx.fill();
   }
 }
 
@@ -751,170 +877,194 @@ function drawLanes() {
   const ctx = el.lanes.getContext("2d");
   const width = drawnWidth(el.lanes);
   const height = Math.max(LANE, state.patterns.length * LANE);
+  const bars = songBars();
   ctx.clearRect(0, 0, width, height);
   ctx.font = "11px ui-sans-serif, system-ui, sans-serif";
   ctx.textBaseline = "middle";
 
-  const slots = songLayout();
   for (let row = 0; row < state.patterns.length; row++) {
     const pattern = state.patterns[row];
     const y = row * LANE;
 
-    for (let i = 0; i < slots.length; i++) {
-      const slot = slots[i];
-      const here = slot.pattern === pattern.id;
-      const x = slot.x + 2;
-      const w = slot.w - 4;
-      const h = LANE - 7;
+    // The empty grid first, so a bar you could paint into looks like one.
+    for (let bar = 0; bar < bars; bar++) {
+      if (barHas(bar, pattern.id)) continue;
+      ctx.fillStyle = bar % 4 === 0 ? "#221e2c" : "#1e1a27";
+      roundRect(ctx, bar * BAR_PX + 2, y + 3, BAR_PX - 4, LANE - 7, 5);
+      ctx.fill();
+    }
 
-      if (here) {
-        const live = state.playing && state.slot === i;
-        ctx.fillStyle = live ? PALETTE.lit : PALETTE.accent;
-      } else {
-        // The spare slot at the end reads as spare, not as an empty one you can fill in.
-        ctx.fillStyle = slot.pattern === null ? "#1c1825" : "#211d2a";
-      }
+    // Then a block per run of bars. A run is one block rather than one a bar because the
+    // pattern plays straight through it: that is what makes a pattern longer than a bar
+    // work, and the ticks inside show where it comes round again.
+    for (let bar = 0; bar < bars; bar++) {
+      if (!barHas(bar, pattern.id)) continue;
+      let end = bar;
+      while (end + 1 < bars && barHas(end + 1, pattern.id)) end += 1;
+
+      const x = bar * BAR_PX + 2;
+      const w = (end - bar + 1) * BAR_PX - 4;
+      const h = LANE - 7;
+      const live = state.playing && isSounding(pattern.id) && state.bar >= bar && state.bar <= end;
+      ctx.fillStyle = live ? PALETTE.lit : PALETTE.accent;
       roundRect(ctx, x, y + 3, w, h, 5);
       ctx.fill();
 
-      if (here && w > 26) {
-        ctx.save();
-        roundRect(ctx, x, y + 3, w, h, 5);
-        ctx.clip();
+      const room = (end - bar + 1) * STEPS_PER_BAR;
+      ctx.save();
+      roundRect(ctx, x, y + 3, w, h, 5);
+      ctx.clip();
+      // Where the pattern comes round again inside the run.
+      ctx.fillStyle = "rgba(0,0,0,0.22)";
+      for (let step = pattern.steps; step < room; step += pattern.steps) {
+        ctx.fillRect(bar * BAR_PX + step * SONG_STEP, y + 3, 1, h);
+      }
+      // A pattern with more in it than the run has room for is cut off at the end, and the
+      // notch is the only thing that would tell you.
+      if (pattern.steps > room) {
+        ctx.fillStyle = "rgba(0,0,0,0.4)";
+        ctx.fillRect(x + w - 5, y + 3, 5, h);
+      }
+      if (w > 26) {
         ctx.fillStyle = "#22101a";
         ctx.fillText(pattern.name, x + 6, y + LANE / 2 - 1);
-        ctx.restore();
       }
+      ctx.restore();
+      bar = end;
     }
   }
 
   if (state.playing) {
-    const x = songPlayheadX();
-    if (x !== null) {
-      ctx.fillStyle = PALETTE.lit;
-      ctx.fillRect(x, 0, 1, height);
-    }
+    ctx.fillStyle = PALETTE.lit;
+    ctx.fillRect(songPlayheadX(), 0, 1, height);
   }
 }
 
-/* Tick a slot to put a pattern in the song. Tick the same one again to take it out. */
-el.lanes.addEventListener("pointerdown", async (e) => {
-  const index = slotAt(e.clientX, el.lanes);
+/* Paint patterns into the song the same way you paint boxes into a pattern. */
+let painting_song = null;
+
+function songCellAt(event) {
   const rect = el.lanes.getBoundingClientRect();
-  const row = Math.floor((e.clientY - rect.top) / LANE);
-  if (index === null || row < 0 || row >= state.patterns.length) return;
-  const id = state.patterns[row].id;
-  try {
-    state.song = state.song[index] === id
-      ? await invoke("clear_song_slot", { index })
-      : await invoke("set_song_slot", { index, pattern: id });
-    resize();
-  } catch (err) {
-    showError(err);
-  }
+  const bar = Math.floor((event.clientX - rect.left) / BAR_PX);
+  const row = Math.floor((event.clientY - rect.top) / LANE);
+  if (bar < 0 || bar >= songBars()) return null;
+  if (row < 0 || row >= state.patterns.length) return null;
+  return { bar, id: state.patterns[row].id };
+}
+
+function paintSong(cell, on) {
+  if (!cell) return;
+  if (barHas(cell.bar, cell.id) === on) return;
+  setBar(cell.bar, cell.id, on);
+  songChanged();
+  invoke("set_song_bar", { bar: cell.bar, pattern: cell.id, on }).then((actual) => {
+    if (actual !== on) {
+      setBar(cell.bar, cell.id, actual);
+      songChanged();
+    }
+  });
+}
+
+el.lanes.addEventListener("pointerdown", (e) => {
+  const cell = songCellAt(e);
+  if (!cell) return;
+  painting_song = erasing(e) ? false : !barHas(cell.bar, cell.id);
+  el.lanes.setPointerCapture(e.pointerId);
+  paintSong(cell, painting_song);
 });
 
-/* Drag along the scrubber to play from a slot. */
-function scrub(e, force) {
+el.lanes.addEventListener("pointermove", (e) => {
+  if (painting_song === null) return;
+  paintSong(songCellAt(e), painting_song);
+});
+
+const stopPaintingSong = () => {
+  painting_song = null;
+};
+el.lanes.addEventListener("pointerup", stopPaintingSong);
+el.lanes.addEventListener("pointercancel", stopPaintingSong);
+
+// --- the scrubber ---------------------------------------------------------
+
+function barAt(event, canvas) {
+  const rect = canvas.getBoundingClientRect();
+  const bar = Math.floor((event.clientX - rect.left) / BAR_PX);
+  return bar >= 0 && bar < songBars() ? bar : null;
+}
+
+/* Drag along the scrubber to play from a bar. */
+function scrub(event, force) {
   if (!state.song.length) return;
-  const index = slotAt(e.clientX, el.scrubber);
-  if (index === null) return;
-  const slot = Math.min(index, state.song.length - 1);
-  // Dragging over the slot it is already in is not worth a seek; pressing on it is, because
+  const bar = barAt(event, el.scrubber);
+  if (bar === null) return;
+  const wanted = Math.min(bar, state.song.length - 1);
+  // Dragging over the bar it is already in is not worth a seek; pressing on it is, because
   // that means "play this from the top".
-  if (slot === state.slot && !force) return;
-  state.slot = slot;
+  if (wanted === state.bar && !force) return;
+  state.bar = wanted;
   state.step = 0;
   state.needsDraw = true;
-  invoke("seek_song", { index: slot });
+  invoke("seek_song", { bar: wanted });
 }
 
 let scrubbing = false;
-el.scrubber.addEventListener("pointerdown", (e) => {
+
+el.scrubber.addEventListener("pointerdown", async (e) => {
+  // The right button takes the bar out of the song, closing the gap it leaves.
+  if (erasing(e)) {
+    const bar = barAt(e, el.scrubber);
+    if (bar === null || bar >= state.song.length) return;
+    try {
+      state.song = (await invoke("remove_song_bar", { bar })).map((one) => one.slice());
+      songChanged();
+    } catch (err) {
+      showError(err);
+    }
+    return;
+  }
   scrubbing = true;
   el.scrubber.setPointerCapture(e.pointerId);
   scrub(e, true);
 });
+
 el.scrubber.addEventListener("pointermove", (e) => {
-  if (scrubbing) scrub(e);
+  if (scrubbing) scrub(e, false);
 });
+
 const stopScrubbing = () => {
   scrubbing = false;
 };
 el.scrubber.addEventListener("pointerup", stopScrubbing);
 el.scrubber.addEventListener("pointercancel", stopScrubbing);
 
-// --- the project ----------------------------------------------------------
-
-el.openProject.addEventListener("click", async () => {
-  try {
-    const opened = await invoke("open_project");
-    if (opened) applyStartup(opened);
-  } catch (e) {
-    showError(e);
-  }
-});
-
-el.saveAs.addEventListener("click", async () => {
-  try {
-    const saved = await invoke("save_project_as");
-    if (saved) {
-      el.projectName.textContent = saved.name;
-      el.projectName.title = saved.folder;
-      showSaved(saved.name);
-    }
-  } catch (e) {
-    showError(e);
-  }
-});
-
-async function saveNow() {
-  try {
-    showSaved(await invoke("save_project"));
-  } catch (e) {
-    showError(e);
-  }
-}
-
 // --- transport ------------------------------------------------------------
 
 function setPlaying(playing) {
   state.playing = playing;
-  el.play.classList.toggle("on", playing);
-  el.play.querySelector(".glyph").innerHTML = playing ? "&#9632;" : "&#9654;";
+  showPlaying(playing);
   invoke("set_playing", { playing });
   state.needsDraw = true;
 }
 
+function showPlaying(playing) {
+  el.play.classList.toggle("on", playing);
+  el.play.querySelector(".glyph").innerHTML = playing ? "&#9632;" : "&#9654;";
+}
+
 el.play.addEventListener("click", () => setPlaying(!state.playing));
 
-el.bpm.addEventListener("input", async () => {
-  const value = Number(el.bpm.value);
-  el.bpmValue.textContent = String(value);
-  state.bpm = await invoke("set_bpm", { bpm: value });
-});
-
-el.master.addEventListener("input", () => {
-  invoke("set_master_gain", { gain: Number(el.master.value) / 100 });
+numberField(el.bpm, {
+  min: 40,
+  max: 240,
+  onChange: async (bpm) => {
+    state.bpm = await invoke("set_bpm", { bpm });
+  },
 });
 
 window.addEventListener("keydown", (e) => {
-  // Only a text field has any use for a space. A focused slider does not, and having it
+  // Only a text field has any use for a space. A focused number does not, and having it
   // swallow the play key after you nudge the tempo is maddening.
-  const typing = e.target.matches("input:not([type=range]), textarea, [contenteditable]");
-
-  if (e.metaKey || e.ctrlKey) {
-    if (e.key === "s") {
-      e.preventDefault();
-      if (e.shiftKey) el.saveAs.click();
-      else saveNow();
-    }
-    if (e.key === "o") {
-      e.preventDefault();
-      el.openProject.click();
-    }
-    return;
-  }
+  const typing = e.target.matches("input:not(.number), textarea, [contenteditable]");
 
   if (e.code === "Space" && !typing) {
     e.preventDefault();
@@ -955,21 +1105,21 @@ async function tick(now) {
       const wasSounding = state.sounding;
       state.step = p.step;
       state.progress = p.progress;
-      state.slot = p.slot;
-      state.sounding = p.pattern;
+      state.bar = p.bar;
+      state.sounding = p.patterns;
       if (p.playing !== state.playing) {
         state.playing = p.playing;
-        el.play.classList.toggle("on", p.playing);
-        el.play.querySelector(".glyph").innerHTML = p.playing ? "&#9632;" : "&#9654;";
+        showPlaying(p.playing);
         markPatternRows();
       } else if (state.playing && wasSounding !== state.sounding) {
-        // Which pattern is making the noise is worth showing in the panel.
+        // Which patterns are making the noise is worth showing in the panel.
         markPatternRows();
       }
       // While it plays the playhead moves every frame, so there is always something to draw.
       if (state.playing) state.needsDraw = true;
       el.meterFill.style.width = `${Math.min(100, p.peak * 100)}%`;
-      showStatus(p);
+      if (p.saveError) showError(`could not save: ${p.saveError}`);
+      else if (p.streamErrors > 0) showWarning(`${p.streamErrors} audio dropouts`);
     } catch {
       // A failed poll is not worth a dialog; the next one will do.
     }
@@ -984,32 +1134,29 @@ async function tick(now) {
 
 // --- the status line ------------------------------------------------------
 
+/*
+ * Empty unless there is something to say. What the device is doing is not something to say:
+ * it never changes, and it was in the way of the things that do.
+ */
 let noticeUntil = 0;
 
-function showStatus(p) {
-  if (performance.now() < noticeUntil) return;
-  if (p.saveError) {
-    el.status.innerHTML = `<span class="warn">could not save: ${escapeText(p.saveError)}</span>`;
-    return;
-  }
-  const audio = state.audio
-    ? `${Math.round(state.audio.sampleRate / 100) / 10}k · ${state.audio.channels}ch`
-    : "";
-  const voices = p.voices > 0 ? ` · ${p.voices} voices` : "";
-  el.status.innerHTML =
-    p.streamErrors > 0
-      ? `<span class="warn">${p.streamErrors} audio dropouts</span>`
-      : `${audio}${voices}`;
+function note(html, holdFor) {
+  el.status.innerHTML = html;
+  noticeUntil = performance.now() + holdFor;
 }
 
 function showError(e) {
-  el.status.innerHTML = `<span class="warn">${escapeText(e)}</span>`;
-  noticeUntil = performance.now() + 4000;
+  note(`<span class="warn">${escapeText(e)}</span>`, 5000);
+}
+
+/* Something the app is unhappy about that is not a one-off event. */
+function showWarning(text) {
+  if (performance.now() < noticeUntil) return;
+  note(`<span class="warn">${escapeText(text)}</span>`, 1000);
 }
 
 function showSaved(name) {
-  el.status.innerHTML = `<span class="ok">saved ${escapeText(name)}</span>`;
-  noticeUntil = performance.now() + 1500;
+  note(`<span class="ok">saved ${escapeText(name)}</span>`, 1500);
 }
 
 function escapeText(value) {
@@ -1017,5 +1164,12 @@ function escapeText(value) {
   box.textContent = String(value);
   return box.innerHTML;
 }
+
+/* Clear a notice once it has had its moment. */
+setInterval(() => {
+  if (el.status.innerHTML && performance.now() >= noticeUntil) {
+    el.status.innerHTML = "";
+  }
+}, 250);
 
 boot();

@@ -66,12 +66,18 @@ button {
   height: 56px;
 }
 
-.brand {
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  font-size: 12px;
-  color: var(--accent);
+/* Somewhere to grab the window that is not a control. */
+.drag-space {
+  flex: 1;
+  align-self: stretch;
+  min-width: 20px;
+}
+
+.meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
 }
 
 .controls {
@@ -115,10 +121,27 @@ button {
   color: var(--dim);
 }
 
-.dial output {
+input.number {
+  font: inherit;
   font-variant-numeric: tabular-nums;
-  width: 30px;
-  color: var(--dim);
+  text-align: center;
+  width: 46px;
+  padding: 3px 0;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  outline: none;
+  cursor: ns-resize;
+}
+
+input.number:hover {
+  border-color: var(--dim);
+}
+
+input.number:focus {
+  border-color: var(--accent);
+  cursor: text;
 }
 
 input[type="range"] {
@@ -146,9 +169,10 @@ input[type="range"]:active::-webkit-slider-thumb {
 
 .meter {
   width: 74px;
-  height: 5px;
-  border-radius: 3px;
-  background: var(--line);
+  height: 7px;
+  border-radius: 4px;
+  background: var(--bg);
+  border: 1px solid var(--line);
   overflow: hidden;
 }
 
@@ -160,13 +184,6 @@ input[type="range"]:active::-webkit-slider-thumb {
 }
 
 /* The project is a folder, and this is its name. */
-.project {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  margin-left: auto;
-}
-
 .project-name {
   font-size: 11px;
   color: var(--dim);
@@ -176,12 +193,19 @@ input[type="range"]:active::-webkit-slider-thumb {
   white-space: nowrap;
 }
 
+/* Only ever a warning or a note: nothing lives here the rest of the time. */
 .status {
   color: var(--dim);
   font-size: 11px;
-  font-variant-numeric: tabular-nums;
   text-align: right;
-  min-width: 92px;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status:empty {
+  display: none;
 }
 
 .status .warn {
@@ -317,17 +341,63 @@ body.drop-target::after {
   gap: 8px;
 }
 
-.panel-head .add {
-  padding: 1px 8px;
-  font-size: 13px;
-  line-height: 1.1;
+/* The heading, and the way back to the song. Lit while the song is what you are looking at. */
+.song-mode {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--dim);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  padding: 2px 8px;
+  transition: color 0.12s, background 0.12s, border-color 0.12s;
 }
 
+.song-mode:hover {
+  color: var(--text);
+  border-color: var(--line);
+}
+
+.song-mode.on {
+  color: var(--text);
+  background: var(--accent-soft);
+  border-color: transparent;
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/*
+ * Only as tall as the patterns in it, so the button for the next one sits directly under
+ * the last one. Once there are more patterns than room, this scrolls and the button stops
+ * at the bottom of the panel.
+ */
 .pattern-list {
-  flex: 1;
+  flex: 0 1 auto;
   overflow-y: auto;
   overflow-x: hidden;
   min-height: 0;
+}
+
+.add-row {
+  flex: none;
+  height: var(--lane);
+  border: none;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--dim);
+  font-size: 11px;
+  text-align: left;
+  padding: 0 10px;
+  transition: background 0.12s, color 0.12s;
+}
+
+.add-row:hover {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.add-row:disabled {
+  opacity: 0.5;
 }
 
 .prow {
@@ -516,7 +586,6 @@ body.drop-target::after {
   display: flex;
   align-items: center;
   gap: 4px;
-  margin-left: auto;
 }
 
 .steps input {
@@ -553,12 +622,18 @@ body.drop-target::after {
   border-bottom: 1px solid var(--line);
 }
 
-.track-headers {
+.header-col {
   position: sticky;
   left: 0;
   z-index: 2;
   border-right: 1px solid var(--line);
   background: var(--panel);
+  display: flex;
+  flex-direction: column;
+}
+
+.track-headers {
+  flex: none;
 }
 
 .track {
@@ -598,6 +673,31 @@ body.drop-target::after {
 
 .grid {
   display: block;
+}
+
+/* The pattern is a window over the song, and this shuts it. */
+.close {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 30px;
+  height: var(--head);
+  border: none;
+  border-left: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--dim);
+  font-size: 17px;
+  line-height: 1;
+  z-index: 4;
+  display: grid;
+  place-items: center;
+  padding: 0;
+}
+
+.close:hover {
+  background: var(--accent);
+  color: #1a0b12;
 }
 
 .empty {

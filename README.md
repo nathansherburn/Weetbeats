@@ -15,11 +15,12 @@ patterns strung together into a song.
 
 - Add instruments from the system file picker, or drop sounds on the window
 - Eight drums ship with it, and the picker opens on them the first time
-- Click or drag across the boxes to paint a beat, and set how many boxes a pattern has
+- Click or drag across the boxes to paint a beat; right click rubs one out
+- Set how many boxes a pattern has, one step at a time
 - Patterns down the left: click to open one, click it again to go back to the song
-- Song view: tick a slot in a pattern's lane and it plays there
+- Song view: paint a pattern across the bars, and stack patterns to build a beat up
 - Click a track's name to hear it
-- Play, stop, tempo, master volume
+- Play, stop, tempo
 - Per track: volume, mute, solo, delete
 
 The sampler instrument is stage 3, the piano roll stage 4.
@@ -30,9 +31,23 @@ A pattern is a grid of boxes and a length. An instrument belongs to the project 
 to one pattern, so every pattern plays the same kit and a new pattern is an empty grid over
 sounds you already have.
 
-The song is a row of slots, and **one slot is one whole pattern** — not one bar. Patterns in
-a song can be different lengths, and a longer pattern is a wider block in the song view.
-Double click a pattern to rename it. Escape closes a pattern and goes back to the song.
+The song is a row of **bars**, and a bar is sixteen steps — one pattern of the default
+length. A bar holds as many patterns as you like and **they all play together**, so a kick
+pattern, a hat pattern and a snare pattern add up to a beat. That is the whole reason to
+have patterns rather than one long grid: build the parts separately, then bring them in one
+at a time across the song.
+
+A pattern is not restarted at every bar. Each one plays straight through the run of bars you
+painted it across — a two bar pattern needs two bars, a four step pattern comes round four
+times in one. Give a pattern less room than it needs and it is cut off at the end of the run,
+which the notch on the right of the block is there to tell you.
+
+The song is painted, not ticked: press and drag along a lane to fill in bars, right click to
+rub one out, and right click the bar number along the top to take the whole bar out and close
+the gap. Drag along the bar numbers to play from anywhere.
+
+Patterns are windows over the song. Click one in the panel to open it, click it again — or
+press escape, or the × in the corner, or **song** at the top of the panel — to put it away.
 
 ## Projects
 
@@ -52,9 +67,9 @@ uses, and moving or deleting the file you dragged in cannot break anything. The 
 break a project is to go into its folder and break it by hand.
 
 The project is written out about once a second when anything has changed, and again when the
-window closes, so there is nothing to remember to do. **Save as** puts a copy wherever you
-like and carries on working there; **open** picks up another folder. Weetbeats reopens
-whatever you had last time.
+window closes, so there is nothing to remember to do. The **File** menu has Open, Save and
+Save As: Save As puts a copy wherever you like and carries on working there, Open picks up
+another folder. Weetbeats reopens whatever you had last time.
 
 ## Running it
 
@@ -120,11 +135,22 @@ stage 4 is then a different editor over the same data instead of a project file 
 
 ### Every pattern lives on the audio thread
 
-The engine holds the notes of every pattern, not just the one playing. At the end of a
-pattern the song moves on to the next slot *on the boundary frame*, and there is no time to
-ask the app thread for it — so a pattern change has to be a change of index, which costs
-nothing. Which pattern plays depends on the mode: the open pattern loops while you are
-editing it, and the song plays when you are looking at the song.
+The engine holds the notes of every pattern, not just the ones playing. At the bar line the
+song moves on *on the boundary frame*, and there is no time to ask the app thread for what
+comes next — so a bar of the song is a `u32` with a bit per pattern, and moving on is reading
+the next one. Each pattern also carries how far into its run of bars it is, which is what
+makes it play through them rather than starting again at every bar.
+
+Which patterns play depends on the mode: the open pattern loops while you are editing it, and
+the song plays when you are looking at the song.
+
+### No master volume
+
+There is a level meter but no master fader. The system volume covers "make it quieter", and
+the track faders cover "make this bit quieter", which between them is everything a fader
+would have done except pulling the whole mix back off the soft clipper — and if the meter is
+pinned, pulling the tracks down is the better answer anyway. `masterGain` is still in
+`project.json` for anyone who wants to lean on it.
 
 ## Tests
 

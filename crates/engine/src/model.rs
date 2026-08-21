@@ -11,14 +11,17 @@
 //! notes: one [`Lane`] per track that has any. That way adding a pattern gives you a fresh
 //! empty grid over the kit you already have, rather than an empty kit.
 //!
-//! The song is an ordered list of pattern ids. One slot is one whole pattern, however long
-//! that pattern is, so patterns in the same song can be different lengths.
+//! The song is a row of bars, and each bar holds however many patterns you like. Patterns in
+//! the same bar sound together, which is how a kick pattern, a hat pattern and a snare
+//! pattern add up to a beat. A pattern painted across several bars keeps playing through
+//! them rather than starting again every bar, so a pattern longer than a bar gets the room
+//! it needs and a shorter one comes round again.
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    DEFAULT_PITCH, DEFAULT_STEPS, MAX_NOTES_PER_TRACK, MAX_PATTERNS, MAX_SONG_SLOTS, MAX_STEPS,
-    MAX_TRACKS,
+    DEFAULT_PITCH, DEFAULT_STEPS, MAX_NOTES_PER_TRACK, MAX_PATTERNS, MAX_SONG_BARS, MAX_STEPS,
+    MAX_TRACKS, STEPS_PER_BAR,
 };
 
 /// Bumped whenever the on-disk shape changes. Version 1 never reached a file — stage 1 had
@@ -221,8 +224,9 @@ pub struct Project {
     pub tracks: Vec<Track>,
     /// Always at least one.
     pub patterns: Vec<Pattern>,
-    /// Pattern ids in the order they play. One slot is one whole pattern.
-    pub song: Vec<u16>,
+    /// The song, a bar at a time: which patterns play during each bar. Everything in a bar
+    /// sounds together.
+    pub song: Vec<Vec<u16>>,
 }
 
 impl Default for Project {
@@ -325,44 +329,90 @@ impl Project {
             return false;
         };
         self.patterns.remove(at);
-        self.song.retain(|slot| *slot != id);
+        for bar in &mut self.song {
+            bar.retain(|in_bar| *in_bar != id);
+        }
+        self.trim_song();
         true
     }
 
-    /// Put a pattern in a song slot. `index` may be one past the end, which appends.
-    /// Returns false when the song is full or the pattern does not exist.
-    pub fn set_song_slot(&mut self, index: usize, pattern: u16) -> bool {
+    /// The patterns playing in a bar. Bars past the end of the song are silent.
+    pub fn bar(&self, index: usize) -> &[u16] {
+        self.song
+            .get(index)
+            .map(|bar| bar.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn bar_has(&self, index: usize, pattern: u16) -> bool {
+        self.bar(index).contains(&pattern)
+    }
+
+    /// The patterns in a bar as one bit each, which is how the audio thread holds them.
+    pub fn bar_mask(&self, index: usize) -> u32 {
+        self.bar(index)
+            .iter()
+            .filter(|id| (**id as usize) < MAX_PATTERNS)
+            .fold(0u32, |mask, id| mask | (1 << *id))
+    }
+
+    pub fn bars(&self) -> usize {
+        self.song.len()
+    }
+
+    /// Put a pattern in a bar of the song, or take it out. Returns whether it is in there
+    /// now, which is false if the pattern or the bar does not exist.
+    ///
+    /// Turning one on fills in any empty bars before it, so you can drop a pattern in at
+    /// bar twelve and get eleven bars of silence in front of it. Turning one off leaves the
+    /// bar where it is, empty, because a rest in the middle of a song is a real thing to
+    /// want — only empty bars on the end are dropped.
+    pub fn set_bar_pattern(&mut self, index: usize, pattern: u16, on: bool) -> bool {
         if self.pattern(pattern).is_none() {
             return false;
         }
-        if index < self.song.len() {
-            self.song[index] = pattern;
-            true
-        } else if self.song.len() < MAX_SONG_SLOTS {
-            self.song.push(pattern);
-            true
-        } else {
-            false
+        if !on {
+            if index < self.song.len() {
+                self.song[index].retain(|id| *id != pattern);
+                self.trim_song();
+            }
+            return false;
         }
+        if index >= MAX_SONG_BARS {
+            return false;
+        }
+        while self.song.len() <= index {
+            self.song.push(Vec::new());
+        }
+        let bar = &mut self.song[index];
+        if !bar.contains(&pattern) {
+            bar.push(pattern);
+            // Sorted, so the same song is always written out the same way.
+            bar.sort_unstable();
+        }
+        true
     }
 
-    /// Take a slot out of the song. Everything after it shifts back, so a song is a run of
-    /// patterns with no gaps in it.
-    pub fn clear_song_slot(&mut self, index: usize) -> bool {
+    /// Take a bar out of the song altogether, so everything after it moves up.
+    pub fn remove_bar(&mut self, index: usize) -> bool {
         if index >= self.song.len() {
             return false;
         }
         self.song.remove(index);
+        self.trim_song();
         true
+    }
+
+    /// Empty bars on the end are not part of the song.
+    fn trim_song(&mut self) {
+        while self.song.last().is_some_and(|bar| bar.is_empty()) {
+            self.song.pop();
+        }
     }
 
     /// Steps in the whole song, for drawing it.
     pub fn song_steps(&self) -> u32 {
-        self.song
-            .iter()
-            .filter_map(|id| self.pattern(*id))
-            .map(|p| p.steps)
-            .sum()
+        self.song.len() as u32 * STEPS_PER_BAR
     }
 }
 
@@ -512,31 +562,69 @@ mod tests {
     }
 
     #[test]
-    fn a_song_slot_is_a_whole_pattern() {
+    fn a_bar_of_the_song_holds_as_many_patterns_as_you_like() {
+        let mut project = Project::default();
+        let hats = project.add_pattern().unwrap();
+        let snare = project.add_pattern().unwrap();
+
+        // A kick, a hat and a snare pattern, all sounding together in the first bar.
+        assert!(project.set_bar_pattern(0, 0, true));
+        assert!(project.set_bar_pattern(0, hats, true));
+        assert!(project.set_bar_pattern(0, snare, true));
+        assert_eq!(project.bar(0), &[0, hats, snare]);
+        assert_eq!(project.bars(), 1);
+        assert_eq!(project.song_steps(), STEPS_PER_BAR);
+
+        // Taking one out leaves the others where they are.
+        assert!(!project.set_bar_pattern(0, hats, false));
+        assert_eq!(project.bar(0), &[0, snare]);
+        assert!(project.bar_has(0, snare));
+        assert!(!project.bar_has(0, hats));
+    }
+
+    #[test]
+    fn the_bar_mask_is_what_the_audio_thread_gets() {
         let mut project = Project::default();
         let second = project.add_pattern().unwrap();
-        project.pattern_mut(second).unwrap().set_steps(32);
+        project.set_bar_pattern(0, 0, true);
+        project.set_bar_pattern(0, second, true);
+        assert_eq!(project.bar_mask(0), 0b11);
+        assert_eq!(project.bar_mask(1), 0, "a bar past the end is silent");
+    }
 
-        assert!(project.set_song_slot(0, 0));
-        assert!(project.set_song_slot(1, second));
-        assert!(project.set_song_slot(2, 0));
-        assert_eq!(project.song, vec![0, second, 0]);
-        // Sixteen, thirty-two, sixteen: lengths are the patterns' own.
-        assert_eq!(project.song_steps(), 64);
+    #[test]
+    fn a_pattern_dropped_in_late_gets_silence_in_front_of_it() {
+        let mut project = Project::default();
+        assert!(project.set_bar_pattern(3, 0, true));
+        assert_eq!(project.bars(), 4);
+        assert!(project.bar(0).is_empty());
+        assert!(project.bar_has(3, 0));
 
-        // Ticking a different pattern into a slot replaces what was there.
-        assert!(project.set_song_slot(1, 0));
-        assert_eq!(project.song, vec![0, 0, 0]);
-        // And clearing one closes the gap rather than leaving silence in the middle.
-        assert!(project.clear_song_slot(0));
-        assert_eq!(project.song, vec![0, 0]);
-        assert!(!project.clear_song_slot(9));
+        // A rest in the middle stays a rest; only empty bars on the end go.
+        project.set_bar_pattern(1, 0, true);
+        project.set_bar_pattern(1, 0, false);
+        assert_eq!(project.bars(), 4);
+        project.set_bar_pattern(3, 0, false);
+        assert_eq!(project.bars(), 0, "nothing left, so no song");
+    }
+
+    #[test]
+    fn a_bar_can_be_taken_out_to_close_a_gap() {
+        let mut project = Project::default();
+        let second = project.add_pattern().unwrap();
+        project.set_bar_pattern(0, 0, true);
+        project.set_bar_pattern(2, second, true);
+
+        assert!(project.remove_bar(1));
+        assert_eq!(project.bars(), 2);
+        assert!(project.bar_has(1, second));
+        assert!(!project.remove_bar(9));
     }
 
     #[test]
     fn the_song_will_not_hold_a_pattern_that_does_not_exist() {
         let mut project = Project::default();
-        assert!(!project.set_song_slot(0, 7));
+        assert!(!project.set_bar_pattern(0, 7, true));
         assert!(project.song.is_empty());
     }
 
@@ -544,12 +632,14 @@ mod tests {
     fn deleting_a_pattern_takes_it_out_of_the_song() {
         let mut project = Project::default();
         let second = project.add_pattern().unwrap();
-        project.set_song_slot(0, 0);
-        project.set_song_slot(1, second);
-        project.set_song_slot(2, 0);
+        project.set_bar_pattern(0, 0, true);
+        project.set_bar_pattern(0, second, true);
+        project.set_bar_pattern(1, second, true);
 
         assert!(project.remove_pattern(second));
-        assert_eq!(project.song, vec![0, 0]);
+        assert_eq!(project.bar(0), &[0]);
+        // Bar 1 held nothing else, so the song is one bar long again.
+        assert_eq!(project.bars(), 1);
 
         // The last pattern stays put, whatever anyone asks.
         assert!(!project.remove_pattern(0));
@@ -594,8 +684,9 @@ mod tests {
         project.pattern_mut(second).unwrap().set_steps(32);
         project.pattern_mut(0).unwrap().set_step(0, 0, true);
         project.pattern_mut(second).unwrap().set_step(0, 8, true);
-        project.set_song_slot(0, 0);
-        project.set_song_slot(1, second);
+        project.set_bar_pattern(0, 0, true);
+        project.set_bar_pattern(0, second, true);
+        project.set_bar_pattern(1, second, true);
 
         let json = serde_json::to_string(&project).unwrap();
         let back: Project = serde_json::from_str(&json).unwrap();
@@ -609,6 +700,6 @@ mod tests {
         assert_eq!(back.patterns.len(), 2);
         assert_eq!(back.pattern(second).unwrap().steps, 32);
         assert!(back.pattern(second).unwrap().has_step(0, 8));
-        assert_eq!(back.song, vec![0, second]);
+        assert_eq!(back.song, vec![vec![0, second], vec![second]]);
     }
 }

@@ -40,11 +40,21 @@ pub const DEFAULT_STEPS: u32 = 16;
 
 /// Pattern slots the engine keeps notes for. A pattern's id in the project *is* its slot,
 /// the same trick as tracks, so the engine never has to be told a pattern has moved.
+///
+/// Cannot go past 32: a bar of the song is a set of patterns, held as a bit per pattern.
 pub const MAX_PATTERNS: usize = 32;
 
-/// Slots in the song. One slot is one whole pattern, so this is long enough for a song of
-/// two hundred and fifty six patterns end to end.
-pub const MAX_SONG_SLOTS: usize = 256;
+const _: () = assert!(
+    MAX_PATTERNS <= 32,
+    "a bar of the song is a u32 of pattern bits"
+);
+
+/// Steps in one bar of the song. A bar is the song's grid square: patterns are placed a bar
+/// at a time, and one bar is one pattern of the default length.
+pub const STEPS_PER_BAR: u32 = 16;
+
+/// Bars the song can hold.
+pub const MAX_SONG_BARS: usize = 256;
 
 /// Frames the mixer works on at a time. Longer callbacks get chopped into these.
 pub const MAX_BLOCK: usize = 1024;

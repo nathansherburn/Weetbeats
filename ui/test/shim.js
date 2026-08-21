@@ -10,18 +10,20 @@ window.__weetbeats_calls = [];
 const MAX_PATTERNS = 32;
 const MAX_TRACKS = 32;
 const MAX_STEPS = 64;
+const MAX_SONG_BARS = 256;
 
 const fake = {
   bpm: 120,
   masterGain: 0.9,
   playing: false,
   step: 0,
-  slot: 0,
+  bar: 0,
   active: 0,
   songMode: false,
   nextTrackId: 0,
   tracks: new Map(),
   patterns: [{ id: 0, name: "Pattern 1", steps: 16, lanes: [] }],
+  // One entry a bar: the patterns playing in it.
   song: [],
   name: "Untitled",
   folder: "/tmp/Untitled.beat",
@@ -78,7 +80,6 @@ const startup = () => ({
     patterns: fake.patterns,
     song: fake.song,
   },
-  audio: { device: "Test Output", sampleRate: 48000, channels: 2, format: "f32" },
   name: fake.name,
   folder: fake.folder,
   waveforms: [...fake.tracks.values()].map((t) => ({ track: t.id, peaks: fake.peaks })),
@@ -160,7 +161,8 @@ const handlers = {
   remove_pattern: ({ id }) => {
     if (fake.patterns.length <= 1) throw new Error("a song needs at least one pattern");
     fake.patterns = fake.patterns.filter((p) => p.id !== id);
-    fake.song = fake.song.filter((slot) => slot !== id);
+    fake.song = fake.song.map((bar) => bar.filter((one) => one !== id));
+    while (fake.song.length && fake.song[fake.song.length - 1].length === 0) fake.song.pop();
     return arrangement();
   },
   rename_pattern: ({ id, name }) => {
@@ -180,52 +182,53 @@ const handlers = {
   open_pattern: ({ id }) => { fake.active = id; fake.songMode = false; return null; },
   close_pattern: () => { fake.songMode = true; return null; },
 
-  set_song_slot: ({ index, pattern: id }) => {
-    if (pattern(id)) {
-      if (index < fake.song.length) fake.song[index] = id;
-      else fake.song.push(id);
+  // Mirrors Project::set_bar_pattern: bars before it are filled in, and empty bars on the
+  // end are not part of the song.
+  set_song_bar: ({ bar, pattern: id, on }) => {
+    if (!pattern(id)) return false;
+    if (!on) {
+      if (bar < fake.song.length) {
+        fake.song[bar] = fake.song[bar].filter((one) => one !== id);
+        while (fake.song.length && fake.song[fake.song.length - 1].length === 0) fake.song.pop();
+      }
+      return false;
     }
+    if (bar >= MAX_SONG_BARS) return false;
+    while (fake.song.length <= bar) fake.song.push([]);
+    if (!fake.song[bar].includes(id)) {
+      fake.song[bar].push(id);
+      fake.song[bar].sort((a, b) => a - b);
+    }
+    return true;
+  },
+  remove_song_bar: ({ bar }) => {
+    if (bar < fake.song.length) fake.song.splice(bar, 1);
+    while (fake.song.length && fake.song[fake.song.length - 1].length === 0) fake.song.pop();
     return fake.song;
   },
-  clear_song_slot: ({ index }) => {
-    if (index < fake.song.length) fake.song.splice(index, 1);
-    return fake.song;
-  },
-  seek_song: ({ index }) => { fake.slot = index; fake.step = 0; return null; },
+  seek_song: ({ bar }) => { fake.bar = bar; fake.step = 0; return null; },
 
   set_bpm: ({ bpm }) => { fake.bpm = Math.max(40, Math.min(240, bpm)); return fake.bpm; },
-  set_master_gain: ({ gain }) => { fake.masterGain = gain; return null; },
   set_playing: ({ playing }) => {
     fake.playing = playing;
-    if (!playing) { fake.step = 0; fake.slot = 0; }
+    if (!playing) { fake.step = 0; fake.bar = 0; }
     return null;
   },
-  panic_stop: () => { fake.playing = false; fake.step = 0; fake.slot = 0; return null; },
+  panic_stop: () => { fake.playing = false; fake.step = 0; fake.bar = 0; return null; },
   playhead: () => ({
     playing: fake.playing,
     step: fake.step,
     progress: 0.3,
-    pattern: fake.songMode ? (fake.song[fake.slot] ?? 0) : fake.active,
-    slot: fake.slot,
+    // One bit per pattern: everything in the bar sounds at once.
+    patterns: fake.songMode
+      ? (fake.song[fake.bar] ?? []).reduce((mask, id) => mask | (1 << id), 0)
+      : 1 << fake.active,
+    bar: fake.bar,
     voices: fake.playing ? 3 : 0,
     peak: fake.playing ? 0.6 : 0,
     streamErrors: 0,
     saveError: null,
   }),
-
-  save_project: () => { fake.saves += 1; return fake.name; },
-  save_project_as: () => {
-    if (!fake.saveAs) return null;
-    fake.folder = fake.saveAs;
-    fake.name = fake.saveAs.split("/").pop().replace(/\.beat$/, "");
-    return startup();
-  },
-  open_project: () => {
-    if (!fake.openFolder) return null;
-    fake.folder = fake.openFolder;
-    fake.name = fake.openFolder.split("/").pop().replace(/\.beat$/, "");
-    return startup();
-  },
 };
 
 // The native drag-drop events the webview sends instead of HTML5 ones.
@@ -255,9 +258,35 @@ window.__weetbeats_drop = (paths) => {
 };
 
 // Lets a test walk the playhead without waiting on real time.
-window.__weetbeats_setStep = (step, slot) => {
+window.__weetbeats_setStep = (step, bar) => {
   fake.step = step;
-  if (slot !== undefined) fake.slot = slot;
+  if (bar !== undefined) fake.bar = bar;
   fake.playing = true;
 };
+
+// Opening and saving are in the native menu bar, which Rust owns: it tells the front end
+// what happened by emitting an event. This is how a test plays the part of the menu.
+window.__weetbeats_menu = (what) => {
+  if (what === "save") {
+    fake.saves += 1;
+    listeners.get("saved")?.({ payload: fake.name });
+    return;
+  }
+  if (what === "save_as" && fake.saveAs) {
+    fake.folder = fake.saveAs;
+    fake.name = fake.saveAs.split("/").pop().replace(/\.beat$/, "");
+    listeners.get("project")?.({ payload: startup() });
+    return;
+  }
+  if (what === "open" && fake.openFolder) {
+    fake.folder = fake.openFolder;
+    fake.name = fake.openFolder.split("/").pop().replace(/\.beat$/, "");
+    listeners.get("project")?.({ payload: startup() });
+    return;
+  }
+  if (what === "trouble") {
+    listeners.get("trouble")?.({ payload: "the disk said no" });
+  }
+};
+
 window.__weetbeats_state = fake;

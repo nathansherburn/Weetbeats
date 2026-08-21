@@ -123,9 +123,10 @@ fn render_does_not_allocate() {
     }
     tx.push(Command::SetSongLen(4)).unwrap();
     for index in 0..4u16 {
-        tx.push(Command::SetSongSlot {
+        // Two patterns in every bar, so the stacking is counted too.
+        tx.push(Command::SetSongBar {
             index,
-            pattern: index,
+            patterns: (1 << index) | (1 << ((index + 1) % 4)),
         })
         .unwrap();
     }
@@ -163,9 +164,9 @@ fn render_does_not_allocate() {
             });
             // And leaning on the parts that are new: the song, and switching between
             // patterns and the song the way opening and closing the editor does.
-            let _ = tx.push(Command::SetSongSlot {
+            let _ = tx.push(Command::SetSongBar {
                 index: (block % 4) as u16,
-                pattern: (block % 4) as u16,
+                patterns: (block as u32) & 0b1111,
             });
             let _ = tx.push(Command::SetPatternSteps {
                 pattern: (block % 4) as u16,

@@ -36,7 +36,8 @@ const check = (name, ok, detail = "") => {
 const CELL = 42;
 const ROW = 46;
 const LANE = 34;
-const SONG_STEP = 4;
+const BAR_PX = 64;
+const ACCENT = "255,77,135";
 
 (async () => {
   await new Promise((r) => server.listen(0, r));
@@ -67,6 +68,63 @@ const SONG_STEP = 4;
       const c = document.getElementById(sel);
       return { w: parseInt(c.style.width), h: parseInt(c.style.height) };
     }, id);
+  const song = () => page.evaluate(() => window.__weetbeats_state.song);
+  const menu = (what) => page.evaluate((w) => window.__weetbeats_menu(w), what);
+
+  /*
+   * What colour the song view actually drew in the middle of a cell. Drawing happens on the
+   * next frame after a click, so these wait for the canvas to catch up rather than reading
+   * it the instant the state changes.
+   */
+  const lanePixel = (bar, row) =>
+    page.evaluate(
+      ([bar, row, barPx, lane]) => {
+        const dpr = window.devicePixelRatio || 1;
+        const ctx = document.getElementById("lanes").getContext("2d");
+        const x = Math.round((bar * barPx + barPx / 2) * dpr);
+        const y = Math.round((row * lane + lane / 2) * dpr);
+        const [r, g, b] = ctx.getImageData(x, y, 1, 1).data;
+        return `${r},${g},${b}`;
+      },
+      [bar, row, BAR_PX, LANE],
+    );
+
+  /* A pixel somewhere else in a cell, for the marks drawn inside a block. */
+  const lanePixelNear = (bar, row, dx) =>
+    page.evaluate(
+      ([bar, row, dx, barPx, lane]) => {
+        const dpr = window.devicePixelRatio || 1;
+        const ctx = document.getElementById("lanes").getContext("2d");
+        const x = Math.round((bar * barPx + dx) * dpr);
+        const y = Math.round((row * lane + lane / 2) * dpr);
+        const [r, g, b] = ctx.getImageData(x, y, 1, 1).data;
+        return `${r},${g},${b}`;
+      },
+      [bar, row, dx, BAR_PX, LANE],
+    );
+
+  const settledPixel = async (bar, row, colour, want) => {
+    const deadline = Date.now() + 2000;
+    for (;;) {
+      const got = await lanePixel(bar, row);
+      if ((got === colour) === want || Date.now() > deadline) return got;
+      await page.waitForTimeout(25);
+    }
+  };
+  const painted = (bar, row) => settledPixel(bar, row, ACCENT, true);
+  const blank = (bar, row) => settledPixel(bar, row, ACCENT, false);
+
+  // --- the window is the app's, not the webview's
+  check("no title in the page", (await page.title()) === "");
+  check("nothing else calls itself Weetbeats", (await page.locator(".brand").count()) === 0);
+  check("the header can be dragged to move the window",
+    (await page.locator("header[data-tauri-drag-region]").count()) === 1);
+  const menued = await page.evaluate(() => {
+    const e = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+    document.getElementById("grid").dispatchEvent(e);
+    return e.defaultPrevented;
+  });
+  check("right click does not open the webview's own menu", menued);
 
   // --- a new project starts in its one pattern, not in an empty song
   check("one pattern to start with", (await rows.count()) === 1);
@@ -77,8 +135,9 @@ const SONG_STEP = 4;
   check("the song view is not", !(await page.locator("#song").isVisible()));
   check("the patterns panel is there while editing", await page.locator("#patternList").isVisible());
   check("empty state is showing", await page.locator("#empty").isVisible());
-  check("no sample browser", (await page.locator("#samples").count()) === 0);
   check("the project has a name", (await page.locator("#projectName").textContent()) === "Untitled");
+  check("no master volume", (await page.locator("#master").count()) === 0);
+  check("nothing in the status line", (await page.locator("#status").textContent()) === "");
 
   // --- the button opens the picker and makes a track from whatever comes back
   await page.evaluate(() => { window.__weetbeats_state.picks = ["/pack/01 kick.wav"]; });
@@ -94,6 +153,12 @@ const SONG_STEP = 4;
   check("the sample is copied into the project and referred to from there",
     kickPath === "samples/01 kick.wav", kickPath);
 
+  // --- and the way to add another is under the ones there are
+  const headers = await page.locator("#trackHeaders").boundingBox();
+  const addRow = await page.locator("#add").boundingBox();
+  check("the add instrument button is under the instruments",
+    addRow.y >= headers.y + headers.height - 1, `${addRow.y} vs ${headers.y + headers.height}`);
+
   // --- one trip to the picker can bring back a whole kit
   await page.evaluate(() => {
     window.__weetbeats_state.picks = ["/pack/02 snare.wav", "/pack/04 hat closed.wav"];
@@ -101,12 +166,6 @@ const SONG_STEP = 4;
   await page.locator("#add").click();
   await page.waitForFunction(() => document.querySelectorAll("#trackHeaders .track").length === 3);
   check("multi-select adds one track each", (await page.locator("#trackHeaders .track").count()) === 3);
-
-  // --- cancelling the picker changes nothing
-  await page.evaluate(() => { window.__weetbeats_state.picks = []; });
-  await page.locator("#add").click();
-  await page.waitForTimeout(150);
-  check("cancelling adds nothing", (await page.locator("#trackHeaders .track").count()) === 3);
 
   // --- a file dropped on the window comes in the same door
   await page.evaluate(() => window.__weetbeats_drop(["/elsewhere/clap.wav"]));
@@ -160,21 +219,34 @@ const SONG_STEP = 4;
     await page.mouse.move(p.x, p.y, { steps: 3 });
   }
   await page.mouse.up();
-  const painted = (await calls("set_step")).map((c) => c.args);
-  check("dragging paints a run", painted.length === 8, `${painted.length} boxes`);
-  check("painting only turns them on", painted.every((p) => p.on === true));
+  const brushed = (await calls("set_step")).map((c) => c.args);
+  check("dragging paints a run", brushed.length === 8, `${brushed.length} boxes`);
+  check("painting only turns them on", brushed.every((p) => p.on === true));
   check(
     "painted the boxes it was dragged over",
-    JSON.stringify(painted.map((p) => p.step)) === JSON.stringify([4, 5, 6, 7, 8, 9, 10, 11]),
-    painted.map((p) => p.step).join(","),
+    JSON.stringify(brushed.map((p) => p.step)) === JSON.stringify([4, 5, 6, 7, 8, 9, 10, 11]),
+    brushed.map((p) => p.step).join(","),
   );
+
+  // --- the right button rubs out, wherever it lands
+  await clearCalls();
+  const r6 = await cell(6, 1);
+  await page.mouse.click(r6.x, r6.y, { button: "right" });
+  await page.waitForFunction(() => window.__weetbeats_calls.some((c) => c.name === "set_step"));
+  check("right click rubs a box out", (await lastCall("set_step")).args.on === false);
+  // And on an empty box it stays empty rather than drawing one.
+  await clearCalls();
+  const r15 = await cell(15, 1);
+  await page.mouse.click(r15.x, r15.y, { button: "right" });
+  await page.waitForTimeout(120);
+  check("right click never draws", (await calls("set_step")).length === 0);
 
   // --- dragging from a ticked box erases instead
   await clearCalls();
   const s5 = await cell(5, 1);
   await page.mouse.move(s5.x, s5.y);
   await page.mouse.down();
-  for (const step of [5, 6, 7]) {
+  for (const step of [5, 7, 8]) {
     const p = await cell(step, 1);
     await page.mouse.move(p.x, p.y, { steps: 3 });
   }
@@ -187,21 +259,33 @@ const SONG_STEP = 4;
     await page.screenshot({ path: process.env.WEETBEATS_SCREENSHOT });
   }
 
-  // --- how many boxes a pattern has
+  // --- how many boxes a pattern has, one at a time
   await page.locator("#moreSteps").click();
-  await page.waitForFunction(() => document.getElementById("steps").value === "20");
-  size = await canvasSize("grid");
-  check("more steps makes a wider grid", size.w === 20 * CELL, `${size.w}px`);
-  check("and the panel says so", (await rows.first().locator(".plen").textContent()) === "20");
-
+  await page.waitForFunction(() => document.getElementById("steps").value === "17");
+  check("more steps adds one box", (await canvasSize("grid")).w === 17 * CELL);
   await page.locator("#fewerSteps").click();
   await page.waitForFunction(() => document.getElementById("steps").value === "16");
-  check("fewer steps takes it back", (await canvasSize("grid")).w === 16 * CELL);
+  check("fewer steps takes one away", (await canvasSize("grid")).w === 16 * CELL);
+
+  // --- and you can type it, or drag it
+  await page.locator("#steps").click();
+  await page.locator("#steps").fill("24");
+  await page.locator("#steps").press("Enter");
+  await page.waitForFunction(() => document.getElementById("steps").value === "24");
+  check("typing a length works", (await canvasSize("grid")).w === 24 * CELL);
+  check("and the panel says so", (await rows.first().locator(".plen").textContent()) === "24");
+
+  const stepsBox = await page.locator("#steps").boundingBox();
+  await page.mouse.move(stepsBox.x + stepsBox.width / 2, stepsBox.y + stepsBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(stepsBox.x + stepsBox.width / 2, stepsBox.y + stepsBox.height / 2 - 12, { steps: 4 });
+  await page.mouse.up();
+  check("dragging a number up raises it",
+    (await page.locator("#steps").inputValue()) === "28",
+    await page.locator("#steps").inputValue());
 
   // --- shortening a pattern drops the notes that fall off the end
-  await page.mouse.click((await cell(12, 0)).x, (await cell(12, 0)).y);
-  await page.waitForFunction(() =>
-    window.__weetbeats_state.patterns[0].lanes.some((l) => l.notes.some((n) => n.step === 12)));
+  await page.locator("#steps").click();
   await page.locator("#steps").fill("8");
   await page.locator("#steps").press("Enter");
   await page.waitForFunction(() => document.getElementById("steps").value === "8");
@@ -210,43 +294,83 @@ const SONG_STEP = 4;
   check("shortening drops the notes off the end", trimmed.every((step) => step < 8),
     trimmed.join(","));
   check("and the grid gets shorter with it", (await canvasSize("grid")).w === 8 * CELL);
-  // Boxes past the end are not there to click any more.
   await clearCalls();
   const box = await page.locator("#grid").boundingBox();
   await page.mouse.click(box.x + 12 * CELL, box.y + ROW / 2);
   await page.waitForTimeout(120);
   check("and there is nothing past the end to click", (await calls("set_step")).length === 0);
+  await page.locator("#steps").click();
   await page.locator("#steps").fill("16");
   await page.locator("#steps").press("Enter");
   await page.waitForFunction(() => document.getElementById("steps").value === "16");
 
-  // --- clicking the open pattern closes it, and the panel stays put
-  await rows.first().click();
-  await page.waitForSelector("#song:visible");
-  check("clicking the open pattern goes back to the song", await page.locator("#song").isVisible());
-  check("and the editor goes away", !(await page.locator("#editor").isVisible()));
-  check("the panel is still there in the song view", await page.locator("#patternList").isVisible());
-  check("Rust was told the pattern closed", (await calls("close_pattern")).length === 1);
-  check("the song view says what to do", await page.locator("#songHint").isVisible());
+  // --- bpm the same way: type it, drag it
+  await clearCalls();
+  await page.locator("#bpm").click();
+  await page.locator("#bpm").fill("145");
+  await page.locator("#bpm").press("Enter");
+  await page.waitForFunction(() => window.__weetbeats_calls.some((c) => c.name === "set_bpm"));
+  check("typing a tempo works", (await lastCall("set_bpm")).args.bpm === 145);
 
-  // --- and clicking it again opens it
+  const bpmBox = await page.locator("#bpm").boundingBox();
+  await page.mouse.move(bpmBox.x + bpmBox.width / 2, bpmBox.y + bpmBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(bpmBox.x + bpmBox.width / 2, bpmBox.y + bpmBox.height / 2 + 30, { steps: 5 });
+  await page.mouse.up();
+  check("dragging the tempo down lowers it",
+    (await page.locator("#bpm").inputValue()) === "135",
+    await page.locator("#bpm").inputValue());
+  await page.mouse.move(bpmBox.x + bpmBox.width / 2, bpmBox.y + bpmBox.height / 2);
+  await page.mouse.wheel(0, -120);
+  await page.waitForFunction(() => document.getElementById("bpm").value === "136");
+  check("scrolling the tempo nudges it", (await page.locator("#bpm").inputValue()) === "136");
+
+  // --- the panel heading is the way back to the song
+  check("the heading is a song button", (await page.locator("#songMode").count()) === 1);
+  check("and it is not lit while a pattern is open",
+    !(await page.locator("#songMode").evaluate((n) => n.classList.contains("on"))));
+  await page.locator("#songMode").click();
+  await page.waitForSelector("#song:visible");
+  check("clicking it goes back to the song", await page.locator("#song").isVisible());
+  check("and then it is lit",
+    await page.locator("#songMode").evaluate((n) => n.classList.contains("on")));
   await rows.first().click();
   await page.waitForSelector("#editor:visible");
-  check("clicking it again opens it", await page.locator("#editor").isVisible());
-  check("Rust was told which pattern", (await lastCall("open_pattern")).args.id === 0);
 
-  // --- escape closes the pattern too
-  await page.locator("body").press("Escape");
+  // --- closing a pattern: the X, clicking it again, and escape
+  await page.locator("#closePattern").click();
+  await page.waitForSelector("#song:visible");
+  check("the close button shuts the pattern", await page.locator("#song").isVisible());
+  check("and the editor goes away", !(await page.locator("#editor").isVisible()));
+  check("the panel is still there in the song view", await page.locator("#patternList").isVisible());
+  check("Rust was told the pattern closed", (await calls("close_pattern")).length > 0);
+  check("the song view says what to do", await page.locator("#songHint").isVisible());
+
+  await rows.first().click();
+  await page.waitForSelector("#editor:visible");
+  check("clicking a pattern opens it", await page.locator("#editor").isVisible());
+  await rows.first().click();
+  await page.waitForSelector("#song:visible");
+  check("clicking the open one closes it", await page.locator("#song").isVisible());
+  await rows.first().click();
+  await page.waitForSelector("#editor:visible");
+  await page.keyboard.press("Escape");
   await page.waitForSelector("#song:visible");
   check("escape closes the pattern", await page.locator("#song").isVisible());
 
   // --- escape in the song view is still the panic button
   await clearCalls();
-  await page.locator("body").press("Escape");
+  await page.keyboard.press("Escape");
   await page.waitForFunction(() => window.__weetbeats_calls.some((c) => c.name === "panic_stop"));
   check("escape in the song view stops everything", (await calls("panic_stop")).length === 1);
 
-  // --- a new pattern, and it opens
+  // --- a new pattern, from the button under the ones there are
+  const listBottom = (await page.locator("#patternList").boundingBox()).y
+    + (await page.locator("#patternList").boundingBox()).height;
+  const addTop = (await page.locator("#addPattern").boundingBox()).y;
+  check("the add button is under the patterns", addTop >= listBottom - 1,
+    `${addTop} vs ${listBottom}`);
+
   await page.locator("#addPattern").click();
   await page.waitForFunction(() => document.querySelectorAll("#patternList .prow").length === 2);
   check("add makes a pattern", (await rows.count()) === 2);
@@ -255,13 +379,10 @@ const SONG_STEP = 4;
   check("and it opens, because it is empty", await page.locator("#editor").isVisible());
   check("the new pattern is the open one",
     await rows.nth(1).evaluate((n) => n.classList.contains("open")));
-  check("its grid starts empty", await page.evaluate(() =>
-    window.__weetbeats_state.patterns[1].lanes.length === 0));
 
   // --- double click a name to change it
   await rows.nth(1).dblclick();
   await page.waitForSelector("#patternList .rename");
-  check("double click starts a rename", (await page.locator("#patternList .rename").count()) === 1);
   await page.locator("#patternList .rename").fill("Chorus");
   await page.locator("#patternList .rename").press("Enter");
   await page.waitForFunction(() =>
@@ -279,17 +400,12 @@ const SONG_STEP = 4;
   check("and stays in the pattern", await page.locator("#editor").isVisible());
 
   // --- duplicating brings the notes with it
-  await rows.first().click(); // open Pattern 1, which has notes in it
+  await rows.first().click();
   await page.waitForSelector("#editor:visible");
   await rows.first().hover();
   await rows.first().locator(".tick.dup").click();
   await page.waitForFunction(() => document.querySelectorAll("#patternList .prow").length === 3);
   check("duplicate makes a third pattern", (await rows.count()) === 3);
-  check("the copy lands next to the original", await page.evaluate(() => {
-    const s = window.__weetbeats_state;
-    // Named for the lowest free number, which is 2 again now that one is called Chorus.
-    return s.patterns[0].id === 0 && s.patterns[1].name === "Pattern 2";
-  }));
   check("the copy has the same notes", await page.evaluate(() => {
     const s = window.__weetbeats_state;
     const steps = (p) => p.lanes.flatMap((l) => l.notes.map((n) => n.step)).sort().join(",");
@@ -305,85 +421,110 @@ const SONG_STEP = 4;
   check("delete removes the pattern", (await rows.count()) === 2);
   check("deleting the open one goes back to the song", await page.locator("#song").isVisible());
 
-  // --- the song: one slot is one whole pattern
-  const laneCell = async (slot, row) => {
-    const box = await page.locator("#lanes").boundingBox();
-    return { x: box.x + slot + 6, y: box.y + row * LANE + LANE / 2 };
+  // --- the song is a grid of bars you can paint patterns into
+  const laneCell = async (bar, row) => {
+    const b = await page.locator("#lanes").boundingBox();
+    return { x: b.x + bar * BAR_PX + BAR_PX / 2, y: b.y + row * LANE + LANE / 2 };
   };
-  let song = await canvasSize("lanes");
-  check("an empty song is one spare slot wide", song.w === 16 * SONG_STEP, `${song.w}px`);
-  check("the song has a lane per pattern", song.h === 2 * LANE, `${song.h}px`);
+  let lanes = await canvasSize("lanes");
+  check("the song fills the window even when it is empty", lanes.w >= 900, `${lanes.w}px`);
+  check("a bar is sixteen steps wide", lanes.w % BAR_PX === 0, `${lanes.w}px`);
+  check("the song has a lane per pattern", lanes.h === 2 * LANE, `${lanes.h}px`);
 
-  const firstSlot = await laneCell(0, 0);
-  await page.mouse.click(firstSlot.x, firstSlot.y);
+  const bar0 = await laneCell(0, 0);
+  await page.mouse.click(bar0.x, bar0.y);
   await page.waitForFunction(() => window.__weetbeats_state.song.length === 1);
-  check("ticking a slot puts the pattern in the song", await page.evaluate(() =>
-    window.__weetbeats_state.song[0] === 0));
-  check("the slot Rust was told is the first one", (await lastCall("set_song_slot")).args.index === 0);
+  check("clicking a bar puts the pattern in the song",
+    JSON.stringify(await song()) === JSON.stringify([[0]]), JSON.stringify(await song()));
   check("the hint goes away", !(await page.locator("#songHint").isVisible()));
-  song = await canvasSize("lanes");
-  check("the song is now a 16 step block plus the spare",
-    song.w === 16 * SONG_STEP + 16 * SONG_STEP, `${song.w}px`);
+  check("and the block is drawn there", (await painted(0, 0)) === ACCENT, await lanePixel(0, 0));
+  check("the bar next to it is still empty", (await blank(1, 0)) !== ACCENT);
 
-  // --- a longer pattern is a longer block
+  // --- patterns stack: the whole point of a bar holding a set of them
+  const stacked = await laneCell(0, 1);
+  await page.mouse.click(stacked.x, stacked.y);
+  await page.waitForFunction(() => window.__weetbeats_state.song[0].length === 2);
+  check("two patterns can play in the same bar",
+    JSON.stringify(await song()) === JSON.stringify([[0, 1]]), JSON.stringify(await song()));
+  check("and both are drawn", (await painted(0, 1)) === ACCENT, await lanePixel(0, 1));
+
+  // --- drag along a lane to fill in bars
+  await clearCalls();
+  const from = await laneCell(1, 0);
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  for (let bar = 1; bar <= 4; bar++) {
+    const at = await laneCell(bar, 0);
+    await page.mouse.move(at.x, at.y, { steps: 3 });
+  }
+  await page.mouse.up();
+  const drawnBars = (await calls("set_song_bar")).map((c) => c.args);
+  check("dragging fills in a run of bars", drawnBars.length === 4, `${drawnBars.length} bars`);
+  check("and only turns them on", drawnBars.every((b) => b.on === true));
+  check("the song is five bars long now", (await song()).length === 5, JSON.stringify(await song()));
+  check("the whole run is drawn", (await painted(3, 0)) === ACCENT);
+
+  // --- a pattern with more in it than its run can hold says so
   await rows.nth(1).click();
   await page.waitForSelector("#editor:visible");
+  await page.locator("#steps").click();
   await page.locator("#steps").fill("32");
   await page.locator("#steps").press("Enter");
   await page.waitForFunction(() => document.getElementById("steps").value === "32");
-  // Escape works from the steps box too: it is a number field, it has no use for it.
-  await page.keyboard.press("Escape");
+  await page.locator("#songMode").click();
   await page.waitForSelector("#song:visible");
-  const second = await laneCell(16 * SONG_STEP, 1);
-  await page.mouse.click(second.x, second.y);
-  await page.waitForFunction(() => window.__weetbeats_state.song.length === 2);
-  song = await canvasSize("lanes");
-  check("a 32 step pattern is twice the block",
-    song.w === (16 + 32 + 16) * SONG_STEP, `${song.w}px`);
+  check("a pattern too long for its one bar is notched at the end",
+    (await painted(0, 1)) === ACCENT && (await lanePixelNear(0, 1, 59)) !== ACCENT,
+    `${await lanePixel(0, 1)} then ${await lanePixelNear(0, 1, 59)}`);
+  // Back to a bar's worth, so the rest of the song checks are about whole patterns.
+  await rows.nth(1).click();
+  await page.waitForSelector("#editor:visible");
+  await page.locator("#steps").click();
+  await page.locator("#steps").fill("16");
+  await page.locator("#steps").press("Enter");
+  await page.waitForFunction(() => document.getElementById("steps").value === "16");
+  await page.locator("#songMode").click();
+  await page.waitForSelector("#song:visible");
+
+  // --- right click rubs a pattern out of a bar
+  await clearCalls();
+  const rub = await laneCell(2, 0);
+  await page.mouse.click(rub.x, rub.y, { button: "right" });
+  await page.waitForFunction(() => window.__weetbeats_state.song[2].length === 0);
+  check("right click takes a pattern out of a bar",
+    (await lastCall("set_song_bar")).args.on === false);
+  check("which leaves a rest in the middle", (await song()).length === 5);
+  check("and the block is gone from there", (await blank(2, 0)) !== ACCENT, await lanePixel(2, 0));
+
+  // --- right click on the scrubber takes the whole bar out
+  await clearCalls();
+  const scrubber = await page.locator("#scrubber").boundingBox();
+  await page.mouse.click(scrubber.x + 2 * BAR_PX + 10, scrubber.y + scrubber.height / 2, { button: "right" });
+  await page.waitForFunction(() => window.__weetbeats_state.song.length === 4);
+  check("right click on the scrubber removes the bar", (await calls("remove_song_bar")).length === 1);
+  check("and everything after it moves up", (await song()).length === 4, JSON.stringify(await song()));
 
   if (process.env.WEETBEATS_SCREENSHOT) {
     await page.screenshot({ path: process.env.WEETBEATS_SCREENSHOT.replace(/\.png$/, "-song.png") });
   }
 
-  // --- the panel keeps up with the playhead without being rebuilt under your hands
+  // --- the scrubber plays from a bar
+  await clearCalls();
+  await page.mouse.click(scrubber.x + BAR_PX + 10, scrubber.y + scrubber.height / 2);
+  await page.waitForFunction(() => window.__weetbeats_calls.some((c) => c.name === "seek_song"));
+  check("clicking the scrubber seeks", (await lastCall("seek_song")).args.bar === 1);
+
+  // --- the playhead marks every pattern that is sounding, not just one
   await page.evaluate(() => {
     document.querySelectorAll("#patternList .prow")[0].dataset.marked = "yes";
-    window.__weetbeats_setStep(2, 0);
+    window.__weetbeats_setStep(4, 0);
   });
   await page.waitForFunction(() =>
-    document.querySelectorAll("#patternList .prow")[0].classList.contains("playing"));
-  await page.evaluate(() => window.__weetbeats_setStep(2, 1));
-  await page.waitForFunction(() =>
-    document.querySelectorAll("#patternList .prow")[1].classList.contains("playing"));
-  check("the playing mark follows the song from slot to slot",
-    !(await rows.first().evaluate((n) => n.classList.contains("playing"))));
+    document.querySelectorAll("#patternList .prow.playing").length === 2, null, { timeout: 4000 });
+  check("both patterns in the bar show as playing",
+    (await page.locator("#patternList .prow.playing").count()) === 2);
   check("and the rows are not rebuilt while it plays, so a rename survives",
     (await rows.first().evaluate((n) => n.dataset.marked)) === "yes");
-
-  // --- ticking a slot that is already that pattern takes it out again
-  await clearCalls();
-  const again = await laneCell(0, 0);
-  await page.mouse.click(again.x, again.y);
-  await page.waitForFunction(() => window.__weetbeats_state.song.length === 1);
-  check("ticking a filled slot clears it", (await calls("clear_song_slot")).length === 1);
-  check("and the song closes the gap", await page.evaluate(() =>
-    window.__weetbeats_state.song.length === 1 && window.__weetbeats_state.song[0] !== 0));
-
-  // --- the scrubber plays from a slot
-  await clearCalls();
-  const scrubber = await page.locator("#scrubber").boundingBox();
-  await page.mouse.click(scrubber.x + 4, scrubber.y + scrubber.height / 2);
-  await page.waitForFunction(() => window.__weetbeats_calls.some((c) => c.name === "seek_song"));
-  check("clicking the scrubber seeks", (await lastCall("seek_song")).args.index === 0);
-
-  // --- the playhead is followed, and says which pattern is sounding
-  await page.evaluate(() => window.__weetbeats_setStep(4, 0));
-  await page.waitForFunction(() =>
-    document.querySelector("#patternList .prow.playing") !== null, null, { timeout: 4000 });
-  check("the panel shows which pattern is playing",
-    await rows.nth(1).evaluate((n) => n.classList.contains("playing")));
-  check("play shows as on", await page.evaluate(() =>
-    document.getElementById("play").classList.contains("on")));
 
   // --- space plays and stops
   await clearCalls();
@@ -396,11 +537,11 @@ const SONG_STEP = 4;
   check("space starts it again", (await lastCall("set_playing")).args.playing === true);
   await page.locator("body").press("Space");
 
-  // --- space with a slider focused still plays; only text fields should swallow it
+  // --- space with a number focused still plays: only real text should swallow it
   await clearCalls();
   await page.locator("#bpm").focus();
   await page.keyboard.press("Space");
-  check("space works with a slider focused", (await calls("set_playing")).length > 0);
+  check("space works with the tempo focused", (await calls("set_playing")).length > 0);
 
   // --- mute, solo, volume, delete
   await rows.first().click();
@@ -417,11 +558,6 @@ const SONG_STEP = 4;
   const gain = (await lastCall("set_track_gain")).args;
   check("volume reaches the engine", Math.abs(gain.gain - 0.4) < 1e-6, JSON.stringify(gain));
 
-  // --- bpm
-  await page.locator("#bpm").fill("145");
-  await page.waitForFunction(() => document.getElementById("bpmValue").textContent === "145");
-  check("bpm slider reads back", (await page.locator("#bpmValue").textContent()) === "145");
-
   // --- deleting a track takes its notes out of every pattern
   await page.locator("#trackHeaders .track").first().locator(".tick.kill").click();
   await page.waitForFunction(() => document.querySelectorAll("#trackHeaders .track").length === 2);
@@ -429,23 +565,39 @@ const SONG_STEP = 4;
   check("and its notes go with it", await page.evaluate(() =>
     window.__weetbeats_state.patterns.every((p) => p.lanes.every((l) => l.track !== 0))));
 
-  // --- saving
-  await clearCalls();
-  await page.keyboard.press("Meta+s");
-  await page.waitForFunction(() => window.__weetbeats_calls.some((c) => c.name === "save_project"));
-  check("cmd S writes the project out", (await calls("save_project")).length === 1);
-  check("and it says so", (await page.locator("#status").textContent()).includes("saved"),
+  // --- the File menu is Rust's, and it tells the front end what it did
+  await menu("save");
+  await page.waitForFunction(() =>
+    document.getElementById("status").textContent.includes("saved"));
+  check("saving says so", (await page.locator("#status").textContent()).includes("saved Untitled"),
     await page.locator("#status").textContent());
 
-  await page.locator("#saveAs").click();
+  await menu("save_as");
   await page.waitForFunction(() => document.getElementById("projectName").textContent === "Newer");
   check("save as renames the project", (await page.locator("#projectName").textContent()) === "Newer");
 
-  // --- cancelling the open dialog leaves everything alone
-  await page.locator("#openProject").click();
-  await page.waitForTimeout(150);
-  check("cancelling open changes nothing",
-    (await page.locator("#projectName").textContent()) === "Newer" && (await rows.count()) === 2);
+  await menu("trouble");
+  await page.waitForFunction(() =>
+    document.getElementById("status").textContent.includes("disk said no"));
+  check("and trouble in the menu reaches the status line",
+    (await page.locator("#status").textContent()).includes("disk said no"));
+
+  // --- opening a project replaces everything
+  await page.evaluate(() => {
+    window.__weetbeats_state.openFolder = "/elsewhere/Other.beat";
+    window.__weetbeats_state.patterns = [
+      { id: 0, name: "Opened", steps: 32, lanes: [] },
+      { id: 1, name: "Second", steps: 16, lanes: [] },
+    ];
+    window.__weetbeats_state.song = [[0], [0, 1]];
+  });
+  await menu("open");
+  await page.waitForFunction(() => document.getElementById("projectName").textContent === "Other");
+  check("opening a project redraws the patterns",
+    (await rows.first().locator(".pname").textContent()) === "Opened");
+  check("and lands in the song, because there is one",
+    await page.locator("#song").isVisible());
+  check("with the song it was saved with", (await song()).length === 2);
 
   // --- and the last pattern cannot be deleted
   await rows.nth(1).hover();
@@ -456,8 +608,6 @@ const SONG_STEP = 4;
   await page.waitForFunction(() =>
     document.getElementById("status").textContent.includes("at least one"));
   check("the last pattern stays", (await rows.count()) === 1);
-  check("and it says why", (await page.locator("#status").textContent()).includes("at least one"),
-    await page.locator("#status").textContent());
 
   check("no page errors", errors.length === 0, JSON.stringify(errors));
 

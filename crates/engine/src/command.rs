@@ -88,14 +88,14 @@ pub enum Command {
     /// True to play the song, false to loop the open pattern. The UI ties this to which
     /// view you are looking at.
     SetSongMode(bool),
-    /// How many slots of the song are in use.
+    /// How many bars of the song are in use.
     SetSongLen(u16),
-    /// Which pattern plays in a song slot.
-    SetSongSlot {
+    /// Which patterns play in a bar of the song, one bit each. They all sound together.
+    SetSongBar {
         index: u16,
-        pattern: u16,
+        patterns: u32,
     },
-    /// Jump the song to a slot and start it from the top of that pattern.
+    /// Jump the song to a bar and start from the top of it.
     SeekSong(u16),
     /// Play a track's sample right now, for clicking a row.
     Audition {

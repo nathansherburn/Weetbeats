@@ -12,8 +12,13 @@
 //! costs nothing.
 //!
 //! What plays depends on the mode. In pattern mode the open pattern loops, which is the
-//! pattern editor. In song mode the engine walks the song, and each slot plays one whole
-//! pattern, however long that pattern is.
+//! pattern editor. In song mode the engine walks the song a bar at a time, and a bar can
+//! hold any number of patterns: they all sound together, which is how a kick pattern, a hat
+//! pattern and a snare pattern add up to a beat.
+//!
+//! A pattern is not restarted every bar. Each one carries how far into its run it is, so a
+//! pattern painted across four bars plays through those four bars — twice if it is two bars
+//! long, four times if it is one.
 
 use std::sync::Arc;
 
@@ -26,7 +31,7 @@ use crate::shared::Shared;
 use crate::voice::{Trigger, VoicePool};
 use crate::{
     pitch_ratio, soft_clip, velocity_gain, MAX_BLOCK, MAX_NOTES_PER_TRACK, MAX_PATTERNS,
-    MAX_SONG_SLOTS, MAX_STEPS, MAX_TRACKS, PREVIEW_TRACK,
+    MAX_SONG_BARS, MAX_STEPS, MAX_TRACKS, PREVIEW_TRACK, STEPS_PER_BAR,
 };
 
 /// How fast a gain change slides to its new value. About 10ms at 48k, which is slow enough
@@ -131,10 +136,14 @@ pub struct Engine {
     tracks: [TrackState; MAX_TRACKS],
     /// Every pattern's notes. Indexed by pattern id, never resized after `new`.
     patterns: Vec<PatternState>,
-    /// The song: a pattern id per slot. One slot is one whole pattern.
-    song: [u16; MAX_SONG_SLOTS],
+    /// The song: the patterns playing in each bar, one bit each.
+    song: [u32; MAX_SONG_BARS],
+    /// Bars of the song in use.
     song_len: usize,
-    song_slot: usize,
+    song_bar: usize,
+    /// How many steps each pattern is into its current run of bars. What makes a pattern
+    /// carry on across bars instead of starting again at every one.
+    run_step: [u32; MAX_PATTERNS],
     /// True to play the song, false to loop the pattern the editor has open.
     song_mode: bool,
     active_pattern: usize,
@@ -173,9 +182,10 @@ impl Engine {
             patterns: (0..MAX_PATTERNS)
                 .map(|_| PatternState::new(steps))
                 .collect(),
-            song: [0; MAX_SONG_SLOTS],
+            song: [0; MAX_SONG_BARS],
             song_len: 0,
-            song_slot: 0,
+            song_bar: 0,
+            run_step: [0; MAX_PATTERNS],
             song_mode: false,
             active_pattern: 0,
             voices: VoicePool::new(),
@@ -224,7 +234,7 @@ impl Engine {
             if self.playing {
                 self.clock.advance(frames);
                 if self.clock.take_wrapped() {
-                    self.next_slot();
+                    self.next_bar();
                 }
             }
             done += frames;
@@ -240,8 +250,8 @@ impl Engine {
         self.shared.set_position(
             self.clock.step(),
             self.clock.progress(),
-            self.sounding_pattern() as u32,
-            self.song_slot as u32,
+            self.playing_mask(),
+            self.song_bar as u32,
         );
         self.shared.set_meters(self.voices.active(), peak);
         self.shared.add_frames(total_frames as u64);
@@ -314,63 +324,108 @@ impl Engine {
 
     // --- what is playing ---------------------------------------------------
 
-    /// The pattern whose notes are due to sound, or `None` when the song is empty and
-    /// there is nothing to play.
+    /// The patterns due to sound, one bit each. Empty in a song with nothing in this bar.
     #[inline]
-    fn playing_pattern(&self) -> Option<usize> {
+    fn playing_mask(&self) -> u32 {
         if self.song_mode {
             if self.song_len == 0 {
-                return None;
+                0
+            } else {
+                self.song[self.song_bar.min(self.song_len - 1)]
             }
-            let slot = self.song_slot.min(self.song_len - 1);
-            Some(self.song[slot] as usize)
         } else {
-            Some(self.active_pattern)
+            1u32 << self.active_pattern
         }
     }
 
-    /// What to tell the UI the playhead is in. An empty song still has to answer.
-    #[inline]
-    fn sounding_pattern(&self) -> usize {
-        self.playing_pattern().unwrap_or(self.active_pattern)
+    /// How long the thing being played is, in steps. A bar in song mode, and the pattern
+    /// itself when the editor has one open.
+    fn playing_steps(&self) -> u32 {
+        if self.song_mode {
+            STEPS_PER_BAR
+        } else {
+            self.patterns[self.active_pattern].steps
+        }
     }
 
     /// Point the clock at whatever is playing now. A shorter pattern pulls the playhead
     /// back to the top rather than leaving it past the end.
     fn tune_clock(&mut self) {
-        if let Some(pattern) = self.playing_pattern() {
-            let steps = self.patterns[pattern].steps;
-            self.clock.set_steps(steps);
+        let steps = self.playing_steps();
+        self.clock.set_steps(steps);
+    }
+
+    /// Work out how far into its run each pattern is at the top of the current bar.
+    ///
+    /// A run is however many bars in a row a pattern was painted across, and where you are
+    /// in it decides which of the pattern's own steps comes next. Walking back through the
+    /// bars is the only way to know, so it happens when the playhead jumps — a seek, a stop,
+    /// the top of the song — and never while the song is simply playing on.
+    fn resync_runs(&mut self) {
+        for pattern in 0..MAX_PATTERNS {
+            let bit = 1u32 << pattern;
+            let mut bars_before = 0u32;
+            let mut bar = self.song_bar as isize - 1;
+            while bar >= 0 && self.song[bar as usize] & bit != 0 {
+                bars_before += 1;
+                bar -= 1;
+            }
+            self.run_step[pattern] = bars_before * STEPS_PER_BAR;
         }
     }
 
-    /// Back to the top: the first slot of the song, and the first step of it.
+    /// Back to the top: the first bar of the song, and the first step of it.
     fn rewind_all(&mut self) {
-        self.song_slot = 0;
+        self.song_bar = 0;
+        self.resync_runs();
         self.tune_clock();
         self.clock.rewind();
     }
 
-    /// The pattern just finished, so the song moves on. In pattern mode the pattern simply
+    /// The bar just finished, so the song moves on. In pattern mode the pattern simply
     /// loops, which the clock has already done by itself.
-    fn next_slot(&mut self) {
+    fn next_bar(&mut self) {
         if !self.song_mode || self.song_len == 0 {
             return;
         }
-        self.song_slot = (self.song_slot + 1) % self.song_len;
+        self.song_bar += 1;
+        if self.song_bar >= self.song_len {
+            // Round again at the top, where every run starts from nothing.
+            self.song_bar = 0;
+            self.resync_runs();
+        }
         self.tune_clock();
     }
 
     /// Everything due on this step gets a voice.
+    ///
+    /// `step` is the step of the bar in song mode and the step of the pattern otherwise.
+    /// Which of a pattern's own steps that lands on depends on how far into its run it is.
     fn trigger_step(&mut self, step: u16) {
-        let Some(pattern) = self.playing_pattern() else {
-            return;
-        };
+        let mask = self.playing_mask();
+        for pattern in 0..MAX_PATTERNS {
+            if mask & (1u32 << pattern) == 0 {
+                // Not playing here, so its next run starts from the beginning.
+                self.run_step[pattern] = 0;
+                continue;
+            }
+            let steps = self.patterns[pattern].steps.max(1);
+            let local = if self.song_mode {
+                (self.run_step[pattern] % steps) as u16
+            } else {
+                step
+            };
+            self.trigger_pattern(pattern, local);
+            self.run_step[pattern] = self.run_step[pattern].saturating_add(1);
+        }
+    }
+
+    /// One pattern's notes at one of its own steps.
+    fn trigger_pattern(&mut self, pattern: usize, step: u16) {
         for track in 0..MAX_TRACKS {
             if !self.tracks[track].active {
                 continue;
             }
-            // A count, not a borrow, so the voice pool can be touched inside the loop.
             // Cloning the `Arc` is one atomic increment and the track keeps its own
             // reference, so nothing can be freed here.
             let Some(sample) = self.tracks[track].sample.clone() else {
@@ -478,7 +533,9 @@ impl Engine {
                 if let Some(p) = self.patterns.get_mut(pattern as usize) {
                     p.steps = steps;
                 }
-                if self.playing_pattern() == Some(pattern as usize) {
+                // In song mode a bar is a bar whatever is in it, so only the pattern the
+                // editor is looping cares about this.
+                if !self.song_mode && self.active_pattern == pattern as usize {
                     self.clock.set_steps(steps);
                 }
             }
@@ -521,28 +578,36 @@ impl Engine {
             }
             Command::SetSongMode(on) => {
                 self.song_mode = on;
+                self.resync_runs();
                 self.tune_clock();
             }
             Command::SetSongLen(len) => {
-                self.song_len = (len as usize).min(MAX_SONG_SLOTS);
-                if self.song_slot >= self.song_len {
-                    self.song_slot = 0;
+                self.song_len = (len as usize).min(MAX_SONG_BARS);
+                // Bars past the end hold nothing. Otherwise a song that shrank and then
+                // grew again would come back with whatever used to be in the middle of it.
+                for bar in self.song[self.song_len..].iter_mut() {
+                    *bar = 0;
+                }
+                if self.song_bar >= self.song_len {
+                    self.song_bar = 0;
+                    self.resync_runs();
                 }
                 self.tune_clock();
             }
-            Command::SetSongSlot { index, pattern } => {
-                let index = index as usize;
-                if index < MAX_SONG_SLOTS && (pattern as usize) < self.patterns.len() {
-                    self.song[index] = pattern;
-                    if self.song_mode && index == self.song_slot {
-                        self.tune_clock();
-                    }
+            Command::SetSongBar { index, patterns } => {
+                if let Some(bar) = self.song.get_mut(index as usize) {
+                    // Editing the song while it plays does not restart anything: whatever is
+                    // sounding keeps its place, which is what you want while you paint.
+                    *bar = patterns;
                 }
             }
             Command::SeekSong(index) => {
-                if self.song_len > 0 {
-                    self.song_slot = (index as usize).min(self.song_len - 1);
-                }
+                self.song_bar = if self.song_len == 0 {
+                    0
+                } else {
+                    (index as usize).min(self.song_len - 1)
+                };
+                self.resync_runs();
                 self.tune_clock();
                 self.clock.rewind();
             }
