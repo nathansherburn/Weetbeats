@@ -1,6 +1,6 @@
 [package]
 name = "weetbeats-engine"
-description = "Weetbeats audio engine: sample decoding, step clock, voice pool, mixer."
+description = "Weetbeats audio engine: sample decoding, step clock, voice pool, mixer, project files."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,7 +9,5 @@ repository.workspace = true
 [dependencies]
 rtrb.workspace = true
 serde.workspace = true
-symphonia = { version = "0.6", features = ["mp3", "flac", "vorbis", "ogg", "aac", "alac", "isomp4"] }
-
-[dev-dependencies]
 serde_json.workspace = true
+symphonia = { version = "0.6", features = ["mp3", "flac", "vorbis", "ogg", "aac", "alac", "isomp4"] }

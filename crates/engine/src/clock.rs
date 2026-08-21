@@ -18,6 +18,9 @@ pub struct StepClock {
     steps: u32,
     /// Set when a step boundary has been reached and nothing has triggered it yet.
     pending: bool,
+    /// Set when the last step of the pattern has just gone by. The engine reads this to
+    /// know when to move the song on to the next slot.
+    wrapped: bool,
 }
 
 impl StepClock {
@@ -30,6 +33,7 @@ impl StepClock {
             step: 0,
             steps: steps.max(1),
             pending: true,
+            wrapped: false,
         };
         clock.set_bpm(bpm);
         clock
@@ -81,6 +85,7 @@ impl StepClock {
         self.step = 0;
         self.accum = 0.0;
         self.pending = true;
+        self.wrapped = false;
     }
 
     /// True when a step should be triggered before rendering another frame.
@@ -108,13 +113,24 @@ impl StepClock {
         }
     }
 
+    /// True once when the pattern has just come round to the top, and false until it
+    /// happens again. Taking it means the caller has dealt with it.
+    #[inline]
+    pub fn take_wrapped(&mut self) -> bool {
+        std::mem::take(&mut self.wrapped)
+    }
+
     /// Move the clock on by frames that have been rendered.
     #[inline]
     pub fn advance(&mut self, frames: usize) {
         self.accum += frames as f64;
         while self.accum >= self.samples_per_step {
             self.accum -= self.samples_per_step;
-            self.step = (self.step + 1) % self.steps;
+            self.step += 1;
+            if self.step >= self.steps {
+                self.step = 0;
+                self.wrapped = true;
+            }
             self.pending = true;
         }
     }
@@ -177,6 +193,25 @@ mod tests {
         clock.set_bpm(240.0);
         assert!(clock.progress() <= 1.0);
         assert!(clock.frames_to_next_step() >= 1);
+    }
+
+    #[test]
+    fn coming_round_to_the_top_is_reported_once() {
+        let mut clock = StepClock::new(48_000, 120.0, 4);
+        for _ in 0..3 {
+            clock.advance(clock.frames_to_next_step());
+            assert!(
+                !clock.take_wrapped(),
+                "wrapped in the middle of the pattern"
+            );
+        }
+        clock.advance(clock.frames_to_next_step());
+        assert_eq!(clock.step(), 0);
+        assert!(
+            clock.take_wrapped(),
+            "the pattern came round and nobody said so"
+        );
+        assert!(!clock.take_wrapped(), "reported the same wrap twice");
     }
 
     #[test]

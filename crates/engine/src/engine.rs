@@ -3,6 +3,22 @@
 //! [`Engine::render`] is called by the audio device and nothing else. It must never
 //! allocate, lock, block, or touch a file — a stall of even a few milliseconds is a click.
 //! Everything it needs arrives ready-made through the command queue.
+//!
+//! ## Every pattern lives here
+//!
+//! The engine holds the notes of every pattern, not just the one playing. It has to: at the
+//! end of a pattern the song moves on to the next one *on the boundary frame*, and there is
+//! no time to ask the app thread for it. So a pattern change is a change of index, which
+//! costs nothing.
+//!
+//! What plays depends on the mode. In pattern mode the open pattern loops, which is the
+//! pattern editor. In song mode the engine walks the song a bar at a time, and a bar can
+//! hold any number of patterns: they all sound together, which is how a kick pattern, a hat
+//! pattern and a snare pattern add up to a beat.
+//!
+//! A pattern is not restarted every bar. Each one carries how far into its run it is, so a
+//! pattern painted across four bars plays through those four bars — twice if it is two bars
+//! long, four times if it is one.
 
 use std::sync::Arc;
 
@@ -14,8 +30,8 @@ use crate::sample::Sample;
 use crate::shared::Shared;
 use crate::voice::{Trigger, VoicePool};
 use crate::{
-    pitch_ratio, soft_clip, velocity_gain, MAX_BLOCK, MAX_NOTES_PER_TRACK, MAX_TRACKS,
-    PREVIEW_TRACK,
+    pitch_ratio, soft_clip, velocity_gain, MAX_BLOCK, MAX_NOTES_PER_TRACK, MAX_PATTERNS,
+    MAX_SONG_BARS, MAX_STEPS, MAX_TRACKS, PREVIEW_TRACK, STEPS_PER_BAR,
 };
 
 /// How fast a gain change slides to its new value. About 10ms at 48k, which is slow enough
@@ -23,6 +39,9 @@ use crate::{
 const GAIN_SMOOTHING_FRAMES: f32 = 480.0;
 
 /// One track's worth of audio thread state. Fixed size: no `Vec`, nothing to grow.
+///
+/// Notes are not in here. A track is a sound and how loud it is, which is the project's
+/// business; the notes belong to whichever pattern they were drawn in.
 struct TrackState {
     /// False when the slot is free. Free slots are skipped entirely.
     active: bool,
@@ -33,8 +52,6 @@ struct TrackState {
     gain: f32,
     muted: bool,
     soloed: bool,
-    notes: [EngineNote; MAX_NOTES_PER_TRACK],
-    note_count: usize,
 }
 
 impl TrackState {
@@ -46,39 +63,69 @@ impl TrackState {
             gain: 0.8,
             muted: false,
             soloed: false,
+        }
+    }
+}
+
+/// One track's notes in one pattern.
+struct NoteList {
+    notes: [EngineNote; MAX_NOTES_PER_TRACK],
+    count: usize,
+}
+
+impl NoteList {
+    fn empty() -> Self {
+        NoteList {
             notes: [EngineNote {
                 step: 0,
                 pitch: 0,
                 velocity: 0,
                 length: 0,
             }; MAX_NOTES_PER_TRACK],
-            note_count: 0,
+            count: 0,
         }
     }
 
     fn find(&self, step: u16, pitch: u8) -> Option<usize> {
-        self.notes[..self.note_count]
+        self.notes[..self.count]
             .iter()
             .position(|n| n.step == step && n.pitch == pitch)
     }
 
-    fn set_note(&mut self, note: EngineNote) {
+    fn set(&mut self, note: EngineNote) {
         match self.find(note.step, note.pitch) {
             Some(i) => self.notes[i] = note,
             None => {
-                if self.note_count < MAX_NOTES_PER_TRACK {
-                    self.notes[self.note_count] = note;
-                    self.note_count += 1;
+                if self.count < MAX_NOTES_PER_TRACK {
+                    self.notes[self.count] = note;
+                    self.count += 1;
                 }
             }
         }
     }
 
-    fn clear_note(&mut self, step: u16, pitch: u8) {
+    fn clear_one(&mut self, step: u16, pitch: u8) {
         if let Some(i) = self.find(step, pitch) {
             // Order does not matter, so fill the hole with the last note.
-            self.notes[i] = self.notes[self.note_count - 1];
-            self.note_count -= 1;
+            self.notes[i] = self.notes[self.count - 1];
+            self.count -= 1;
+        }
+    }
+}
+
+/// One pattern: how long it is, and what every track plays in it.
+struct PatternState {
+    steps: u32,
+    tracks: Vec<NoteList>,
+}
+
+impl PatternState {
+    /// The `Vec`s here are the point of taking `steps` in [`Engine::new`]: they are
+    /// allocated once, on the app thread, and only ever indexed after that.
+    fn new(steps: u32) -> Self {
+        PatternState {
+            steps,
+            tracks: (0..MAX_TRACKS).map(|_| NoteList::empty()).collect(),
         }
     }
 }
@@ -87,6 +134,19 @@ impl TrackState {
 /// from there once it has been handed over.
 pub struct Engine {
     tracks: [TrackState; MAX_TRACKS],
+    /// Every pattern's notes. Indexed by pattern id, never resized after `new`.
+    patterns: Vec<PatternState>,
+    /// The song: the patterns playing in each bar, one bit each.
+    song: [u32; MAX_SONG_BARS],
+    /// Bars of the song in use.
+    song_len: usize,
+    song_bar: usize,
+    /// How many steps each pattern is into its current run of bars. What makes a pattern
+    /// carry on across bars instead of starting again at every one.
+    run_step: [u32; MAX_PATTERNS],
+    /// True to play the song, false to loop the pattern the editor has open.
+    song_mode: bool,
+    active_pattern: usize,
     voices: VoicePool,
     clock: StepClock,
     playing: bool,
@@ -107,7 +167,7 @@ pub struct Engine {
 
 impl Engine {
     /// Build the engine. Do this on the app thread, then move the box to the audio thread:
-    /// it is a fair few kilobytes and this is the only place it gets allocated.
+    /// it is a megabyte or two of notes and this is the only place any of it is allocated.
     pub fn new(
         sample_rate: u32,
         bpm: f32,
@@ -116,8 +176,18 @@ impl Engine {
         rx: Consumer<Command>,
         trash: TrashBin,
     ) -> Box<Self> {
+        let steps = steps.clamp(1, MAX_STEPS as u32);
         Box::new(Engine {
             tracks: [const { TrackState::empty() }; MAX_TRACKS],
+            patterns: (0..MAX_PATTERNS)
+                .map(|_| PatternState::new(steps))
+                .collect(),
+            song: [0; MAX_SONG_BARS],
+            song_len: 0,
+            song_bar: 0,
+            run_step: [0; MAX_PATTERNS],
+            song_mode: false,
+            active_pattern: 0,
             voices: VoicePool::new(),
             clock: StepClock::new(sample_rate, bpm, steps),
             playing: false,
@@ -137,7 +207,8 @@ impl Engine {
     /// Fill `out` with interleaved audio, `channels` wide.
     ///
     /// The buffer is chopped at step boundaries so notes land on the exact frame they are
-    /// due, not at the start of whichever callback happens to contain them.
+    /// due, not at the start of whichever callback happens to contain them. That is also
+    /// what lets the song move on to the next pattern on the right frame.
     pub fn render(&mut self, out: &mut [f32], channels: usize) {
         self.drain_commands();
 
@@ -149,7 +220,7 @@ impl Engine {
         while done < total_frames {
             if self.playing && self.clock.due() {
                 let step = self.clock.take_step();
-                self.trigger_step(step);
+                self.trigger_step(step as u16);
             }
 
             let mut frames = (total_frames - done).min(MAX_BLOCK);
@@ -162,6 +233,9 @@ impl Engine {
 
             if self.playing {
                 self.clock.advance(frames);
+                if self.clock.take_wrapped() {
+                    self.next_bar();
+                }
             }
             done += frames;
         }
@@ -173,8 +247,12 @@ impl Engine {
         }
 
         self.shared.set_playing(self.playing);
-        self.shared
-            .set_position(self.clock.step(), self.clock.progress());
+        self.shared.set_position(
+            self.clock.step(),
+            self.clock.progress(),
+            self.playing_mask(),
+            self.song_bar as u32,
+        );
         self.shared.set_meters(self.voices.active(), peak);
         self.shared.add_frames(total_frames as u64);
     }
@@ -244,26 +322,124 @@ impl Engine {
         }
     }
 
+    // --- what is playing ---------------------------------------------------
+
+    /// The patterns due to sound, one bit each. Empty in a song with nothing in this bar.
+    #[inline]
+    fn playing_mask(&self) -> u32 {
+        if self.song_mode {
+            if self.song_len == 0 {
+                0
+            } else {
+                self.song[self.song_bar.min(self.song_len - 1)]
+            }
+        } else {
+            1u32 << self.active_pattern
+        }
+    }
+
+    /// How long the thing being played is, in steps. A bar in song mode, and the pattern
+    /// itself when the editor has one open.
+    fn playing_steps(&self) -> u32 {
+        if self.song_mode {
+            STEPS_PER_BAR
+        } else {
+            self.patterns[self.active_pattern].steps
+        }
+    }
+
+    /// Point the clock at whatever is playing now. A shorter pattern pulls the playhead
+    /// back to the top rather than leaving it past the end.
+    fn tune_clock(&mut self) {
+        let steps = self.playing_steps();
+        self.clock.set_steps(steps);
+    }
+
+    /// Work out how far into its run each pattern is at the top of the current bar.
+    ///
+    /// A run is however many bars in a row a pattern was painted across, and where you are
+    /// in it decides which of the pattern's own steps comes next. Walking back through the
+    /// bars is the only way to know, so it happens when the playhead jumps — a seek, a stop,
+    /// the top of the song — and never while the song is simply playing on.
+    fn resync_runs(&mut self) {
+        for pattern in 0..MAX_PATTERNS {
+            let bit = 1u32 << pattern;
+            let mut bars_before = 0u32;
+            let mut bar = self.song_bar as isize - 1;
+            while bar >= 0 && self.song[bar as usize] & bit != 0 {
+                bars_before += 1;
+                bar -= 1;
+            }
+            self.run_step[pattern] = bars_before * STEPS_PER_BAR;
+        }
+    }
+
+    /// Back to the top: the first bar of the song, and the first step of it.
+    fn rewind_all(&mut self) {
+        self.song_bar = 0;
+        self.resync_runs();
+        self.tune_clock();
+        self.clock.rewind();
+    }
+
+    /// The bar just finished, so the song moves on. In pattern mode the pattern simply
+    /// loops, which the clock has already done by itself.
+    fn next_bar(&mut self) {
+        if !self.song_mode || self.song_len == 0 {
+            return;
+        }
+        self.song_bar += 1;
+        if self.song_bar >= self.song_len {
+            // Round again at the top, where every run starts from nothing.
+            self.song_bar = 0;
+            self.resync_runs();
+        }
+        self.tune_clock();
+    }
+
     /// Everything due on this step gets a voice.
-    fn trigger_step(&mut self, step: u32) {
-        let step = step as u16;
-        for track_index in 0..MAX_TRACKS {
-            let track = &self.tracks[track_index];
-            if !track.active {
+    ///
+    /// `step` is the step of the bar in song mode and the step of the pattern otherwise.
+    /// Which of a pattern's own steps that lands on depends on how far into its run it is.
+    fn trigger_step(&mut self, step: u16) {
+        let mask = self.playing_mask();
+        for pattern in 0..MAX_PATTERNS {
+            if mask & (1u32 << pattern) == 0 {
+                // Not playing here, so its next run starts from the beginning.
+                self.run_step[pattern] = 0;
                 continue;
             }
-            let Some(sample) = track.sample.as_ref() else {
+            let steps = self.patterns[pattern].steps.max(1);
+            let local = if self.song_mode {
+                (self.run_step[pattern] % steps) as u16
+            } else {
+                step
+            };
+            self.trigger_pattern(pattern, local);
+            self.run_step[pattern] = self.run_step[pattern].saturating_add(1);
+        }
+    }
+
+    /// One pattern's notes at one of its own steps.
+    fn trigger_pattern(&mut self, pattern: usize, step: u16) {
+        for track in 0..MAX_TRACKS {
+            if !self.tracks[track].active {
+                continue;
+            }
+            // Cloning the `Arc` is one atomic increment and the track keeps its own
+            // reference, so nothing can be freed here.
+            let Some(sample) = self.tracks[track].sample.clone() else {
                 continue;
             };
-            for i in 0..track.note_count {
-                let note = track.notes[i];
+            for i in 0..self.patterns[pattern].tracks[track].count {
+                let note = self.patterns[pattern].tracks[track].notes[i];
                 if note.step != step {
                     continue;
                 }
                 let trigger = Trigger {
-                    sample: Arc::clone(sample),
-                    track: track_index as u16,
-                    ratio: self.playback_ratio(sample, note.pitch),
+                    sample: Arc::clone(&sample),
+                    track: track as u16,
+                    ratio: self.playback_ratio(&sample, note.pitch),
                     gain: velocity_gain(note.velocity),
                 };
                 self.voices.trigger(trigger);
@@ -277,6 +453,8 @@ impl Engine {
         (sample.source_rate as f64 / self.sample_rate) * pitch_ratio(pitch)
     }
 
+    // --- commands ----------------------------------------------------------
+
     /// Take everything waiting in the command queue. Popping is a memcpy from a ring
     /// buffer: no locks, no allocation, no chance of blocking the app thread either.
     fn drain_commands(&mut self) {
@@ -285,43 +463,52 @@ impl Engine {
         }
     }
 
+    /// Notes for one track in one pattern, if both exist. Guards every index below, so a
+    /// command that arrives for something that has gone is ignored rather than a panic.
+    #[inline]
+    fn notes_mut(&mut self, pattern: u16, track: u16) -> Option<&mut NoteList> {
+        self.patterns
+            .get_mut(pattern as usize)?
+            .tracks
+            .get_mut(track as usize)
+    }
+
     fn apply(&mut self, command: Command) {
         match command {
             Command::SetPlaying(playing) => {
                 self.playing = playing;
                 if !playing {
                     // Stop leaves ringing voices to finish; it is not a panic button.
-                    self.clock.rewind();
+                    self.rewind_all();
                 }
             }
-            Command::Rewind => self.clock.rewind(),
+            Command::Rewind => self.rewind_all(),
             Command::SetBpm(bpm) => self.clock.set_bpm(bpm),
-            Command::SetSteps(steps) => self.clock.set_steps(steps),
             Command::SetMasterGain(gain) => self.master_gain_target = gain.clamp(0.0, 2.0),
             Command::AddTrack { track, gain } => {
                 if let Some(t) = self.tracks.get_mut(track as usize) {
                     t.active = true;
-                    t.note_count = 0;
                     t.muted = false;
                     t.soloed = false;
                     t.target_gain = gain.clamp(0.0, 2.0);
                     t.gain = t.target_gain;
                 }
+                self.forget_track(track);
             }
             Command::RemoveTrack { track } => {
                 self.voices.release_track(track);
                 if let Some(t) = self.tracks.get_mut(track as usize) {
                     t.active = false;
-                    t.note_count = 0;
                     if let Some(sample) = t.sample.take() {
                         self.trash.put(sample);
                     }
                 }
+                self.forget_track(track);
             }
             Command::SetTrackSample { track, sample } => {
                 self.voices.release_track(track);
                 if let Some(t) = self.tracks.get_mut(track as usize) {
-                    if let Some(old) = t.sample.replace_with(sample) {
+                    if let Some(old) = std::mem::replace(&mut t.sample, sample) {
                         self.trash.put(old);
                     }
                 }
@@ -341,20 +528,88 @@ impl Engine {
                     t.soloed = soloed;
                 }
             }
-            Command::SetNote { track, note } => {
-                if let Some(t) = self.tracks.get_mut(track as usize) {
-                    t.set_note(note);
+            Command::SetPatternSteps { pattern, steps } => {
+                let steps = steps.clamp(1, MAX_STEPS as u32);
+                if let Some(p) = self.patterns.get_mut(pattern as usize) {
+                    p.steps = steps;
+                }
+                // In song mode a bar is a bar whatever is in it, so only the pattern the
+                // editor is looping cares about this.
+                if !self.song_mode && self.active_pattern == pattern as usize {
+                    self.clock.set_steps(steps);
                 }
             }
-            Command::ClearNote { track, step, pitch } => {
-                if let Some(t) = self.tracks.get_mut(track as usize) {
-                    t.clear_note(step, pitch);
+            Command::SetNote {
+                pattern,
+                track,
+                note,
+            } => {
+                if let Some(notes) = self.notes_mut(pattern, track) {
+                    notes.set(note);
                 }
             }
-            Command::ClearNotes { track } => {
-                if let Some(t) = self.tracks.get_mut(track as usize) {
-                    t.note_count = 0;
+            Command::ClearNote {
+                pattern,
+                track,
+                step,
+                pitch,
+            } => {
+                if let Some(notes) = self.notes_mut(pattern, track) {
+                    notes.clear_one(step, pitch);
                 }
+            }
+            Command::ClearNotes { pattern, track } => {
+                if let Some(notes) = self.notes_mut(pattern, track) {
+                    notes.count = 0;
+                }
+            }
+            Command::ClearPattern { pattern } => {
+                if let Some(p) = self.patterns.get_mut(pattern as usize) {
+                    for notes in &mut p.tracks {
+                        notes.count = 0;
+                    }
+                }
+            }
+            Command::SetActivePattern(pattern) => {
+                if (pattern as usize) < self.patterns.len() {
+                    self.active_pattern = pattern as usize;
+                    self.tune_clock();
+                }
+            }
+            Command::SetSongMode(on) => {
+                self.song_mode = on;
+                self.resync_runs();
+                self.tune_clock();
+            }
+            Command::SetSongLen(len) => {
+                self.song_len = (len as usize).min(MAX_SONG_BARS);
+                // Bars past the end hold nothing. Otherwise a song that shrank and then
+                // grew again would come back with whatever used to be in the middle of it.
+                for bar in self.song[self.song_len..].iter_mut() {
+                    *bar = 0;
+                }
+                if self.song_bar >= self.song_len {
+                    self.song_bar = 0;
+                    self.resync_runs();
+                }
+                self.tune_clock();
+            }
+            Command::SetSongBar { index, patterns } => {
+                if let Some(bar) = self.song.get_mut(index as usize) {
+                    // Editing the song while it plays does not restart anything: whatever is
+                    // sounding keeps its place, which is what you want while you paint.
+                    *bar = patterns;
+                }
+            }
+            Command::SeekSong(index) => {
+                self.song_bar = if self.song_len == 0 {
+                    0
+                } else {
+                    (index as usize).min(self.song_len - 1)
+                };
+                self.resync_runs();
+                self.tune_clock();
+                self.clock.rewind();
             }
             Command::Audition {
                 track,
@@ -386,22 +641,19 @@ impl Engine {
             }
             Command::StopAll => {
                 self.playing = false;
-                self.clock.rewind();
+                self.rewind_all();
                 self.voices.release_all();
             }
         }
     }
-}
 
-/// `Option::replace` but returning the old value only when there was one, so the caller
-/// can bin it without a nested match.
-trait ReplaceWith<T> {
-    fn replace_with(&mut self, value: Option<T>) -> Option<T>;
-}
-
-impl<T> ReplaceWith<T> for Option<T> {
-    #[inline]
-    fn replace_with(&mut self, value: Option<T>) -> Option<T> {
-        std::mem::replace(self, value)
+    /// Drop a track's notes everywhere. A deleted track must not keep playing out of a
+    /// pattern nobody is looking at, and a new track in a reused slot starts empty.
+    fn forget_track(&mut self, track: u16) {
+        for pattern in &mut self.patterns {
+            if let Some(notes) = pattern.tracks.get_mut(track as usize) {
+                notes.count = 0;
+            }
+        }
     }
 }

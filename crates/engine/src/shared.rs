@@ -12,6 +12,10 @@ pub struct Playhead {
     pub playing: bool,
     /// Which step is sounding.
     pub step: u32,
+    /// Which patterns are sounding, one bit each. More than one bar at a time in a song.
+    pub patterns: u32,
+    /// Which bar of the song is playing, when the song is what is playing.
+    pub bar: u32,
     /// How far through that step, 0.0 to 1.0. Makes the cursor move smoothly.
     pub progress: f32,
     pub active_voices: u32,
@@ -24,6 +28,8 @@ pub struct Playhead {
 pub struct Shared {
     playing: AtomicBool,
     step: AtomicU32,
+    patterns: AtomicU32,
+    bar: AtomicU32,
     progress: AtomicU32,
     active_voices: AtomicU32,
     peak: AtomicU32,
@@ -44,6 +50,8 @@ impl Shared {
         Playhead {
             playing: self.playing.load(Ordering::Relaxed),
             step: self.step.load(Ordering::Relaxed),
+            patterns: self.patterns.load(Ordering::Relaxed),
+            bar: self.bar.load(Ordering::Relaxed),
             progress: f32::from_bits(self.progress.load(Ordering::Relaxed)),
             active_voices: self.active_voices.load(Ordering::Relaxed),
             peak: f32::from_bits(self.peak.load(Ordering::Relaxed)),
@@ -67,9 +75,11 @@ impl Shared {
     }
 
     #[inline]
-    pub(crate) fn set_position(&self, step: u32, progress: f32) {
+    pub(crate) fn set_position(&self, step: u32, progress: f32, patterns: u32, bar: u32) {
         self.step.store(step, Ordering::Relaxed);
         self.progress.store(progress.to_bits(), Ordering::Relaxed);
+        self.patterns.store(patterns, Ordering::Relaxed);
+        self.bar.store(bar, Ordering::Relaxed);
     }
 
     #[inline]

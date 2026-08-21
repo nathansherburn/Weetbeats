@@ -10,16 +10,66 @@ Open source, free forever.
 
 ## Where it is up to
 
-Stage 1 of [the build plan](docs/BUILD_PLAN.md) is done: a working step sequencer.
+Stages 1 and 2 of [the build plan](docs/BUILD_PLAN.md) are done: a step sequencer, and
+patterns strung together into a song.
 
 - Add instruments from the system file picker, or drop sounds on the window
 - Eight drums ship with it, and the picker opens on them the first time
-- Sixteen boxes a row, click or drag across them to paint a beat
+- Click or drag across the boxes to paint a beat; right click rubs one out
+- Set how many boxes a pattern has, one step at a time
+- Patterns down the left: click to open one, click it again to go back to the song
+- Song view: paint a pattern across the bars, and stack patterns to build a beat up
 - Click a track's name to hear it
-- Play, stop, tempo, master volume
+- Play, stop, tempo
 - Per track: volume, mute, solo, delete
 
-Patterns, songs and saving are stage 2.
+The sampler instrument is stage 3, the piano roll stage 4.
+
+### Patterns and the song
+
+A pattern is a grid of boxes and a length. An instrument belongs to the project rather than
+to one pattern, so every pattern plays the same kit and a new pattern is an empty grid over
+sounds you already have.
+
+The song is a row of **bars**, and a bar is sixteen steps — one pattern of the default
+length. A bar holds as many patterns as you like and **they all play together**, so a kick
+pattern, a hat pattern and a snare pattern add up to a beat. That is the whole reason to
+have patterns rather than one long grid: build the parts separately, then bring them in one
+at a time across the song.
+
+A pattern is not restarted at every bar. Each one plays straight through the run of bars you
+painted it across — a two bar pattern needs two bars, a four step pattern comes round four
+times in one. Give a pattern less room than it needs and it is cut off at the end of the run,
+which the notch on the right of the block is there to tell you.
+
+The song is painted, not ticked: press and drag along a lane to fill in bars, right click to
+rub one out, and right click the bar number along the top to take the whole bar out and close
+the gap. Drag along the bar numbers to play from anywhere.
+
+Patterns are windows over the song. Click one in the panel to open it, click it again — or
+press escape, or the × in the corner, or **song** at the top of the panel — to put it away.
+
+## Projects
+
+A project is a folder, so you can send one to a friend in one piece.
+
+```
+MySong.beat/
+  project.json
+  samples/
+    kick.wav
+    clap.wav
+```
+
+Samples are copied in the moment their track is added, and deleted when the last track using
+one goes — not gathered up at save time. So the folder always holds exactly what the project
+uses, and moving or deleting the file you dragged in cannot break anything. The only way to
+break a project is to go into its folder and break it by hand.
+
+The project is written out about once a second when anything has changed, and again when the
+window closes, so there is nothing to remember to do. The **File** menu has Open, Save and
+Save As: Save As puts a copy wherever you like and carries on working there, Open picks up
+another folder. Weetbeats reopens whatever you had last time.
 
 ## Running it
 
@@ -56,7 +106,8 @@ Three parts that never share a lock.
 ```
 
 - `crates/engine` — the audio engine. No system dependencies at all, so it builds and
-  tests on any machine. Step clock, voice pool, mixer, sample decoding, project model.
+  tests on any machine. Step clock, voice pool, mixer, sample decoding, the project model
+  and the project folder on disk.
 - `src-tauri` — the desktop app. Opens the audio device with `cpal`, decodes samples on
   worker threads, and answers the front end.
 - `ui` — HTML, CSS and one file of JavaScript. No framework, no build step.
@@ -81,6 +132,25 @@ Everything the audio thread needs is prepared elsewhere and handed over:
 
 A ticked box is a note at middle C, one step long — not a boolean. The piano roll in
 stage 4 is then a different editor over the same data instead of a project file migration.
+
+### Every pattern lives on the audio thread
+
+The engine holds the notes of every pattern, not just the ones playing. At the bar line the
+song moves on *on the boundary frame*, and there is no time to ask the app thread for what
+comes next — so a bar of the song is a `u32` with a bit per pattern, and moving on is reading
+the next one. Each pattern also carries how far into its run of bars it is, which is what
+makes it play through them rather than starting again at every bar.
+
+Which patterns play depends on the mode: the open pattern loops while you are editing it, and
+the song plays when you are looking at the song.
+
+### No master volume
+
+There is a level meter but no master fader. The system volume covers "make it quieter", and
+the track faders cover "make this bit quieter", which between them is everything a fader
+would have done except pulling the whole mix back off the soft clipper — and if the meter is
+pinned, pulling the tracks down is the better answer anyway. `masterGain` is still in
+`project.json` for anyone who wants to lean on it.
 
 ## Tests
 

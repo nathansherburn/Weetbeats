@@ -10,7 +10,6 @@ use std::sync::Arc;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, FromSample, OutputCallbackInfo, SampleFormat, SizedSample, StreamConfig};
 use rtrb::Consumer;
-use serde::Serialize;
 use weetbeats_engine::command::TrashBin;
 use weetbeats_engine::{Command, Engine, Shared};
 
@@ -18,9 +17,9 @@ use weetbeats_engine::{Command, Engine, Shared};
 /// anything bigger still gets rendered in several passes rather than allocating.
 const SCRATCH_FRAMES: usize = 4096;
 
-/// What the device turned out to be, for the status line.
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+/// What the device turned out to be. Printed once at startup: it never changes, and it is
+/// only interesting when something is wrong.
+#[derive(Clone, Debug)]
 pub struct AudioInfo {
     pub device: String,
     pub sample_rate: u32,

@@ -1,26 +1,47 @@
 //! Everything the front end can ask for.
 //!
-//! These run on the app thread. Anything that reads a file goes through
+//! These run on the app thread. Anything that reads a file or opens a dialog goes through
 //! `spawn_blocking` so a big sample cannot stall the window.
+//!
+//! Every one of these that changes the project does three things in the same order: change
+//! the project, tell the audio thread, mark the project for saving.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Serialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
+use weetbeats_engine::folder;
 use weetbeats_engine::sample::{is_audio_file, AUDIO_EXTENSIONS};
-use weetbeats_engine::{Command, EngineNote, Note, Project, SampleRef, Track, DEFAULT_PITCH};
+use weetbeats_engine::{
+    Command, EngineNote, Note, Pattern, Project, SampleRef, Track, DEFAULT_PITCH,
+};
 
-use crate::audio::AudioInfo;
 use crate::state::AppState;
 
-/// What the front end gets when it starts up.
-#[derive(Serialize)]
+/// What the front end gets when it starts up, and again when a project is opened.
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Startup {
     pub project: Project,
-    pub audio: AudioInfo,
+    /// The project's name, which is its folder's.
+    pub name: String,
+    /// Where it lives, for showing on hover.
+    pub folder: String,
+    /// The little waveforms the track rows draw. Not part of the project: they come from
+    /// the samples, and the front end has no way to work them out for itself.
+    pub waveforms: Vec<Waveform>,
+    /// Anything that went wrong opening it. Shown once.
+    pub message: Option<String>,
+}
+
+/// The shape of one track's sample, for drawing.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Waveform {
+    pub track: u16,
+    pub peaks: Vec<f32>,
 }
 
 /// A new row, with the waveform to draw in it.
@@ -40,6 +61,15 @@ pub struct Added {
     pub failed: Vec<String>,
 }
 
+/// The patterns and the song, whole. Anything that adds, copies or deletes a pattern hands
+/// both back rather than describing what it did, so the front end cannot drift out of step.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Arrangement {
+    pub patterns: Vec<Pattern>,
+    pub song: Vec<Vec<u16>>,
+}
+
 /// Polled every frame while playing. Kept small on purpose.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -47,18 +77,62 @@ pub struct PlayheadPayload {
     pub playing: bool,
     pub step: u32,
     pub progress: f32,
+    /// Which patterns are sounding, one bit each, and which bar of the song is playing.
+    pub patterns: u32,
+    pub bar: u32,
     pub voices: u32,
     pub peak: f32,
     pub stream_errors: u32,
+    /// Set when the project could not be written. Nothing else tells you that.
+    pub save_error: Option<String>,
+}
+
+/// Everything the front end needs to draw a project it has not seen before.
+///
+/// The samples are all in the cache by now — opening a project decodes them — so this is
+/// a few clones, not a read of the disk.
+fn startup_payload(state: &AppState, message: Option<String>) -> Startup {
+    let dir = state.dir();
+    let waveforms = {
+        let project = state.project.lock().unwrap();
+        project
+            .tracks
+            .iter()
+            .filter_map(|track| {
+                let reference = track.sample.as_ref()?;
+                let path = folder::resolve(&dir, &reference.path).ok()?;
+                let sample = state.load_sample(&path).ok()?;
+                Some(Waveform {
+                    track: track.id,
+                    peaks: sample.peaks.clone(),
+                })
+            })
+            .collect()
+    };
+    Startup {
+        project: state.project.lock().unwrap().clone(),
+        name: state.name(),
+        folder: dir.display().to_string(),
+        waveforms,
+        message,
+    }
+}
+
+fn arrangement(state: &AppState) -> Arrangement {
+    let project = state.project.lock().unwrap();
+    Arrangement {
+        patterns: project.patterns.clone(),
+        song: project.song.clone(),
+    }
 }
 
 #[tauri::command]
 pub fn startup(state: State<'_, Arc<AppState>>) -> Startup {
-    Startup {
-        project: state.project.lock().unwrap().clone(),
-        audio: state.audio.clone(),
-    }
+    let message = state.complaint.lock().unwrap().take();
+    startup_payload(&state, message)
 }
+
+// --- instruments ------------------------------------------------------------
 
 /// Where the drums that ship with the app live.
 ///
@@ -125,6 +199,19 @@ pub async fn add_instruments(
         .map_err(|e| format!("could not load the samples: {e}"))
 }
 
+/// Files dropped onto the window from the Finder. Same job as the picker, different door.
+#[tauri::command]
+pub async fn add_dropped(
+    paths: Vec<String>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Added, String> {
+    let state = Arc::clone(state.inner());
+    let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+    tauri::async_runtime::spawn_blocking(move || add_all(&state, paths))
+        .await
+        .map_err(|e| format!("could not load the samples: {e}"))
+}
+
 /// Add every path that decodes, and say what happened to the ones that do not.
 ///
 /// Nothing here is silent. A drop that quietly does nothing is worse than an error,
@@ -153,36 +240,56 @@ fn add_all(state: &AppState, paths: Vec<PathBuf>) -> Added {
             }
         }
     }
+    if !added.tracks.is_empty() {
+        state.touch();
+    }
     added
 }
 
-/// Files dropped onto the window from the Finder. Same job as the picker, different door.
-#[tauri::command]
-pub async fn add_dropped(
-    paths: Vec<String>,
-    state: State<'_, Arc<AppState>>,
-) -> Result<Added, String> {
-    let state = Arc::clone(state.inner());
-    let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
-    tauri::async_runtime::spawn_blocking(move || add_all(&state, paths))
-        .await
-        .map_err(|e| format!("could not load the samples: {e}"))
-}
+/// Copy a sample into the project, decode it, and give it a track.
+///
+/// The copy comes first. From that moment the project owns the sound: moving or deleting
+/// the file it came from cannot break the project, and there is no save step where it
+/// might not have been gathered up yet.
+fn add_track_now(state: &AppState, source: PathBuf) -> Result<NewTrack, String> {
+    // Nothing gets copied for a track we cannot make.
+    let free = {
+        let project = state.project.lock().unwrap();
+        project.free_track_id().ok_or_else(|| {
+            format!(
+                "that is {} tracks, which is all of them",
+                project.tracks.len()
+            )
+        })?
+    };
 
-fn add_track_now(state: &AppState, path: PathBuf) -> Result<NewTrack, String> {
-    let sample = state.load_sample(&path)?;
+    let dir = state.dir();
+    let imported = folder::import_sample(&dir, &source)?;
+    let path = folder::resolve(&dir, &imported.path)?;
+    if !imported.reused {
+        // A new file, at a name the folder may well have used before. Whatever was decoded
+        // from that path last time is a different sound, so forget it.
+        state.forget_sample(&path);
+    }
+
+    let sample = match state.load_sample(&path) {
+        Ok(sample) => sample,
+        Err(e) => {
+            // Not a sound we can play, so do not leave it lying in the project folder.
+            if state.project.lock().unwrap().sample_users(&imported.path) == 0 {
+                let _ = folder::remove_sample(&dir, &imported.path);
+            }
+            return Err(e);
+        }
+    };
 
     let mut project = state.project.lock().unwrap();
-    let used = project.pattern.tracks.len();
-    let id = project
-        .free_track_id()
-        .ok_or_else(|| format!("that is {used} tracks, which is all of them"))?;
-
+    let id = project.free_track_id().unwrap_or(free);
     let track = Track::new(
         id,
         sample.name.clone(),
         Some(SampleRef {
-            path: path.display().to_string(),
+            path: imported.path,
             name: sample.name.clone(),
         }),
     );
@@ -196,50 +303,30 @@ fn add_track_now(state: &AppState, path: PathBuf) -> Result<NewTrack, String> {
         sample: Some(Arc::clone(&sample)),
     });
 
-    project.pattern.tracks.push(track.clone());
+    project.tracks.push(track.clone());
     Ok(NewTrack {
         track,
         peaks: sample.peaks.clone(),
     })
 }
 
+/// Delete a track, and the sample with it if nothing else was using it.
 #[tauri::command]
 pub fn remove_track(id: u16, state: State<'_, Arc<AppState>>) {
-    let mut project = state.project.lock().unwrap();
-    project.pattern.tracks.retain(|t| t.id != id);
-    state.send(Command::RemoveTrack { track: id });
-}
-
-/// Tick or untick a step. Returns what the box actually is now.
-#[tauri::command]
-pub fn set_step(id: u16, step: u32, on: bool, state: State<'_, Arc<AppState>>) -> bool {
-    let mut project = state.project.lock().unwrap();
-    let Some(track) = project.track_mut(id) else {
-        return false;
+    let orphan = {
+        let mut project = state.project.lock().unwrap();
+        let removed = project.remove_track(id);
+        state.send(Command::RemoveTrack { track: id });
+        removed
+            .and_then(|track| track.sample)
+            .filter(|sample| project.sample_users(&sample.path) == 0)
     };
-    let now_on = track.set_step(step, on);
-
-    // The engine holds the same note, not a boolean, so the piano roll can send richer
-    // ones later without either side changing.
-    if now_on {
-        let note = Note::step_note(step);
-        state.send(Command::SetNote {
-            track: id,
-            note: EngineNote {
-                step: note.step as u16,
-                pitch: note.pitch,
-                velocity: note.velocity,
-                length: note.length as u16,
-            },
-        });
-    } else {
-        state.send(Command::ClearNote {
-            track: id,
-            step: step as u16,
-            pitch: DEFAULT_PITCH,
-        });
+    if let Some(sample) = orphan {
+        // The project folder holds exactly what the project uses, so this goes now rather
+        // than at some tidy-up later.
+        let _ = folder::remove_sample(&state.dir(), &sample.path);
     }
-    now_on
+    state.touch();
 }
 
 #[tauri::command]
@@ -252,6 +339,7 @@ pub fn set_track_gain(id: u16, gain: f32, state: State<'_, Arc<AppState>>) {
             gain: track.gain,
         });
     }
+    state.touch();
 }
 
 #[tauri::command]
@@ -261,6 +349,7 @@ pub fn set_track_muted(id: u16, muted: bool, state: State<'_, Arc<AppState>>) {
         track.muted = muted;
         state.send(Command::SetTrackMuted { track: id, muted });
     }
+    state.touch();
 }
 
 #[tauri::command]
@@ -270,6 +359,7 @@ pub fn set_track_soloed(id: u16, soloed: bool, state: State<'_, Arc<AppState>>) 
         track.soloed = soloed;
         state.send(Command::SetTrackSoloed { track: id, soloed });
     }
+    state.touch();
 }
 
 /// Hear a track without waiting for its next step.
@@ -282,19 +372,188 @@ pub fn audition(id: u16, state: State<'_, Arc<AppState>>) {
     });
 }
 
+// --- patterns ---------------------------------------------------------------
+
+/// Tick or untick a step in a pattern. Returns what the box actually is now.
+#[tauri::command]
+pub fn set_step(
+    pattern: u16,
+    track: u16,
+    step: u32,
+    on: bool,
+    state: State<'_, Arc<AppState>>,
+) -> bool {
+    let mut project = state.project.lock().unwrap();
+    let Some(target) = project.pattern_mut(pattern) else {
+        return false;
+    };
+    if step >= target.steps {
+        return false;
+    }
+    let now_on = target.set_step(track, step, on);
+
+    // The engine holds the same note, not a boolean, so the piano roll can send richer
+    // ones later without either side changing.
+    if now_on {
+        let note = Note::step_note(step);
+        state.send(Command::SetNote {
+            pattern,
+            track,
+            note: EngineNote {
+                step: note.step as u16,
+                pitch: note.pitch,
+                velocity: note.velocity,
+                length: note.length as u16,
+            },
+        });
+    } else {
+        state.send(Command::ClearNote {
+            pattern,
+            track,
+            step: step as u16,
+            pitch: DEFAULT_PITCH,
+        });
+    }
+    drop(project);
+    state.touch();
+    now_on
+}
+
+#[tauri::command]
+pub fn add_pattern(state: State<'_, Arc<AppState>>) -> Result<Arrangement, String> {
+    let id = state
+        .project
+        .lock()
+        .unwrap()
+        .add_pattern()
+        .ok_or("that is as many patterns as there is room for")?;
+    state.push_pattern(id);
+    state.touch();
+    Ok(arrangement(&state))
+}
+
+#[tauri::command]
+pub fn duplicate_pattern(id: u16, state: State<'_, Arc<AppState>>) -> Result<Arrangement, String> {
+    let copy = state
+        .project
+        .lock()
+        .unwrap()
+        .duplicate_pattern(id)
+        .ok_or("that is as many patterns as there is room for")?;
+    state.push_pattern(copy);
+    state.touch();
+    Ok(arrangement(&state))
+}
+
+#[tauri::command]
+pub fn remove_pattern(id: u16, state: State<'_, Arc<AppState>>) -> Result<Arrangement, String> {
+    let removed = state.project.lock().unwrap().remove_pattern(id);
+    if !removed {
+        return Err("a song needs at least one pattern".into());
+    }
+    state.send(Command::ClearPattern { pattern: id });
+    state.push_song();
+    state.touch();
+    Ok(arrangement(&state))
+}
+
+/// Rename a pattern. Returns the name it ended up with: blank is not a name.
+#[tauri::command]
+pub fn rename_pattern(id: u16, name: String, state: State<'_, Arc<AppState>>) -> String {
+    let mut project = state.project.lock().unwrap();
+    let fallback = project.next_pattern_name();
+    let Some(pattern) = project.pattern_mut(id) else {
+        return String::new();
+    };
+    let trimmed = name.trim();
+    pattern.name = if trimmed.is_empty() {
+        fallback
+    } else {
+        trimmed.chars().take(40).collect()
+    };
+    let named = pattern.name.clone();
+    drop(project);
+    state.touch();
+    named
+}
+
+/// Change how many boxes a pattern has. Returns the length it ended up with, and drops any
+/// notes that no longer fit.
+#[tauri::command]
+pub fn set_pattern_steps(id: u16, steps: u32, state: State<'_, Arc<AppState>>) -> u32 {
+    let mut project = state.project.lock().unwrap();
+    let Some(pattern) = project.pattern_mut(id) else {
+        return 0;
+    };
+    let steps = pattern.set_steps(steps);
+    state.send(Command::SetPatternSteps { pattern: id, steps });
+    drop(project);
+    // The trimmed notes have to go from the engine too, and there is no telling which ones
+    // they were, so the pattern goes across again.
+    state.push_pattern(id);
+    state.touch();
+    steps
+}
+
+/// Open a pattern in the editor: it is what plays, on a loop, until it is closed.
+#[tauri::command]
+pub fn open_pattern(id: u16, state: State<'_, Arc<AppState>>) {
+    state.send(Command::SetActivePattern(id));
+    state.send(Command::SetSongMode(false));
+}
+
+/// Close the editor and go back to the song.
+#[tauri::command]
+pub fn close_pattern(state: State<'_, Arc<AppState>>) {
+    state.send(Command::SetSongMode(true));
+}
+
+// --- the song ---------------------------------------------------------------
+
+/// Put a pattern in a bar of the song, or take it out. Returns whether it is in there now,
+/// which the front end checks against what it drew.
+///
+/// One call a bar, so painting across the song is the same shape of thing as painting across
+/// a pattern: press, drag, and every bar the pointer crosses gets one of these.
+#[tauri::command]
+pub fn set_song_bar(bar: u32, pattern: u16, on: bool, state: State<'_, Arc<AppState>>) -> bool {
+    let now_on = state
+        .project
+        .lock()
+        .unwrap()
+        .set_bar_pattern(bar as usize, pattern, on);
+    state.push_song_bar(bar as usize);
+    state.touch();
+    now_on
+}
+
+/// Take a whole bar out of the song, so everything after it moves up one.
+#[tauri::command]
+pub fn remove_song_bar(bar: u32, state: State<'_, Arc<AppState>>) -> Vec<Vec<u16>> {
+    state.project.lock().unwrap().remove_bar(bar as usize);
+    // Everything shifted, so the whole song goes across rather than one bar.
+    state.push_song();
+    state.touch();
+    state.project.lock().unwrap().song.clone()
+}
+
+/// Drag the scrubber: play the song from this bar.
+#[tauri::command]
+pub fn seek_song(bar: u32, state: State<'_, Arc<AppState>>) {
+    state.send(Command::SeekSong(bar.min(u16::MAX as u32) as u16));
+}
+
+// --- transport --------------------------------------------------------------
+
 #[tauri::command]
 pub fn set_bpm(bpm: f32, state: State<'_, Arc<AppState>>) -> f32 {
     let mut project = state.project.lock().unwrap();
     project.bpm = bpm.clamp(40.0, 240.0);
     state.send(Command::SetBpm(project.bpm));
-    project.bpm
-}
-
-#[tauri::command]
-pub fn set_master_gain(gain: f32, state: State<'_, Arc<AppState>>) {
-    let mut project = state.project.lock().unwrap();
-    project.master_gain = gain.clamp(0.0, 1.5);
-    state.send(Command::SetMasterGain(project.master_gain));
+    let bpm = project.bpm;
+    drop(project);
+    state.touch();
+    bpm
 }
 
 #[tauri::command]
@@ -317,8 +576,126 @@ pub fn playhead(state: State<'_, Arc<AppState>>) -> PlayheadPayload {
         playing: playhead.playing,
         step: playhead.step,
         progress: playhead.progress,
+        patterns: playhead.patterns,
+        bar: playhead.bar,
         voices: playhead.active_voices,
         peak: playhead.peak,
         stream_errors: state.stream_errors(),
+        save_error: state.save_error(),
     }
+}
+
+// --- the project folder -----------------------------------------------------
+//
+// None of this is a command any more: opening and saving live in the File menu, which is a
+// native menu built in `main.rs`. A menu event has no reply to return, so these tell the
+// front end what happened by emitting an event at it instead.
+
+/// A project the front end should draw from scratch: opened, or saved somewhere new.
+pub const PROJECT_EVENT: &str = "project";
+/// The project has been written out, and here is what it is called.
+pub const SAVED_EVENT: &str = "saved";
+/// Something went wrong, in words fit for the status line.
+pub const TROUBLE_EVENT: &str = "trouble";
+
+fn app_state(app: &AppHandle) -> Arc<AppState> {
+    Arc::clone(app.state::<Arc<AppState>>().inner())
+}
+
+fn grumble(app: &AppHandle, trouble: String) {
+    let _ = app.emit(TROUBLE_EVENT, trouble);
+}
+
+/// Write the project out now. It is written every second or so anyway; this is for the
+/// person who wants to press the button.
+pub fn save(app: &AppHandle) {
+    let state = app_state(app);
+    match state.save_now() {
+        Ok(()) => {
+            let _ = app.emit(SAVED_EVENT, state.name());
+        }
+        Err(e) => grumble(app, e),
+    }
+}
+
+/// Copy the project, samples and all, to a folder of the user's choosing, and carry on
+/// working in the new one.
+pub fn save_as(app: &AppHandle) {
+    let state = app_state(app);
+    let name = format!("{}.{}", state.name(), folder::PROJECT_EXTENSION);
+    let picked = app
+        .dialog()
+        .file()
+        .set_title("Save the project")
+        .set_file_name(name)
+        .blocking_save_file();
+
+    let Some(picked) = picked else { return };
+    let mut target = match picked.into_path() {
+        Ok(path) => path,
+        Err(e) => return grumble(app, format!("that is not a folder we can save to: {e}")),
+    };
+    if target.extension().and_then(|e| e.to_str()) != Some(folder::PROJECT_EXTENSION) {
+        // A project is a folder with a name that says what it is.
+        let name = folder::name_of(&target);
+        target.set_file_name(format!("{name}.{}", folder::PROJECT_EXTENSION));
+    }
+
+    let from = state.dir();
+    if let Err(e) = state
+        .save_now()
+        .and_then(|()| folder::copy_folder(&from, &target))
+    {
+        return grumble(app, e);
+    }
+    state.set_dir(target);
+    if let Err(e) = state.save_now() {
+        return grumble(app, e);
+    }
+    let _ = app.emit(PROJECT_EVENT, startup_payload(&state, None));
+}
+
+/// Open another project folder. The one we are in is written out first, so nothing is lost
+/// by wandering off.
+pub fn open(app: &AppHandle) {
+    let state = app_state(app);
+    let mut dialog = app.dialog().file().set_title("Open a project");
+    if let Some(above) = state.dir().parent() {
+        dialog = dialog.set_directory(above);
+    }
+    let Some(picked) = dialog.blocking_pick_folder() else {
+        return;
+    };
+    let target = match picked.into_path() {
+        Ok(path) => path,
+        Err(e) => return grumble(app, format!("that is not a folder we can open: {e}")),
+    };
+    if !folder::is_project(&target) {
+        return grumble(
+            app,
+            format!(
+                "{} is not a Weetbeats project — look for a folder ending in .{}",
+                folder::name_of(&target),
+                folder::PROJECT_EXTENSION
+            ),
+        );
+    }
+
+    // Write what we have out before reading anything, so opening the folder we are already
+    // in cannot swap live work for an older copy of itself.
+    if let Err(e) = state.save_now() {
+        return grumble(app, e);
+    }
+    let opened = match folder::load(&target) {
+        Ok(project) => project,
+        Err(e) => return grumble(app, e),
+    };
+
+    state.send(Command::StopAll);
+    *state.project.lock().unwrap() = opened;
+    state.set_dir(target);
+    state.tidy_samples();
+    state.push_project();
+    let message = state.complaint.lock().unwrap().take();
+    let _ = app.emit(PROJECT_EVENT, startup_payload(&state, message));
 }
