@@ -36,7 +36,8 @@ const check = (name, ok, detail = "") => {
 const CELL = 42;
 const ROW = 46;
 const LANE = 34;
-const BAR_PX = 64;
+const SONG_STEP = 4;
+const BAR_PX = 16 * SONG_STEP;
 const ACCENT = "255,77,135";
 
 (async () => {
@@ -76,43 +77,29 @@ const ACCENT = "255,77,135";
    * next frame after a click, so these wait for the canvas to catch up rather than reading
    * it the instant the state changes.
    */
-  const lanePixel = (bar, row) =>
+  const lanePixel = (step, row) =>
     page.evaluate(
-      ([bar, row, barPx, lane]) => {
+      ([step, row, songStep, lane]) => {
         const dpr = window.devicePixelRatio || 1;
         const ctx = document.getElementById("lanes").getContext("2d");
-        const x = Math.round((bar * barPx + barPx / 2) * dpr);
+        const x = Math.round((step * songStep + 2) * dpr);
         const y = Math.round((row * lane + lane / 2) * dpr);
         const [r, g, b] = ctx.getImageData(x, y, 1, 1).data;
         return `${r},${g},${b}`;
       },
-      [bar, row, BAR_PX, LANE],
+      [step, row, SONG_STEP, LANE],
     );
 
-  /* A pixel somewhere else in a cell, for the marks drawn inside a block. */
-  const lanePixelNear = (bar, row, dx) =>
-    page.evaluate(
-      ([bar, row, dx, barPx, lane]) => {
-        const dpr = window.devicePixelRatio || 1;
-        const ctx = document.getElementById("lanes").getContext("2d");
-        const x = Math.round((bar * barPx + dx) * dpr);
-        const y = Math.round((row * lane + lane / 2) * dpr);
-        const [r, g, b] = ctx.getImageData(x, y, 1, 1).data;
-        return `${r},${g},${b}`;
-      },
-      [bar, row, dx, BAR_PX, LANE],
-    );
-
-  const settledPixel = async (bar, row, colour, want) => {
+  const settledPixel = async (step, row, colour, want) => {
     const deadline = Date.now() + 2000;
     for (;;) {
-      const got = await lanePixel(bar, row);
+      const got = await lanePixel(step, row);
       if ((got === colour) === want || Date.now() > deadline) return got;
       await page.waitForTimeout(25);
     }
   };
-  const painted = (bar, row) => settledPixel(bar, row, ACCENT, true);
-  const blank = (bar, row) => settledPixel(bar, row, ACCENT, false);
+  const painted = (step, row) => settledPixel(step, row, ACCENT, true);
+  const blank = (step, row) => settledPixel(step, row, ACCENT, false);
 
   // --- the window is the app's, not the webview's
   check("no title in the page", (await page.title()) === "");
@@ -421,103 +408,119 @@ const ACCENT = "255,77,135";
   check("delete removes the pattern", (await rows.count()) === 2);
   check("deleting the open one goes back to the song", await page.locator("#song").isVisible());
 
-  // --- the song is a grid of bars you can paint patterns into
-  const laneCell = async (bar, row) => {
+  // --- the song: each lane is divided by its own pattern's length
+  const laneCell = async (step, row) => {
     const b = await page.locator("#lanes").boundingBox();
-    return { x: b.x + bar * BAR_PX + BAR_PX / 2, y: b.y + row * LANE + LANE / 2 };
+    return { x: b.x + step * SONG_STEP + 2, y: b.y + row * LANE + LANE / 2 };
   };
   let lanes = await canvasSize("lanes");
   check("the song fills the window even when it is empty", lanes.w >= 900, `${lanes.w}px`);
-  check("a bar is sixteen steps wide", lanes.w % BAR_PX === 0, `${lanes.w}px`);
+  check("and is a whole number of bars wide", lanes.w % BAR_PX === 0, `${lanes.w}px`);
   check("the song has a lane per pattern", lanes.h === 2 * LANE, `${lanes.h}px`);
 
-  const bar0 = await laneCell(0, 0);
-  await page.mouse.click(bar0.x, bar0.y);
+  const top = await laneCell(0, 0);
+  await page.mouse.click(top.x, top.y);
   await page.waitForFunction(() => window.__weetbeats_state.song.length === 1);
-  check("clicking a bar puts the pattern in the song",
-    JSON.stringify(await song()) === JSON.stringify([[0]]), JSON.stringify(await song()));
+  check("clicking a lane puts the pattern in the song",
+    JSON.stringify(await song()) === JSON.stringify([{ step: 0, pattern: 0 }]),
+    JSON.stringify(await song()));
   check("the hint goes away", !(await page.locator("#songHint").isVisible()));
   check("and the block is drawn there", (await painted(0, 0)) === ACCENT, await lanePixel(0, 0));
-  check("the bar next to it is still empty", (await blank(1, 0)) !== ACCENT);
+  check("a sixteen step pattern fills the bar", (await painted(15, 0)) === ACCENT);
+  check("and not the bar after it", (await blank(16, 0)) !== ACCENT);
 
-  // --- patterns stack: the whole point of a bar holding a set of them
-  const stacked = await laneCell(0, 1);
-  await page.mouse.click(stacked.x, stacked.y);
-  await page.waitForFunction(() => window.__weetbeats_state.song[0].length === 2);
-  check("two patterns can play in the same bar",
-    JSON.stringify(await song()) === JSON.stringify([[0, 1]]), JSON.stringify(await song()));
+  // --- patterns overlap: the whole point of placing rather than sequencing
+  const under = await laneCell(0, 1);
+  await page.mouse.click(under.x, under.y);
+  await page.waitForFunction(() => window.__weetbeats_state.song.length === 2);
+  check("two patterns can play at the same time",
+    (await song()).filter((one) => one.step === 0).length === 2, JSON.stringify(await song()));
   check("and both are drawn", (await painted(0, 1)) === ACCENT, await lanePixel(0, 1));
 
-  // --- drag along a lane to fill in bars
+  // --- a four step pattern goes in four steps at a time, not a bar at a time
+  await rows.nth(1).click();
+  await page.waitForSelector("#editor:visible");
+  await page.locator("#steps").click();
+  await page.locator("#steps").fill("4");
+  await page.locator("#steps").press("Enter");
+  await page.waitForFunction(() => document.getElementById("steps").value === "4");
+  await page.locator("#songMode").click();
+  await page.waitForSelector("#song:visible");
+  check("shortening a pattern keeps its place in the song",
+    (await song()).some((one) => one.pattern === 1 && one.step === 0), JSON.stringify(await song()));
+  check("a four step pattern is a four step block", (await painted(0, 1)) === ACCENT);
+  check("and it does not fill the rest of the bar", (await blank(8, 1)) !== ACCENT);
+
   await clearCalls();
-  const from = await laneCell(1, 0);
+  const nextSlot = await laneCell(4, 1);
+  await page.mouse.click(nextSlot.x, nextSlot.y);
+  await page.waitForFunction(() =>
+    window.__weetbeats_state.song.some((one) => one.pattern === 1 && one.step === 4));
+  check("the slot next along starts four steps in",
+    (await lastCall("place_pattern")).args.slot === 1,
+    JSON.stringify((await lastCall("place_pattern")).args));
+  check("so two of them sit side by side", (await painted(4, 1)) === ACCENT);
+  check("with the rest of the bar still empty", (await blank(12, 1)) !== ACCENT);
+
+  // --- drag along a lane to fill it in
+  await clearCalls();
+  const from = await laneCell(8, 1);
   await page.mouse.move(from.x, from.y);
   await page.mouse.down();
-  for (let bar = 1; bar <= 4; bar++) {
-    const at = await laneCell(bar, 0);
+  for (const step of [8, 12, 16, 20]) {
+    const at = await laneCell(step, 1);
     await page.mouse.move(at.x, at.y, { steps: 3 });
   }
   await page.mouse.up();
-  const drawnBars = (await calls("set_song_bar")).map((c) => c.args);
-  check("dragging fills in a run of bars", drawnBars.length === 4, `${drawnBars.length} bars`);
-  check("and only turns them on", drawnBars.every((b) => b.on === true));
-  check("the song is five bars long now", (await song()).length === 5, JSON.stringify(await song()));
-  check("the whole run is drawn", (await painted(3, 0)) === ACCENT);
+  const drawn = (await calls("place_pattern")).map((c) => c.args);
+  check("dragging fills in a run of slots", drawn.length === 4, `${drawn.length} slots`);
+  check("and only turns them on", drawn.every((one) => one.on === true));
+  check("the slots it crossed are the ones it filled",
+    JSON.stringify(drawn.map((one) => one.slot)) === JSON.stringify([2, 3, 4, 5]),
+    drawn.map((one) => one.slot).join(","));
 
-  // --- a pattern with more in it than its run can hold says so
-  await rows.nth(1).click();
-  await page.waitForSelector("#editor:visible");
-  await page.locator("#steps").click();
-  await page.locator("#steps").fill("32");
-  await page.locator("#steps").press("Enter");
-  await page.waitForFunction(() => document.getElementById("steps").value === "32");
-  await page.locator("#songMode").click();
-  await page.waitForSelector("#song:visible");
-  check("a pattern too long for its one bar is notched at the end",
-    (await painted(0, 1)) === ACCENT && (await lanePixelNear(0, 1, 59)) !== ACCENT,
-    `${await lanePixel(0, 1)} then ${await lanePixelNear(0, 1, 59)}`);
-  // Back to a bar's worth, so the rest of the song checks are about whole patterns.
-  await rows.nth(1).click();
-  await page.waitForSelector("#editor:visible");
-  await page.locator("#steps").click();
-  await page.locator("#steps").fill("16");
-  await page.locator("#steps").press("Enter");
-  await page.waitForFunction(() => document.getElementById("steps").value === "16");
-  await page.locator("#songMode").click();
-  await page.waitForSelector("#song:visible");
-
-  // --- right click rubs a pattern out of a bar
+  // --- right click rubs a placement out
   await clearCalls();
-  const rub = await laneCell(2, 0);
+  const rub = await laneCell(12, 1);
   await page.mouse.click(rub.x, rub.y, { button: "right" });
-  await page.waitForFunction(() => window.__weetbeats_state.song[2].length === 0);
-  check("right click takes a pattern out of a bar",
-    (await lastCall("set_song_bar")).args.on === false);
-  check("which leaves a rest in the middle", (await song()).length === 5);
-  check("and the block is gone from there", (await blank(2, 0)) !== ACCENT, await lanePixel(2, 0));
+  await page.waitForFunction(() =>
+    !window.__weetbeats_state.song.some((one) => one.pattern === 1 && one.step === 12));
+  check("right click takes a placement out",
+    (await lastCall("place_pattern")).args.on === false);
+  check("and the block is gone from there", (await blank(12, 1)) !== ACCENT);
 
-  // --- right click on the scrubber takes the whole bar out
+  // --- right click on the scrubber empties the bar
   await clearCalls();
   const scrubber = await page.locator("#scrubber").boundingBox();
-  await page.mouse.click(scrubber.x + 2 * BAR_PX + 10, scrubber.y + scrubber.height / 2, { button: "right" });
-  await page.waitForFunction(() => window.__weetbeats_state.song.length === 4);
-  check("right click on the scrubber removes the bar", (await calls("remove_song_bar")).length === 1);
-  check("and everything after it moves up", (await song()).length === 4, JSON.stringify(await song()));
+  await page.mouse.click(scrubber.x + BAR_PX + 10, scrubber.y + scrubber.height / 2, { button: "right" });
+  await page.waitForFunction(() =>
+    !window.__weetbeats_state.song.some((one) => one.step >= 16 && one.step < 32));
+  check("right click on a bar empties it", (await calls("clear_song_bar")).length === 1);
+  check("and leaves the bars either side alone",
+    (await song()).some((one) => one.step === 0), JSON.stringify(await song()));
 
   if (process.env.WEETBEATS_SCREENSHOT) {
     await page.screenshot({ path: process.env.WEETBEATS_SCREENSHOT.replace(/\.png$/, "-song.png") });
   }
 
   // --- the scrubber plays from a bar
+  // Something in the second bar first: seeking past the end of the song lands on the last
+  // bar of it, which would make this prove nothing.
+  const secondBar = await laneCell(16, 0);
+  await page.mouse.click(secondBar.x, secondBar.y);
+  await page.waitForFunction(() =>
+    window.__weetbeats_state.song.some((one) => one.pattern === 0 && one.step === 16));
   await clearCalls();
   await page.mouse.click(scrubber.x + BAR_PX + 10, scrubber.y + scrubber.height / 2);
   await page.waitForFunction(() => window.__weetbeats_calls.some((c) => c.name === "seek_song"));
-  check("clicking the scrubber seeks", (await lastCall("seek_song")).args.bar === 1);
+  check("clicking the scrubber seeks to the top of that bar",
+    (await lastCall("seek_song")).args.step === 16,
+    JSON.stringify((await lastCall("seek_song")).args));
 
   // --- the playhead marks every pattern that is sounding, not just one
   await page.evaluate(() => {
     document.querySelectorAll("#patternList .prow")[0].dataset.marked = "yes";
-    window.__weetbeats_setStep(4, 0);
+    window.__weetbeats_setStep(0);
   });
   await page.waitForFunction(() =>
     document.querySelectorAll("#patternList .prow.playing").length === 2, null, { timeout: 4000 });

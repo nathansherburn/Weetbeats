@@ -11,17 +11,18 @@
 //! notes: one [`Lane`] per track that has any. That way adding a pattern gives you a fresh
 //! empty grid over the kit you already have, rather than an empty kit.
 //!
-//! The song is a row of bars, and each bar holds however many patterns you like. Patterns in
-//! the same bar sound together, which is how a kick pattern, a hat pattern and a snare
-//! pattern add up to a beat. A pattern painted across several bars keeps playing through
-//! them rather than starting again every bar, so a pattern longer than a bar gets the room
-//! it needs and a shorter one comes round again.
+//! The song is a list of placements: a pattern, and the step it starts at. One placement is
+//! one play-through, so a four step pattern takes four steps of the song and a thirty two
+//! step pattern takes thirty two. Placements sit on multiples of their own pattern's length,
+//! which is the only grid that makes sense when patterns are different lengths, and any
+//! number of them can overlap: that is how a kick pattern, a hat pattern and a snare pattern
+//! add up to a beat.
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    DEFAULT_PITCH, DEFAULT_STEPS, MAX_NOTES_PER_TRACK, MAX_PATTERNS, MAX_SONG_BARS, MAX_STEPS,
-    MAX_TRACKS, STEPS_PER_BAR,
+    DEFAULT_PITCH, DEFAULT_STEPS, MAX_NOTES_PER_TRACK, MAX_PATTERNS, MAX_PLACEMENTS,
+    MAX_SONG_STEPS, MAX_STEPS, MAX_TRACKS, STEPS_PER_BAR,
 };
 
 /// Bumped whenever the on-disk shape changes. Version 1 never reached a file — stage 1 had
@@ -212,6 +213,17 @@ impl Pattern {
     }
 }
 
+/// One pattern in the song: which pattern, and the step it starts at.
+///
+/// `step` is always a multiple of that pattern's own length, so two placements of the same
+/// pattern can never overlap each other and a placement is always exactly one play-through.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase")]
+pub struct Placement {
+    pub step: u32,
+    pub pattern: u16,
+}
+
 /// Everything the app knows about the song.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -224,9 +236,9 @@ pub struct Project {
     pub tracks: Vec<Track>,
     /// Always at least one.
     pub patterns: Vec<Pattern>,
-    /// The song, a bar at a time: which patterns play during each bar. Everything in a bar
-    /// sounds together.
-    pub song: Vec<Vec<u16>>,
+    /// The song: what plays where. Sorted, so the same song is always written out the same
+    /// way. Placements overlap freely — that is the point of them.
+    pub song: Vec<Placement>,
 }
 
 impl Default for Project {
@@ -329,90 +341,93 @@ impl Project {
             return false;
         };
         self.patterns.remove(at);
-        for bar in &mut self.song {
-            bar.retain(|in_bar| *in_bar != id);
-        }
-        self.trim_song();
+        self.song.retain(|placement| placement.pattern != id);
         true
     }
 
-    /// The patterns playing in a bar. Bars past the end of the song are silent.
-    pub fn bar(&self, index: usize) -> &[u16] {
+    /// True if this pattern plays at this step of the song.
+    pub fn placed(&self, pattern: u16, step: u32) -> bool {
         self.song
-            .get(index)
-            .map(|bar| bar.as_slice())
-            .unwrap_or(&[])
-    }
-
-    pub fn bar_has(&self, index: usize, pattern: u16) -> bool {
-        self.bar(index).contains(&pattern)
-    }
-
-    /// The patterns in a bar as one bit each, which is how the audio thread holds them.
-    pub fn bar_mask(&self, index: usize) -> u32 {
-        self.bar(index)
             .iter()
-            .filter(|id| (**id as usize) < MAX_PATTERNS)
-            .fold(0u32, |mask, id| mask | (1 << *id))
+            .any(|p| p.pattern == pattern && p.step == step)
     }
 
-    pub fn bars(&self) -> usize {
-        self.song.len()
+    /// Where a pattern's `slot`th place in the song would start. Slots are as long as the
+    /// pattern, so slot 3 of a four step pattern starts at step 12 and slot 3 of a sixteen
+    /// step pattern starts at step 48.
+    pub fn slot_step(&self, pattern: u16, slot: u32) -> Option<u32> {
+        let steps = self.pattern(pattern)?.steps.max(1);
+        Some(slot.saturating_mul(steps))
     }
 
-    /// Put a pattern in a bar of the song, or take it out. Returns whether it is in there
-    /// now, which is false if the pattern or the bar does not exist.
+    /// Put a pattern in the song, or take it out. `slot` counts in the pattern's own
+    /// lengths, so one slot is one play-through of it.
     ///
-    /// Turning one on fills in any empty bars before it, so you can drop a pattern in at
-    /// bar twelve and get eleven bars of silence in front of it. Turning one off leaves the
-    /// bar where it is, empty, because a rest in the middle of a song is a real thing to
-    /// want — only empty bars on the end are dropped.
-    pub fn set_bar_pattern(&mut self, index: usize, pattern: u16, on: bool) -> bool {
-        if self.pattern(pattern).is_none() {
+    /// Returns whether it is in there now, which is false if the pattern does not exist, the
+    /// song is full, or it would run off the end of the longest song we hold.
+    pub fn set_placement(&mut self, pattern: u16, slot: u32, on: bool) -> bool {
+        let Some(step) = self.slot_step(pattern, slot) else {
             return false;
-        }
+        };
+        let steps = self.pattern(pattern).map(|p| p.steps).unwrap_or(0);
         if !on {
-            if index < self.song.len() {
-                self.song[index].retain(|id| *id != pattern);
-                self.trim_song();
-            }
+            self.song
+                .retain(|p| !(p.pattern == pattern && p.step == step));
             return false;
         }
-        if index >= MAX_SONG_BARS {
+        if step + steps > MAX_SONG_STEPS as u32 || self.song.len() >= MAX_PLACEMENTS {
             return false;
         }
-        while self.song.len() <= index {
-            self.song.push(Vec::new());
-        }
-        let bar = &mut self.song[index];
-        if !bar.contains(&pattern) {
-            bar.push(pattern);
-            // Sorted, so the same song is always written out the same way.
-            bar.sort_unstable();
+        if !self.placed(pattern, step) {
+            self.song.push(Placement { step, pattern });
+            self.song.sort_unstable();
         }
         true
     }
 
-    /// Take a bar out of the song altogether, so everything after it moves up.
-    pub fn remove_bar(&mut self, index: usize) -> bool {
-        if index >= self.song.len() {
-            return false;
-        }
-        self.song.remove(index);
-        self.trim_song();
-        true
+    /// Everything that starts inside a bar, gone. What right clicking a bar does: the way
+    /// out of a mess without having to pick the pieces off one at a time.
+    pub fn clear_bar(&mut self, bar: u32) -> usize {
+        let from = bar * STEPS_PER_BAR;
+        let to = from + STEPS_PER_BAR;
+        let before = self.song.len();
+        self.song.retain(|p| p.step < from || p.step >= to);
+        before - self.song.len()
     }
 
-    /// Empty bars on the end are not part of the song.
-    fn trim_song(&mut self) {
-        while self.song.last().is_some_and(|bar| bar.is_empty()) {
-            self.song.pop();
-        }
-    }
-
-    /// Steps in the whole song, for drawing it.
+    /// Where the song ends, rounded up to a whole bar so it loops somewhere musical.
     pub fn song_steps(&self) -> u32 {
-        self.song.len() as u32 * STEPS_PER_BAR
+        let end = self
+            .song
+            .iter()
+            .map(|p| p.step + self.pattern(p.pattern).map(|one| one.steps).unwrap_or(0))
+            .max()
+            .unwrap_or(0);
+        end.div_ceil(STEPS_PER_BAR) * STEPS_PER_BAR
+    }
+
+    pub fn song_bars(&self) -> u32 {
+        self.song_steps() / STEPS_PER_BAR
+    }
+
+    /// Change a pattern's length, and move its places in the song onto the new grid.
+    ///
+    /// A pattern that was four steps and is now sixteen cannot keep four placements a bar
+    /// apart: they would sit on top of each other. So they are snapped to the new length and
+    /// the ones that land on the same step become one.
+    pub fn set_pattern_steps(&mut self, id: u16, steps: u32) -> u32 {
+        let Some(pattern) = self.pattern_mut(id) else {
+            return 0;
+        };
+        let steps = pattern.set_steps(steps);
+        for placement in &mut self.song {
+            if placement.pattern == id {
+                placement.step = (placement.step / steps) * steps;
+            }
+        }
+        self.song.sort_unstable();
+        self.song.dedup();
+        steps
     }
 }
 
@@ -562,69 +577,120 @@ mod tests {
     }
 
     #[test]
-    fn a_bar_of_the_song_holds_as_many_patterns_as_you_like() {
+    fn patterns_overlap_in_the_song_so_they_can_play_together() {
         let mut project = Project::default();
         let hats = project.add_pattern().unwrap();
         let snare = project.add_pattern().unwrap();
 
-        // A kick, a hat and a snare pattern, all sounding together in the first bar.
-        assert!(project.set_bar_pattern(0, 0, true));
-        assert!(project.set_bar_pattern(0, hats, true));
-        assert!(project.set_bar_pattern(0, snare, true));
-        assert_eq!(project.bar(0), &[0, hats, snare]);
-        assert_eq!(project.bars(), 1);
+        // A kick, a hat and a snare pattern, all starting at the top of the song.
+        assert!(project.set_placement(0, 0, true));
+        assert!(project.set_placement(hats, 0, true));
+        assert!(project.set_placement(snare, 0, true));
+        assert_eq!(project.song.len(), 3);
+        assert!(project.placed(hats, 0));
         assert_eq!(project.song_steps(), STEPS_PER_BAR);
 
         // Taking one out leaves the others where they are.
-        assert!(!project.set_bar_pattern(0, hats, false));
-        assert_eq!(project.bar(0), &[0, snare]);
-        assert!(project.bar_has(0, snare));
-        assert!(!project.bar_has(0, hats));
+        assert!(!project.set_placement(hats, 0, false));
+        assert!(!project.placed(hats, 0));
+        assert!(project.placed(snare, 0));
+    }
+
+    /// The point of placing by the pattern's own length: a four step pattern takes four steps
+    /// of the song, not a whole bar of it.
+    #[test]
+    fn a_slot_is_as_long_as_the_pattern_in_it() {
+        let mut project = Project::default();
+        let short = project.add_pattern().unwrap();
+        project.set_pattern_steps(short, 4);
+
+        assert_eq!(project.slot_step(short, 0), Some(0));
+        assert_eq!(project.slot_step(short, 1), Some(4));
+        assert_eq!(project.slot_step(0, 1), Some(16));
+
+        // One four step pattern in the first slot: four steps of music, one bar of song.
+        project.set_placement(short, 0, true);
+        assert!(project.placed(short, 0));
+        assert!(
+            !project.placed(short, 4),
+            "one slot is one play through, not a bar of them"
+        );
+        assert_eq!(
+            project.song_steps(),
+            STEPS_PER_BAR,
+            "the song still loops on the bar"
+        );
+
+        // And the next slot along starts where the first one ended.
+        project.set_placement(short, 1, true);
+        assert!(project.placed(short, 4));
+        assert_eq!(project.song.len(), 2);
     }
 
     #[test]
-    fn the_bar_mask_is_what_the_audio_thread_gets() {
+    fn the_song_is_as_long_as_the_last_thing_in_it_rounded_up_to_a_bar() {
         let mut project = Project::default();
-        let second = project.add_pattern().unwrap();
-        project.set_bar_pattern(0, 0, true);
-        project.set_bar_pattern(0, second, true);
-        assert_eq!(project.bar_mask(0), 0b11);
-        assert_eq!(project.bar_mask(1), 0, "a bar past the end is silent");
+        let long = project.add_pattern().unwrap();
+        project.set_pattern_steps(long, 32);
+
+        project.set_placement(0, 2, true); // sixteen steps, at step 32
+        assert_eq!(project.song_steps(), 48);
+        project.set_placement(long, 2, true); // thirty two steps, at step 64
+        assert_eq!(project.song_steps(), 96);
+        assert_eq!(project.song_bars(), 6);
     }
 
     #[test]
-    fn a_pattern_dropped_in_late_gets_silence_in_front_of_it() {
+    fn a_pattern_cannot_be_placed_twice_in_the_same_slot() {
         let mut project = Project::default();
-        assert!(project.set_bar_pattern(3, 0, true));
-        assert_eq!(project.bars(), 4);
-        assert!(project.bar(0).is_empty());
-        assert!(project.bar_has(3, 0));
-
-        // A rest in the middle stays a rest; only empty bars on the end go.
-        project.set_bar_pattern(1, 0, true);
-        project.set_bar_pattern(1, 0, false);
-        assert_eq!(project.bars(), 4);
-        project.set_bar_pattern(3, 0, false);
-        assert_eq!(project.bars(), 0, "nothing left, so no song");
+        assert!(project.set_placement(0, 3, true));
+        assert!(project.set_placement(0, 3, true));
+        assert_eq!(project.song.len(), 1);
     }
 
     #[test]
-    fn a_bar_can_be_taken_out_to_close_a_gap() {
+    fn clearing_a_bar_takes_out_everything_that_starts_in_it() {
         let mut project = Project::default();
-        let second = project.add_pattern().unwrap();
-        project.set_bar_pattern(0, 0, true);
-        project.set_bar_pattern(2, second, true);
+        let short = project.add_pattern().unwrap();
+        project.set_pattern_steps(short, 4);
+        // Four short placements across the first bar, and one in the second.
+        for slot in 0..5 {
+            project.set_placement(short, slot, true);
+        }
+        project.set_placement(0, 0, true);
 
-        assert!(project.remove_bar(1));
-        assert_eq!(project.bars(), 2);
-        assert!(project.bar_has(1, second));
-        assert!(!project.remove_bar(9));
+        assert_eq!(project.clear_bar(0), 5, "four short ones and the long one");
+        assert_eq!(project.song.len(), 1);
+        assert!(project.placed(short, 16));
+    }
+
+    #[test]
+    fn changing_a_length_moves_the_places_it_was_put() {
+        let mut project = Project::default();
+        project.set_pattern_steps(0, 4);
+        for slot in 0..4 {
+            project.set_placement(0, slot, true);
+        }
+        assert_eq!(project.song.len(), 4);
+
+        // Four steps to sixteen: all four placements were inside one bar, so they become one.
+        assert_eq!(project.set_pattern_steps(0, 16), 16);
+        assert_eq!(project.song.len(), 1);
+        assert!(project.placed(0, 0));
     }
 
     #[test]
     fn the_song_will_not_hold_a_pattern_that_does_not_exist() {
         let mut project = Project::default();
-        assert!(!project.set_bar_pattern(0, 7, true));
+        assert!(!project.set_placement(7, 0, true));
+        assert!(project.song.is_empty());
+    }
+
+    #[test]
+    fn the_song_has_an_end_to_it() {
+        let mut project = Project::default();
+        // A slot way past the longest song we hold is refused rather than wrapped.
+        assert!(!project.set_placement(0, 100_000, true));
         assert!(project.song.is_empty());
     }
 
@@ -632,14 +698,13 @@ mod tests {
     fn deleting_a_pattern_takes_it_out_of_the_song() {
         let mut project = Project::default();
         let second = project.add_pattern().unwrap();
-        project.set_bar_pattern(0, 0, true);
-        project.set_bar_pattern(0, second, true);
-        project.set_bar_pattern(1, second, true);
+        project.set_placement(0, 0, true);
+        project.set_placement(second, 0, true);
+        project.set_placement(second, 1, true);
 
         assert!(project.remove_pattern(second));
-        assert_eq!(project.bar(0), &[0]);
-        // Bar 1 held nothing else, so the song is one bar long again.
-        assert_eq!(project.bars(), 1);
+        assert_eq!(project.song.len(), 1);
+        assert!(project.placed(0, 0));
 
         // The last pattern stays put, whatever anyone asks.
         assert!(!project.remove_pattern(0));
@@ -681,12 +746,12 @@ mod tests {
             }),
         ));
         let second = project.add_pattern().unwrap();
-        project.pattern_mut(second).unwrap().set_steps(32);
+        project.set_pattern_steps(second, 32);
         project.pattern_mut(0).unwrap().set_step(0, 0, true);
         project.pattern_mut(second).unwrap().set_step(0, 8, true);
-        project.set_bar_pattern(0, 0, true);
-        project.set_bar_pattern(0, second, true);
-        project.set_bar_pattern(1, second, true);
+        project.set_placement(0, 0, true);
+        project.set_placement(second, 0, true);
+        project.set_placement(second, 1, true);
 
         let json = serde_json::to_string(&project).unwrap();
         let back: Project = serde_json::from_str(&json).unwrap();
@@ -700,6 +765,10 @@ mod tests {
         assert_eq!(back.patterns.len(), 2);
         assert_eq!(back.pattern(second).unwrap().steps, 32);
         assert!(back.pattern(second).unwrap().has_step(0, 8));
-        assert_eq!(back.song, vec![vec![0, second], vec![second]]);
+        assert_eq!(back.song.len(), 3);
+        assert!(
+            back.placed(second, 32),
+            "a thirty two step pattern in its second slot"
+        );
     }
 }

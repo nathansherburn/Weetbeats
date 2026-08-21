@@ -31,20 +31,17 @@ A pattern is a grid of boxes and a length. An instrument belongs to the project 
 to one pattern, so every pattern plays the same kit and a new pattern is an empty grid over
 sounds you already have.
 
-The song is a row of **bars**, and a bar is sixteen steps — one pattern of the default
-length. A bar holds as many patterns as you like and **they all play together**, so a kick
-pattern, a hat pattern and a snare pattern add up to a beat. That is the whole reason to
-have patterns rather than one long grid: build the parts separately, then bring them in one
-at a time across the song.
+In the song, **one click is one play-through of one pattern**. Every lane is divided by its
+own pattern's length, so a four step pattern goes in four steps at a time and a thirty two
+step pattern takes thirty two — nothing is padded out to fill a bar it did not ask for.
 
-A pattern is not restarted at every bar. Each one plays straight through the run of bars you
-painted it across — a two bar pattern needs two bars, a four step pattern comes round four
-times in one. Give a pattern less room than it needs and it is cut off at the end of the run,
-which the notch on the right of the block is there to tell you.
+Placements **overlap freely**, so a kick pattern, a hat pattern and a snare pattern play
+together and add up to a beat. That is the whole reason to have patterns rather than one long
+grid: build the parts separately, then bring them in one at a time across the song.
 
-The song is painted, not ticked: press and drag along a lane to fill in bars, right click to
-rub one out, and right click the bar number along the top to take the whole bar out and close
-the gap. Drag along the bar numbers to play from anywhere.
+The song is painted, not ticked: press and drag along a lane to fill it in, and right click to
+rub a placement out. Bars of sixteen steps are the ruler along the top — drag along them to
+play from anywhere, and right click one to empty it.
 
 Patterns are windows over the song. Click one in the panel to open it, click it again — or
 press escape, or the × in the corner, or **song** at the top of the panel — to put it away.

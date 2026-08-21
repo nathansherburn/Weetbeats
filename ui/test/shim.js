@@ -17,13 +17,12 @@ const fake = {
   masterGain: 0.9,
   playing: false,
   step: 0,
-  bar: 0,
   active: 0,
   songMode: false,
   nextTrackId: 0,
   tracks: new Map(),
   patterns: [{ id: 0, name: "Pattern 1", steps: 16, lanes: [] }],
-  // One entry a bar: the patterns playing in it.
+  // { step, pattern }: what plays where.
   song: [],
   name: "Untitled",
   folder: "/tmp/Untitled.beat",
@@ -60,6 +59,10 @@ function nextName() {
     const name = `Pattern ${n}`;
     if (!fake.patterns.some((p) => p.name === name)) return name;
   }
+}
+
+function sortSong() {
+  fake.song.sort((a, b) => a.step - b.step || a.pattern - b.pattern);
 }
 
 function trim(p) {
@@ -161,8 +164,7 @@ const handlers = {
   remove_pattern: ({ id }) => {
     if (fake.patterns.length <= 1) throw new Error("a song needs at least one pattern");
     fake.patterns = fake.patterns.filter((p) => p.id !== id);
-    fake.song = fake.song.map((bar) => bar.filter((one) => one !== id));
-    while (fake.song.length && fake.song[fake.song.length - 1].length === 0) fake.song.pop();
+    fake.song = fake.song.filter((one) => one.pattern !== id);
     return arrangement();
   },
   rename_pattern: ({ id, name }) => {
@@ -172,58 +174,66 @@ const handlers = {
     p.name = trimmed ? trimmed.slice(0, 40) : nextName();
     return p.name;
   },
+  // Mirrors Project::set_pattern_steps: the notes off the end go, and the pattern's places
+  // in the song move onto the new grid.
   set_pattern_steps: ({ id, steps }) => {
     const p = pattern(id);
-    if (!p) return 0;
+    if (!p) return [0, arrangement()];
     p.steps = Math.max(1, Math.min(MAX_STEPS, steps));
     trim(p);
-    return p.steps;
+    const seen = new Set();
+    fake.song = fake.song.filter((one) => {
+      if (one.pattern !== id) return true;
+      one.step = Math.floor(one.step / p.steps) * p.steps;
+      if (seen.has(one.step)) return false;
+      seen.add(one.step);
+      return true;
+    });
+    sortSong();
+    return [p.steps, arrangement()];
   },
   open_pattern: ({ id }) => { fake.active = id; fake.songMode = false; return null; },
   close_pattern: () => { fake.songMode = true; return null; },
 
-  // Mirrors Project::set_bar_pattern: bars before it are filled in, and empty bars on the
-  // end are not part of the song.
-  set_song_bar: ({ bar, pattern: id, on }) => {
-    if (!pattern(id)) return false;
-    if (!on) {
-      if (bar < fake.song.length) {
-        fake.song[bar] = fake.song[bar].filter((one) => one !== id);
-        while (fake.song.length && fake.song[fake.song.length - 1].length === 0) fake.song.pop();
-      }
-      return false;
-    }
-    if (bar >= MAX_SONG_BARS) return false;
-    while (fake.song.length <= bar) fake.song.push([]);
-    if (!fake.song[bar].includes(id)) {
-      fake.song[bar].push(id);
-      fake.song[bar].sort((a, b) => a - b);
-    }
+  // Mirrors Project::set_placement: a slot is as long as the pattern in it.
+  place_pattern: ({ pattern: id, slot, on }) => {
+    const p = pattern(id);
+    if (!p) return false;
+    const step = slot * Math.max(1, p.steps);
+    fake.song = fake.song.filter((one) => !(one.pattern === id && one.step === step));
+    if (!on) return false;
+    if (step + p.steps > MAX_SONG_BARS * 16) return false;
+    fake.song.push({ step, pattern: id });
+    sortSong();
     return true;
   },
-  remove_song_bar: ({ bar }) => {
-    if (bar < fake.song.length) fake.song.splice(bar, 1);
-    while (fake.song.length && fake.song[fake.song.length - 1].length === 0) fake.song.pop();
+  clear_song_bar: ({ bar }) => {
+    const from = bar * 16;
+    fake.song = fake.song.filter((one) => one.step < from || one.step >= from + 16);
     return fake.song;
   },
-  seek_song: ({ bar }) => { fake.bar = bar; fake.step = 0; return null; },
+  seek_song: ({ step }) => { fake.step = step; return null; },
 
   set_bpm: ({ bpm }) => { fake.bpm = Math.max(40, Math.min(240, bpm)); return fake.bpm; },
   set_playing: ({ playing }) => {
     fake.playing = playing;
-    if (!playing) { fake.step = 0; fake.bar = 0; }
+    if (!playing) fake.step = 0;
     return null;
   },
-  panic_stop: () => { fake.playing = false; fake.step = 0; fake.bar = 0; return null; },
+  panic_stop: () => { fake.playing = false; fake.step = 0; return null; },
   playhead: () => ({
     playing: fake.playing,
     step: fake.step,
     progress: 0.3,
-    // One bit per pattern: everything in the bar sounds at once.
+    // One bit per pattern: everything covering this step sounds at once.
     patterns: fake.songMode
-      ? (fake.song[fake.bar] ?? []).reduce((mask, id) => mask | (1 << id), 0)
+      ? fake.song
+          .filter((one) => {
+            const p = pattern(one.pattern);
+            return p && fake.step >= one.step && fake.step < one.step + p.steps;
+          })
+          .reduce((mask, one) => mask | (1 << one.pattern), 0)
       : 1 << fake.active,
-    bar: fake.bar,
     voices: fake.playing ? 3 : 0,
     peak: fake.playing ? 0.6 : 0,
     streamErrors: 0,
@@ -258,9 +268,8 @@ window.__weetbeats_drop = (paths) => {
 };
 
 // Lets a test walk the playhead without waiting on real time.
-window.__weetbeats_setStep = (step, bar) => {
+window.__weetbeats_setStep = (step) => {
   fake.step = step;
-  if (bar !== undefined) fake.bar = bar;
   fake.playing = true;
 };
 

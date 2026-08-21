@@ -12,13 +12,14 @@
 //! costs nothing.
 //!
 //! What plays depends on the mode. In pattern mode the open pattern loops, which is the
-//! pattern editor. In song mode the engine walks the song a bar at a time, and a bar can
-//! hold any number of patterns: they all sound together, which is how a kick pattern, a hat
-//! pattern and a snare pattern add up to a beat.
+//! pattern editor. In song mode the clock counts the whole song, and the engine holds a slot
+//! per step saying which patterns *start* there. Any number can start at the same step and
+//! they all sound together, which is how a kick pattern, a hat pattern and a snare pattern
+//! add up to a beat.
 //!
-//! A pattern is not restarted every bar. Each one carries how far into its run it is, so a
-//! pattern painted across four bars plays through those four bars — twice if it is two bars
-//! long, four times if it is one.
+//! Each pattern then carries how far through it is and how much of it is left, so a placement
+//! plays once through and stops, however long the pattern is and whatever else is going on
+//! around it.
 
 use std::sync::Arc;
 
@@ -31,7 +32,7 @@ use crate::shared::Shared;
 use crate::voice::{Trigger, VoicePool};
 use crate::{
     pitch_ratio, soft_clip, velocity_gain, MAX_BLOCK, MAX_NOTES_PER_TRACK, MAX_PATTERNS,
-    MAX_SONG_BARS, MAX_STEPS, MAX_TRACKS, PREVIEW_TRACK, STEPS_PER_BAR,
+    MAX_SONG_STEPS, MAX_STEPS, MAX_TRACKS, PREVIEW_TRACK,
 };
 
 /// How fast a gain change slides to its new value. About 10ms at 48k, which is slow enough
@@ -136,14 +137,17 @@ pub struct Engine {
     tracks: [TrackState; MAX_TRACKS],
     /// Every pattern's notes. Indexed by pattern id, never resized after `new`.
     patterns: Vec<PatternState>,
-    /// The song: the patterns playing in each bar, one bit each.
-    song: [u32; MAX_SONG_BARS],
-    /// Bars of the song in use.
-    song_len: usize,
-    song_bar: usize,
-    /// How many steps each pattern is into its current run of bars. What makes a pattern
-    /// carry on across bars instead of starting again at every one.
+    /// The song: which patterns start at each step, one bit each. Allocated once, in `new`,
+    /// and only ever indexed after that.
+    starts: Vec<u32>,
+    /// Steps of the song in use.
+    song_len: u32,
+    /// How many steps into itself each pattern is, and how many it has left before its
+    /// placement is over. What makes a placement one play-through of the pattern.
     run_step: [u32; MAX_PATTERNS],
+    run_left: [u32; MAX_PATTERNS],
+    /// What sounded on the last step, one bit per pattern, for the UI.
+    sounding: u32,
     /// True to play the song, false to loop the pattern the editor has open.
     song_mode: bool,
     active_pattern: usize,
@@ -182,10 +186,11 @@ impl Engine {
             patterns: (0..MAX_PATTERNS)
                 .map(|_| PatternState::new(steps))
                 .collect(),
-            song: [0; MAX_SONG_BARS],
+            starts: vec![0; MAX_SONG_STEPS],
             song_len: 0,
-            song_bar: 0,
             run_step: [0; MAX_PATTERNS],
+            run_left: [0; MAX_PATTERNS],
+            sounding: 0,
             song_mode: false,
             active_pattern: 0,
             voices: VoicePool::new(),
@@ -234,7 +239,8 @@ impl Engine {
             if self.playing {
                 self.clock.advance(frames);
                 if self.clock.take_wrapped() {
-                    self.next_bar();
+                    // Round again at the top of the song, where nothing is half played.
+                    self.resync_runs();
                 }
             }
             done += frames;
@@ -247,12 +253,8 @@ impl Engine {
         }
 
         self.shared.set_playing(self.playing);
-        self.shared.set_position(
-            self.clock.step(),
-            self.clock.progress(),
-            self.playing_mask(),
-            self.song_bar as u32,
-        );
+        self.shared
+            .set_position(self.clock.step(), self.clock.progress(), self.sounding);
         self.shared.set_meters(self.voices.active(), peak);
         self.shared.add_frames(total_frames as u64);
     }
@@ -324,25 +326,11 @@ impl Engine {
 
     // --- what is playing ---------------------------------------------------
 
-    /// The patterns due to sound, one bit each. Empty in a song with nothing in this bar.
-    #[inline]
-    fn playing_mask(&self) -> u32 {
-        if self.song_mode {
-            if self.song_len == 0 {
-                0
-            } else {
-                self.song[self.song_bar.min(self.song_len - 1)]
-            }
-        } else {
-            1u32 << self.active_pattern
-        }
-    }
-
-    /// How long the thing being played is, in steps. A bar in song mode, and the pattern
-    /// itself when the editor has one open.
+    /// How long the thing being played is, in steps. The whole song in song mode, so the
+    /// clock's step *is* the song position and coming round to the top is the clock's job.
     fn playing_steps(&self) -> u32 {
         if self.song_mode {
-            STEPS_PER_BAR
+            self.song_len.max(1)
         } else {
             self.patterns[self.active_pattern].steps
         }
@@ -355,68 +343,65 @@ impl Engine {
         self.clock.set_steps(steps);
     }
 
-    /// Work out how far into its run each pattern is at the top of the current bar.
+    /// Work out where each pattern is up to, given where the playhead is.
     ///
-    /// A run is however many bars in a row a pattern was painted across, and where you are
-    /// in it decides which of the pattern's own steps comes next. Walking back through the
-    /// bars is the only way to know, so it happens when the playhead jumps — a seek, a stop,
-    /// the top of the song — and never while the song is simply playing on.
+    /// A placement covers the pattern's length in steps from where it starts, so a pattern
+    /// is mid-placement if one started within that many steps behind us. Looking back is
+    /// only needed when the playhead jumps — a seek, a stop, the top of the song — never
+    /// while it is simply playing on.
     fn resync_runs(&mut self) {
+        let now = if self.song_mode { self.clock.step() } else { 0 };
         for pattern in 0..MAX_PATTERNS {
             let bit = 1u32 << pattern;
-            let mut bars_before = 0u32;
-            let mut bar = self.song_bar as isize - 1;
-            while bar >= 0 && self.song[bar as usize] & bit != 0 {
-                bars_before += 1;
-                bar -= 1;
+            let steps = self.patterns[pattern].steps.max(1);
+            self.run_step[pattern] = 0;
+            self.run_left[pattern] = 0;
+            if !self.song_mode {
+                continue;
             }
-            self.run_step[pattern] = bars_before * STEPS_PER_BAR;
+            for back in 0..steps.min(now + 1) {
+                if self.starts[(now - back) as usize] & bit != 0 {
+                    self.run_step[pattern] = back;
+                    self.run_left[pattern] = steps - back;
+                    break;
+                }
+            }
         }
     }
 
-    /// Back to the top: the first bar of the song, and the first step of it.
+    /// Back to the top: the first step of the song, or of the pattern.
     fn rewind_all(&mut self) {
-        self.song_bar = 0;
-        self.resync_runs();
         self.tune_clock();
         self.clock.rewind();
-    }
-
-    /// The bar just finished, so the song moves on. In pattern mode the pattern simply
-    /// loops, which the clock has already done by itself.
-    fn next_bar(&mut self) {
-        if !self.song_mode || self.song_len == 0 {
-            return;
-        }
-        self.song_bar += 1;
-        if self.song_bar >= self.song_len {
-            // Round again at the top, where every run starts from nothing.
-            self.song_bar = 0;
-            self.resync_runs();
-        }
-        self.tune_clock();
+        self.resync_runs();
     }
 
     /// Everything due on this step gets a voice.
     ///
-    /// `step` is the step of the bar in song mode and the step of the pattern otherwise.
-    /// Which of a pattern's own steps that lands on depends on how far into its run it is.
+    /// `step` is the step of the song in song mode and the step of the pattern otherwise.
     fn trigger_step(&mut self, step: u16) {
-        let mask = self.playing_mask();
+        if !self.song_mode {
+            self.sounding = 1u32 << self.active_pattern;
+            self.trigger_pattern(self.active_pattern, step);
+            return;
+        }
+
+        let starting = self.starts.get(step as usize).copied().unwrap_or(0);
+        self.sounding = 0;
         for pattern in 0..MAX_PATTERNS {
-            if mask & (1u32 << pattern) == 0 {
-                // Not playing here, so its next run starts from the beginning.
+            if starting & (1u32 << pattern) != 0 {
+                // A placement begins here, so the pattern starts from its own first step.
                 self.run_step[pattern] = 0;
+                self.run_left[pattern] = self.patterns[pattern].steps.max(1);
+            }
+            if self.run_left[pattern] == 0 {
                 continue;
             }
-            let steps = self.patterns[pattern].steps.max(1);
-            let local = if self.song_mode {
-                (self.run_step[pattern] % steps) as u16
-            } else {
-                step
-            };
-            self.trigger_pattern(pattern, local);
-            self.run_step[pattern] = self.run_step[pattern].saturating_add(1);
+            self.sounding |= 1u32 << pattern;
+            let at = self.run_step[pattern] as u16;
+            self.trigger_pattern(pattern, at);
+            self.run_step[pattern] += 1;
+            self.run_left[pattern] -= 1;
         }
     }
 
@@ -533,8 +518,8 @@ impl Engine {
                 if let Some(p) = self.patterns.get_mut(pattern as usize) {
                     p.steps = steps;
                 }
-                // In song mode a bar is a bar whatever is in it, so only the pattern the
-                // editor is looping cares about this.
+                // The song's length comes from the app thread, which knows where every
+                // placement now sits; only the pattern the editor is looping is our business.
                 if !self.song_mode && self.active_pattern == pattern as usize {
                     self.clock.set_steps(steps);
                 }
@@ -578,38 +563,44 @@ impl Engine {
             }
             Command::SetSongMode(on) => {
                 self.song_mode = on;
-                self.resync_runs();
-                self.tune_clock();
-            }
-            Command::SetSongLen(len) => {
-                self.song_len = (len as usize).min(MAX_SONG_BARS);
-                // Bars past the end hold nothing. Otherwise a song that shrank and then
-                // grew again would come back with whatever used to be in the middle of it.
-                for bar in self.song[self.song_len..].iter_mut() {
-                    *bar = 0;
-                }
-                if self.song_bar >= self.song_len {
-                    self.song_bar = 0;
-                    self.resync_runs();
-                }
-                self.tune_clock();
-            }
-            Command::SetSongBar { index, patterns } => {
-                if let Some(bar) = self.song.get_mut(index as usize) {
-                    // Editing the song while it plays does not restart anything: whatever is
-                    // sounding keeps its place, which is what you want while you paint.
-                    *bar = patterns;
-                }
-            }
-            Command::SeekSong(index) => {
-                self.song_bar = if self.song_len == 0 {
-                    0
-                } else {
-                    (index as usize).min(self.song_len - 1)
-                };
-                self.resync_runs();
                 self.tune_clock();
                 self.clock.rewind();
+                self.resync_runs();
+            }
+            Command::SetSongLen(len) => {
+                self.song_len = len.min(MAX_SONG_STEPS as u32);
+                self.tune_clock();
+            }
+            Command::ClearSong => {
+                self.starts.fill(0);
+                self.song_len = 0;
+                for pattern in 0..MAX_PATTERNS {
+                    self.run_left[pattern] = 0;
+                }
+                self.tune_clock();
+            }
+            Command::PlacePattern { pattern, step } => {
+                // Editing the song while it plays does not restart anything: whatever is
+                // sounding keeps its place, which is what you want while you paint.
+                if let (Some(slot), true) = (
+                    self.starts.get_mut(step as usize),
+                    (pattern as usize) < MAX_PATTERNS,
+                ) {
+                    *slot |= 1u32 << pattern;
+                }
+            }
+            Command::UnplacePattern { pattern, step } => {
+                if let (Some(slot), true) = (
+                    self.starts.get_mut(step as usize),
+                    (pattern as usize) < MAX_PATTERNS,
+                ) {
+                    *slot &= !(1u32 << pattern);
+                }
+            }
+            Command::SeekSong(step) => {
+                self.tune_clock();
+                self.clock.jump_to(step);
+                self.resync_runs();
             }
             Command::Audition {
                 track,

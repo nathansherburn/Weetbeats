@@ -15,7 +15,7 @@ use tauri_plugin_dialog::DialogExt;
 use weetbeats_engine::folder;
 use weetbeats_engine::sample::{is_audio_file, AUDIO_EXTENSIONS};
 use weetbeats_engine::{
-    Command, EngineNote, Note, Pattern, Project, SampleRef, Track, DEFAULT_PITCH,
+    Command, EngineNote, Note, Pattern, Placement, Project, SampleRef, Track, DEFAULT_PITCH,
 };
 
 use crate::state::AppState;
@@ -67,7 +67,7 @@ pub struct Added {
 #[serde(rename_all = "camelCase")]
 pub struct Arrangement {
     pub patterns: Vec<Pattern>,
-    pub song: Vec<Vec<u16>>,
+    pub song: Vec<Placement>,
 }
 
 /// Polled every frame while playing. Kept small on purpose.
@@ -77,9 +77,8 @@ pub struct PlayheadPayload {
     pub playing: bool,
     pub step: u32,
     pub progress: f32,
-    /// Which patterns are sounding, one bit each, and which bar of the song is playing.
+    /// Which patterns are sounding, one bit each.
     pub patterns: u32,
-    pub bar: u32,
     pub voices: u32,
     pub peak: f32,
     pub stream_errors: u32,
@@ -510,37 +509,36 @@ pub fn close_pattern(state: State<'_, Arc<AppState>>) {
 
 // --- the song ---------------------------------------------------------------
 
-/// Put a pattern in a bar of the song, or take it out. Returns whether it is in there now,
-/// which the front end checks against what it drew.
+/// Put a pattern in the song, or take it out. Returns whether it is in there now, which the
+/// front end checks against what it drew.
 ///
-/// One call a bar, so painting across the song is the same shape of thing as painting across
-/// a pattern: press, drag, and every bar the pointer crosses gets one of these.
+/// `slot` counts in the pattern's own lengths, so one slot is one play-through of it: a four
+/// step pattern goes in four steps at a time and a thirty two step one thirty two.
 #[tauri::command]
-pub fn set_song_bar(bar: u32, pattern: u16, on: bool, state: State<'_, Arc<AppState>>) -> bool {
-    let now_on = state
-        .project
-        .lock()
-        .unwrap()
-        .set_bar_pattern(bar as usize, pattern, on);
-    state.push_song_bar(bar as usize);
+pub fn place_pattern(pattern: u16, slot: u32, on: bool, state: State<'_, Arc<AppState>>) -> bool {
+    let (now_on, step) = {
+        let mut project = state.project.lock().unwrap();
+        let step = project.slot_step(pattern, slot).unwrap_or(0);
+        (project.set_placement(pattern, slot, on), step)
+    };
+    state.push_placement(pattern, step, now_on);
     state.touch();
     now_on
 }
 
-/// Take a whole bar out of the song, so everything after it moves up one.
+/// Everything that starts in a bar, gone. Returns the song as it now is.
 #[tauri::command]
-pub fn remove_song_bar(bar: u32, state: State<'_, Arc<AppState>>) -> Vec<Vec<u16>> {
-    state.project.lock().unwrap().remove_bar(bar as usize);
-    // Everything shifted, so the whole song goes across rather than one bar.
+pub fn clear_song_bar(bar: u32, state: State<'_, Arc<AppState>>) -> Vec<Placement> {
+    state.project.lock().unwrap().clear_bar(bar);
     state.push_song();
     state.touch();
     state.project.lock().unwrap().song.clone()
 }
 
-/// Drag the scrubber: play the song from this bar.
+/// Drag the scrubber: play the song from this step.
 #[tauri::command]
-pub fn seek_song(bar: u32, state: State<'_, Arc<AppState>>) {
-    state.send(Command::SeekSong(bar.min(u16::MAX as u32) as u16));
+pub fn seek_song(step: u32, state: State<'_, Arc<AppState>>) {
+    state.send(Command::SeekSong(step));
 }
 
 // --- transport --------------------------------------------------------------
@@ -577,7 +575,6 @@ pub fn playhead(state: State<'_, Arc<AppState>>) -> PlayheadPayload {
         step: playhead.step,
         progress: playhead.progress,
         patterns: playhead.patterns,
-        bar: playhead.bar,
         voices: playhead.active_voices,
         peak: playhead.peak,
         stream_errors: state.stream_errors(),

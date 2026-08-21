@@ -2,11 +2,12 @@
  * Weetbeats front end.
  *
  * Two views, one workspace. The song sits underneath: bars across the top, patterns down
- * the left, and any number of patterns in the same bar so a kick pattern, a hat pattern and
- * a snare pattern add up to a beat. A pattern opens on top of the song like a window, with
- * its step grid and a close button; click the pattern again, or hit escape, and you are back
- * at the song. The patterns panel never goes away, because it is how you get from one
- * pattern to the next.
+ * the left, and placements that overlap freely so a kick pattern, a hat pattern and a snare
+ * pattern add up to a beat. Each lane is divided by its own pattern's length, so one click
+ * is one play-through of it: a four step pattern goes in four steps at a time. A pattern
+ * opens on top of the song like a window, with its step grid and a close button; click the
+ * pattern again, or hit escape, and you are back at the song. The patterns panel never goes
+ * away, because it is how you get from one pattern to the next.
  *
  * It holds a copy of the project so a click can light a box up straight away, but Rust owns
  * it: every change goes there too, and the audio thread hears about it from Rust.
@@ -46,12 +47,11 @@ const state = {
   bpm: 120,
   tracks: [], // { id, name, gain, muted, soloed, peaks }
   patterns: [], // { id, name, steps, notes: Map<trackId, Set<step>> }
-  song: [], // one entry per bar: the pattern ids playing in it
+  song: [], // { pattern, step }, sorted: what plays where
   open: null, // the pattern the editor has, or null for the song view
   playing: false,
   step: 0,
   progress: 0,
-  bar: 0, // which bar of the song is playing
   sounding: 0, // patterns making noise right now, one bit each
   needsDraw: true,
 };
@@ -104,7 +104,7 @@ function applyStartup(startup) {
     peaks: waveforms.get(track.id) ?? [],
   }));
   state.patterns = project.patterns.map(readPattern);
-  state.song = project.song.map((bar) => bar.slice());
+  state.song = project.song.map((one) => ({ ...one }));
 
   el.bpm.value = String(Math.round(state.bpm));
   el.projectName.textContent = startup.name;
@@ -322,7 +322,7 @@ async function rearrange(command, args, then) {
   try {
     const after = await invoke(command, args);
     state.patterns = after.patterns.map(readPattern);
-    state.song = after.song.map((bar) => bar.slice());
+    state.song = after.song.map((one) => ({ ...one }));
     if (then) then(after);
     if (state.open !== null && patternById(state.open) === null) closePattern();
     drawPatternPanel();
@@ -426,19 +426,15 @@ function numberField(input, { min, max, onChange }) {
 // --- pattern length -------------------------------------------------------
 
 async function setSteps(steps) {
-  const pattern = openPatternNow();
-  if (!pattern) return;
+  const open = openPatternNow();
+  if (!open) return;
   const asked = Math.max(1, Math.min(MAX_STEPS, Math.round(steps) || 1));
-  if (asked === pattern.steps) return;
-  const actual = await invoke("set_pattern_steps", { id: pattern.id, steps: asked });
-  pattern.steps = actual;
-  // Rust drops the notes that fall off the end, so drop them here too rather than keeping
-  // boxes ticked that are not there any more.
-  for (const set of pattern.notes.values()) {
-    for (const step of [...set]) {
-      if (step >= actual) set.delete(step);
-    }
-  }
+  if (asked === open.steps) return;
+  // A slot in the song is as long as the pattern, so changing the length moves the pattern's
+  // places in the song. Rust works that out and hands back the lot.
+  const [actual, after] = await invoke("set_pattern_steps", { id: open.id, steps: asked });
+  state.patterns = after.patterns.map(readPattern);
+  state.song = after.song.map((one) => ({ ...one }));
   el.steps.value = String(actual);
   drawPatternPanel();
   resize();
@@ -641,7 +637,7 @@ function gridHeight() {
  */
 function songBars() {
   const room = Math.ceil(el.songScroll.clientWidth / BAR_PX);
-  return Math.max(state.song.length + 1, room);
+  return Math.max(songSteps() / STEPS_PER_BAR + 1, room);
 }
 
 function resize() {
@@ -802,38 +798,41 @@ el.grid.addEventListener("pointercancel", stopPainting);
 
 // --- the song -------------------------------------------------------------
 
-function barPatterns(bar) {
-  return state.song[bar] ?? [];
-}
-
-function barHas(bar, id) {
-  return barPatterns(bar).includes(id);
-}
-
 /*
- * Put a pattern in a bar, or take it out, the same way Rust does: bars before it are filled
- * in as empty so a pattern can be dropped in at bar twelve, and empty bars on the end are
- * not part of the song.
+ * A lane is divided by its own pattern's length: slot 3 of a four step pattern starts at step
+ * 12, slot 3 of a sixteen step one at step 48. One slot is one play-through, which is what
+ * lets a four step pattern take four steps of the song rather than a whole bar of it.
  */
-function setBar(bar, id, on) {
+function slotWidth(pattern) {
+  return Math.max(1, pattern.steps) * SONG_STEP;
+}
+
+function placedAt(pattern, step) {
+  return state.song.some((one) => one.pattern === pattern && one.step === step);
+}
+
+/* Put a pattern in the song, or take it out, the same way Rust does. */
+function place(pattern, step, on) {
+  state.song = state.song.filter((one) => !(one.pattern === pattern && one.step === step));
   if (on) {
-    while (state.song.length <= bar) state.song.push([]);
-    if (!state.song[bar].includes(id)) {
-      state.song[bar].push(id);
-      state.song[bar].sort((a, b) => a - b);
-    }
-  } else if (bar < state.song.length) {
-    state.song[bar] = state.song[bar].filter((p) => p !== id);
-    while (state.song.length && state.song[state.song.length - 1].length === 0) {
-      state.song.pop();
-    }
+    state.song.push({ pattern, step });
+    state.song.sort((a, b) => a.step - b.step || a.pattern - b.pattern);
   }
+}
+
+/* Where the song ends, rounded up to a bar so it loops somewhere musical. */
+function songSteps() {
+  let end = 0;
+  for (const one of state.song) {
+    const pattern = patternById(one.pattern);
+    if (pattern) end = Math.max(end, one.step + pattern.steps);
+  }
+  return Math.ceil(end / STEPS_PER_BAR) * STEPS_PER_BAR;
 }
 
 /* Where the playhead is across the song, in pixels. */
 function songPlayheadX() {
-  const through = (state.step + state.progress) / STEPS_PER_BAR;
-  return (state.bar + Math.min(1, through)) * BAR_PX;
+  return (state.step + state.progress) * SONG_STEP;
 }
 
 function drawSong() {
@@ -850,12 +849,13 @@ function drawScrubber() {
   ctx.textBaseline = "middle";
 
   const bars = songBars();
+  const playingBar = Math.floor(state.step / STEPS_PER_BAR);
   for (let bar = 0; bar < bars; bar++) {
     // Every fourth bar gets a brighter mark: that is where a phrase usually turns over.
     const phrase = bar % 4 === 0;
     ctx.fillStyle = PALETTE.line;
     ctx.fillRect(bar * BAR_PX, phrase ? 6 : 10, 1, height - 6);
-    ctx.fillStyle = state.playing && bar === state.bar ? PALETTE.lit : PALETTE.dim;
+    ctx.fillStyle = state.playing && bar === playingBar ? PALETTE.lit : PALETTE.dim;
     if (phrase || bars < 40) {
       ctx.fillText(String(bar + 1), bar * BAR_PX + 5, 15);
     }
@@ -877,7 +877,6 @@ function drawLanes() {
   const ctx = el.lanes.getContext("2d");
   const width = drawnWidth(el.lanes);
   const height = Math.max(LANE, state.patterns.length * LANE);
-  const bars = songBars();
   ctx.clearRect(0, 0, width, height);
   ctx.font = "11px ui-sans-serif, system-ui, sans-serif";
   ctx.textBaseline = "middle";
@@ -885,52 +884,48 @@ function drawLanes() {
   for (let row = 0; row < state.patterns.length; row++) {
     const pattern = state.patterns[row];
     const y = row * LANE;
+    const slot = slotWidth(pattern);
 
-    // The empty grid first, so a bar you could paint into looks like one.
-    for (let bar = 0; bar < bars; bar++) {
-      if (barHas(bar, pattern.id)) continue;
-      ctx.fillStyle = bar % 4 === 0 ? "#221e2c" : "#1e1a27";
-      roundRect(ctx, bar * BAR_PX + 2, y + 3, BAR_PX - 4, LANE - 7, 5);
+    // The lane's own grid first, so you can see how long the pattern is before you put it
+    // anywhere, and where the next one along would go.
+    for (let x = 0; x < width; x += slot) {
+      ctx.fillStyle = (x / slot) % 2 === 0 ? "#221e2c" : "#1e1a27";
+      roundRect(ctx, x + 1, y + 3, Math.min(slot, width - x) - 2, LANE - 7, 4);
       ctx.fill();
     }
 
-    // Then a block per run of bars. A run is one block rather than one a bar because the
-    // pattern plays straight through it: that is what makes a pattern longer than a bar
-    // work, and the ticks inside show where it comes round again.
-    for (let bar = 0; bar < bars; bar++) {
-      if (!barHas(bar, pattern.id)) continue;
-      let end = bar;
-      while (end + 1 < bars && barHas(end + 1, pattern.id)) end += 1;
+    // Then the bar lines over it, so the song's own grid is still readable.
+    ctx.fillStyle = "rgba(0,0,0,0.35)";
+    for (let x = BAR_PX; x < width; x += BAR_PX) {
+      ctx.fillRect(x, y, 1, LANE - 1);
+    }
+  }
 
-      const x = bar * BAR_PX + 2;
-      const w = (end - bar + 1) * BAR_PX - 4;
-      const h = LANE - 7;
-      const live = state.playing && isSounding(pattern.id) && state.bar >= bar && state.bar <= end;
-      ctx.fillStyle = live ? PALETTE.lit : PALETTE.accent;
-      roundRect(ctx, x, y + 3, w, h, 5);
-      ctx.fill();
+  // And the placements on top. Every one is exactly as wide as its pattern is long.
+  for (const one of state.song) {
+    const row = state.patterns.findIndex((pattern) => pattern.id === one.pattern);
+    if (row < 0) continue;
+    const pattern = state.patterns[row];
+    const y = row * LANE;
+    const x = one.step * SONG_STEP;
+    const w = slotWidth(pattern) - 2;
+    const h = LANE - 7;
+    const live =
+      state.playing &&
+      isSounding(pattern.id) &&
+      state.step >= one.step &&
+      state.step < one.step + pattern.steps;
 
-      const room = (end - bar + 1) * STEPS_PER_BAR;
+    ctx.fillStyle = live ? PALETTE.lit : PALETTE.accent;
+    roundRect(ctx, x + 1, y + 3, w, h, 4);
+    ctx.fill();
+    if (w > 26) {
       ctx.save();
-      roundRect(ctx, x, y + 3, w, h, 5);
+      roundRect(ctx, x + 1, y + 3, w, h, 4);
       ctx.clip();
-      // Where the pattern comes round again inside the run.
-      ctx.fillStyle = "rgba(0,0,0,0.22)";
-      for (let step = pattern.steps; step < room; step += pattern.steps) {
-        ctx.fillRect(bar * BAR_PX + step * SONG_STEP, y + 3, 1, h);
-      }
-      // A pattern with more in it than the run has room for is cut off at the end, and the
-      // notch is the only thing that would tell you.
-      if (pattern.steps > room) {
-        ctx.fillStyle = "rgba(0,0,0,0.4)";
-        ctx.fillRect(x + w - 5, y + 3, 5, h);
-      }
-      if (w > 26) {
-        ctx.fillStyle = "#22101a";
-        ctx.fillText(pattern.name, x + 6, y + LANE / 2 - 1);
-      }
+      ctx.fillStyle = "#22101a";
+      ctx.fillText(pattern.name, x + 6, y + LANE / 2 - 1);
       ctx.restore();
-      bar = end;
     }
   }
 
@@ -941,25 +936,26 @@ function drawLanes() {
 }
 
 /* Paint patterns into the song the same way you paint boxes into a pattern. */
-let painting_song = null;
+let paintingSong = null;
 
 function songCellAt(event) {
   const rect = el.lanes.getBoundingClientRect();
-  const bar = Math.floor((event.clientX - rect.left) / BAR_PX);
   const row = Math.floor((event.clientY - rect.top) / LANE);
-  if (bar < 0 || bar >= songBars()) return null;
   if (row < 0 || row >= state.patterns.length) return null;
-  return { bar, id: state.patterns[row].id };
+  const pattern = state.patterns[row];
+  const slot = Math.floor((event.clientX - rect.left) / slotWidth(pattern));
+  if (slot < 0) return null;
+  return { pattern: pattern.id, slot, step: slot * Math.max(1, pattern.steps) };
 }
 
 function paintSong(cell, on) {
   if (!cell) return;
-  if (barHas(cell.bar, cell.id) === on) return;
-  setBar(cell.bar, cell.id, on);
+  if (placedAt(cell.pattern, cell.step) === on) return;
+  place(cell.pattern, cell.step, on);
   songChanged();
-  invoke("set_song_bar", { bar: cell.bar, pattern: cell.id, on }).then((actual) => {
+  invoke("place_pattern", { pattern: cell.pattern, slot: cell.slot, on }).then((actual) => {
     if (actual !== on) {
-      setBar(cell.bar, cell.id, actual);
+      place(cell.pattern, cell.step, actual);
       songChanged();
     }
   });
@@ -968,18 +964,18 @@ function paintSong(cell, on) {
 el.lanes.addEventListener("pointerdown", (e) => {
   const cell = songCellAt(e);
   if (!cell) return;
-  painting_song = erasing(e) ? false : !barHas(cell.bar, cell.id);
+  paintingSong = erasing(e) ? false : !placedAt(cell.pattern, cell.step);
   el.lanes.setPointerCapture(e.pointerId);
-  paintSong(cell, painting_song);
+  paintSong(cell, paintingSong);
 });
 
 el.lanes.addEventListener("pointermove", (e) => {
-  if (painting_song === null) return;
-  paintSong(songCellAt(e), painting_song);
+  if (paintingSong === null) return;
+  paintSong(songCellAt(e), paintingSong);
 });
 
 const stopPaintingSong = () => {
-  painting_song = null;
+  paintingSong = null;
 };
 el.lanes.addEventListener("pointerup", stopPaintingSong);
 el.lanes.addEventListener("pointercancel", stopPaintingSong);
@@ -994,28 +990,29 @@ function barAt(event, canvas) {
 
 /* Drag along the scrubber to play from a bar. */
 function scrub(event, force) {
-  if (!state.song.length) return;
+  const bars = songSteps() / STEPS_PER_BAR;
+  if (!bars) return;
   const bar = barAt(event, el.scrubber);
   if (bar === null) return;
-  const wanted = Math.min(bar, state.song.length - 1);
+  const wanted = Math.min(bar, bars - 1) * STEPS_PER_BAR;
   // Dragging over the bar it is already in is not worth a seek; pressing on it is, because
   // that means "play this from the top".
-  if (wanted === state.bar && !force) return;
-  state.bar = wanted;
-  state.step = 0;
+  if (wanted === state.step && !force) return;
+  state.step = wanted;
   state.needsDraw = true;
-  invoke("seek_song", { bar: wanted });
+  invoke("seek_song", { step: wanted });
 }
 
 let scrubbing = false;
 
 el.scrubber.addEventListener("pointerdown", async (e) => {
-  // The right button takes the bar out of the song, closing the gap it leaves.
+  // The right button empties the bar: everything that starts in it, gone. Patterns are all
+  // different lengths, so shuffling the rest of the song up would only break their grids.
   if (erasing(e)) {
     const bar = barAt(e, el.scrubber);
-    if (bar === null || bar >= state.song.length) return;
+    if (bar === null) return;
     try {
-      state.song = (await invoke("remove_song_bar", { bar })).map((one) => one.slice());
+      state.song = (await invoke("clear_song_bar", { bar })).map((one) => ({ ...one }));
       songChanged();
     } catch (err) {
       showError(err);
@@ -1105,7 +1102,6 @@ async function tick(now) {
       const wasSounding = state.sounding;
       state.step = p.step;
       state.progress = p.progress;
-      state.bar = p.bar;
       state.sounding = p.patterns;
       if (p.playing !== state.playing) {
         state.playing = p.playing;

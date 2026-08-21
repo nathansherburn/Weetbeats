@@ -88,15 +88,22 @@ pub enum Command {
     /// True to play the song, false to loop the open pattern. The UI ties this to which
     /// view you are looking at.
     SetSongMode(bool),
-    /// How many bars of the song are in use.
-    SetSongLen(u16),
-    /// Which patterns play in a bar of the song, one bit each. They all sound together.
-    SetSongBar {
-        index: u16,
-        patterns: u32,
+    /// How long the song is, in steps.
+    SetSongLen(u32),
+    /// Forget the whole song. Sent before a project's placements go across.
+    ClearSong,
+    /// Play this pattern from this step of the song, once through.
+    PlacePattern {
+        pattern: u16,
+        step: u32,
     },
-    /// Jump the song to a bar and start from the top of it.
-    SeekSong(u16),
+    /// And take it out again.
+    UnplacePattern {
+        pattern: u16,
+        step: u32,
+    },
+    /// Jump the song to a step and play from there.
+    SeekSong(u32),
     /// Play a track's sample right now, for clicking a row.
     Audition {
         track: u16,

@@ -299,8 +299,8 @@ mod tests {
             ..Default::default()
         };
         let second = project.add_pattern().unwrap();
-        project.pattern_mut(second).unwrap().set_steps(32);
-        project.set_bar_pattern(0, second, true);
+        project.set_pattern_steps(second, 32);
+        project.set_placement(second, 0, true);
 
         save(&dir, &project).unwrap();
         assert!(is_project(&dir));
@@ -309,7 +309,7 @@ mod tests {
         let back = load(&dir).unwrap();
         assert_eq!(back.bpm, 143.0);
         assert_eq!(back.pattern(second).unwrap().steps, 32);
-        assert_eq!(back.song, vec![vec![second]]);
+        assert!(back.placed(second, 0));
     }
 
     #[test]

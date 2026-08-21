@@ -121,15 +121,18 @@ fn render_does_not_allocate() {
         tx.push(Command::SetPatternSteps { pattern, steps: 8 })
             .unwrap();
     }
-    tx.push(Command::SetSongLen(4)).unwrap();
-    for index in 0..4u16 {
-        // Two patterns in every bar, so the stacking is counted too.
-        tx.push(Command::SetSongBar {
-            index,
-            patterns: (1 << index) | (1 << ((index + 1) % 4)),
-        })
-        .unwrap();
+    // Two patterns starting at every bar line, so overlapping placements are counted too.
+    tx.push(Command::ClearSong).unwrap();
+    for bar in 0..4u32 {
+        for pattern in [bar as u16, (bar as u16 + 1) % 4] {
+            tx.push(Command::PlacePattern {
+                pattern,
+                step: bar * 8,
+            })
+            .unwrap();
+        }
     }
+    tx.push(Command::SetSongLen(32)).unwrap();
     tx.push(Command::SetSongMode(true)).unwrap();
     tx.push(Command::SetPlaying(true)).unwrap();
 
@@ -164,9 +167,13 @@ fn render_does_not_allocate() {
             });
             // And leaning on the parts that are new: the song, and switching between
             // patterns and the song the way opening and closing the editor does.
-            let _ = tx.push(Command::SetSongBar {
-                index: (block % 4) as u16,
-                patterns: (block as u32) & 0b1111,
+            let _ = tx.push(Command::PlacePattern {
+                pattern: (block % 4) as u16,
+                step: (block % 32) as u32,
+            });
+            let _ = tx.push(Command::UnplacePattern {
+                pattern: ((block + 1) % 4) as u16,
+                step: (block % 32) as u32,
             });
             let _ = tx.push(Command::SetPatternSteps {
                 pattern: (block % 4) as u16,
@@ -175,7 +182,7 @@ fn render_does_not_allocate() {
             if block % 37 == 0 {
                 let _ = tx.push(Command::SetActivePattern((block % 4) as u16));
                 let _ = tx.push(Command::SetSongMode(block % 74 == 0));
-                let _ = tx.push(Command::SeekSong((block % 4) as u16));
+                let _ = tx.push(Command::SeekSong((block % 32) as u32));
             }
 
             engine.render(&mut out, 2);

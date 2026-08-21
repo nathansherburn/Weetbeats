@@ -222,13 +222,14 @@ impl AppState {
             }
         }
 
-        self.send(Command::SetSongLen(project.bars() as u16));
-        for index in 0..project.bars() {
-            self.send(Command::SetSongBar {
-                index: index as u16,
-                patterns: project.bar_mask(index),
+        self.send(Command::ClearSong);
+        for placement in &project.song {
+            self.send(Command::PlacePattern {
+                pattern: placement.pattern,
+                step: placement.step,
             });
         }
+        self.send(Command::SetSongLen(project.song_steps()));
         self.send(Command::SetActivePattern(
             project.patterns.first().map(|p| p.id).unwrap_or(0),
         ));
@@ -272,29 +273,31 @@ impl AppState {
         }
     }
 
-    /// Tell the audio thread the song again, from the top. Cheap: a song is a few hundred
-    /// bars at most, and it means the front end never has to describe an edit, only the
-    /// result.
+    /// Tell the audio thread the song again, from nothing. Cheap: a song is a few hundred
+    /// placements at most, and it means the front end never has to describe an edit, only
+    /// the result.
     pub fn push_song(&self) {
         let project = self.project.lock().unwrap();
-        self.send(Command::SetSongLen(project.bars() as u16));
-        for index in 0..project.bars() {
-            self.send(Command::SetSongBar {
-                index: index as u16,
-                patterns: project.bar_mask(index),
+        self.send(Command::ClearSong);
+        for placement in &project.song {
+            self.send(Command::PlacePattern {
+                pattern: placement.pattern,
+                step: placement.step,
             });
         }
+        self.send(Command::SetSongLen(project.song_steps()));
     }
 
-    /// One bar of the song, plus how long the song is now. What painting a bar sends, so a
-    /// drag across the song is two commands a bar rather than the whole song each time.
-    pub fn push_song_bar(&self, index: usize) {
+    /// One placement, plus how long the song is now. What painting the song sends, so a drag
+    /// across it is two commands a placement rather than the whole song each time.
+    pub fn push_placement(&self, pattern: u16, step: u32, on: bool) {
         let project = self.project.lock().unwrap();
-        self.send(Command::SetSongBar {
-            index: index as u16,
-            patterns: project.bar_mask(index),
+        self.send(if on {
+            Command::PlacePattern { pattern, step }
+        } else {
+            Command::UnplacePattern { pattern, step }
         });
-        self.send(Command::SetSongLen(project.bars() as u16));
+        self.send(Command::SetSongLen(project.song_steps()));
     }
 
     // --- the project folder ------------------------------------------------

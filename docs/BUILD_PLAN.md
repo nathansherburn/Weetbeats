@@ -12,7 +12,7 @@ A tiny, fun, free music maker for macOS. Point it at a folder of samples, tick b
 | Instruments | Sampler first. Host real plugins later |
 | Plugin format | CLAP only. No VST3, no AU |
 | Pattern length | 16 steps by default, adjustable per pattern, one step at a time, up to 64 |
-| Song grid | Bars of 16 steps. A bar holds any number of patterns, all playing together |
+| Song grid | A pattern is placed in steps of its own length, and placements overlap freely |
 | Steps | Plain on/off boxes |
 | Projects | A folder, with samples copied in as they are added |
 | Export | None yet, playback only |
@@ -126,13 +126,15 @@ MySong.beat/
 
 **Decided**
 
-A song slot is one bar, and a bar is 16 steps — one pattern of the default length. A bar holds **any number of patterns**, and they all sound together: that is what makes a kick pattern, a hat pattern and a snare pattern add up to a beat, which is the whole reason to have patterns rather than one long grid.
+**A placement is one play-through of one pattern, at a step.** Placements overlap freely: that is what makes a kick pattern, a hat pattern and a snare pattern add up to a beat, which is the whole reason to have patterns rather than one long grid.
 
-A pattern is not restarted at every bar. Each one carries how far into its run of bars it is, so a pattern painted across four bars plays through those four bars — twice if it is two bars long, four times over if it is four steps long. A pattern painted into less room than it needs gets cut off at the end of the run, and the block says so.
+A placement sits on a multiple of its own pattern's length, so a four step pattern goes into the song four steps at a time and a thirty two step pattern thirty two. Each lane of the song view is divided by its own pattern, which is the only grid that means anything when patterns are different lengths — and it means one click is one pattern, never four of them padding out a bar.
 
-The first pass at this had one slot per pattern, with the slot as long as whatever pattern was in it. It read well on paper and was wrong in the hand: nothing could stack, and with every column a different width there was no sensible way to drag across the song to fill it in.
+Bars of 16 steps are still the song's ruler: the numbers along the top, where the loop ends (rounded up), and what right clicking clears. They are just not the unit anything is placed in.
 
-The engine holds every pattern's notes so it can move on at the bar line without asking the app thread for anything. A bar of the song is a `u32` of pattern bits, which is what caps patterns at 32.
+Two earlier passes at this were wrong, and both were wrong in the same direction — trying to make the song a grid of *slots* rather than a line of *time*. One slot per pattern, with the slot as long as whatever was in it, could not stack and could not be dragged across. One slot per bar could do both, but a four step pattern in a sixteen step bar had to either loop four times or be cut off, and neither is what you asked for.
+
+The engine holds every pattern's notes, and a slot per step of the song saying which patterns *start* there. Each pattern then carries how far through itself it is and how much is left, which is what makes a placement play once and stop. A step's starts are a `u32` of pattern bits, which is what caps patterns at 32.
 
 **Opening and saving are in the menu bar**, not buttons in the window. So is everything else a Mac app keeps up there — and the Edit menu earns its keep even here, because without it copy and paste stop working in the one text field the app has.
 
