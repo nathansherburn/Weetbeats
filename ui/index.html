@@ -33,27 +33,65 @@
         </div>
       </div>
 
+      <div class="project">
+        <span class="project-name" id="projectName" title="">Untitled</span>
+        <button id="openProject" class="add" title="Open another project (cmd O)">open</button>
+        <button id="saveAs" class="add" title="Save a copy somewhere (shift cmd S)">save as</button>
+      </div>
+
       <div class="status" id="status"></div>
     </header>
 
     <main>
-      <section class="pattern" id="pattern">
-        <div class="pattern-head">
-          <div class="head-tracks">
-            <span class="head-label">tracks</span>
-            <button id="add" class="add" title="Add an instrument">+ Add</button>
-          </div>
-          <canvas id="ruler" class="ruler"></canvas>
+      <!--
+        The patterns panel. Down the left in the song view, and still there while a pattern
+        is open, because that is how you get to the next one.
+      -->
+      <aside class="patterns">
+        <div class="panel-head">
+          <span class="head-label">patterns</span>
+          <button id="addPattern" class="add" title="New pattern">+</button>
         </div>
-        <div class="pattern-body" id="patternBody">
-          <div class="track-headers" id="trackHeaders"></div>
-          <div class="grid-wrap">
-            <canvas id="grid" class="grid"></canvas>
+        <div class="pattern-list" id="patternList"></div>
+      </aside>
+
+      <!-- One of these two at a time, and it gets everything below the transport. -->
+      <section class="workspace">
+        <!-- The song: a scrubber along the top, one lane per pattern down the side. -->
+        <div class="song" id="song">
+          <div class="song-scroll" id="songScroll">
+            <div class="song-grid">
+              <canvas id="scrubber" class="scrubber" title="Click to play from here"></canvas>
+              <canvas id="lanes" class="lanes"></canvas>
+            </div>
+          </div>
+          <div class="hint" id="songHint">
+            <p>Click a pattern on the left to open it.</p>
+            <p class="small">Then tick a slot in its lane to put it in the song.</p>
           </div>
         </div>
-        <div class="empty" id="empty">
-          <button id="addBig" class="add-big">Add an instrument</button>
-          <p class="small">Or drop a sound on the window. Then tick some boxes and hit space.</p>
+
+        <!-- The pattern editor: the step grid, and the instruments it plays. -->
+        <div class="editor hidden" id="editor">
+          <div class="editor-scroll" id="editorScroll">
+            <div class="editor-grid">
+              <div class="corner">
+                <button id="add" class="add" title="Add an instrument">+ Add</button>
+                <span class="steps" title="How many boxes this pattern has">
+                  <button id="fewerSteps" class="tick" aria-label="Fewer steps">&minus;</button>
+                  <input id="steps" type="number" min="1" max="64" step="1" value="16" />
+                  <button id="moreSteps" class="tick" aria-label="More steps">+</button>
+                </span>
+              </div>
+              <canvas id="ruler" class="ruler"></canvas>
+              <div class="track-headers" id="trackHeaders"></div>
+              <canvas id="grid" class="grid"></canvas>
+            </div>
+          </div>
+          <div class="empty" id="empty">
+            <button id="addBig" class="add-big">Add an instrument</button>
+            <p class="small">Or drop a sound on the window. Then tick some boxes and hit space.</p>
+          </div>
         </div>
       </section>
     </main>

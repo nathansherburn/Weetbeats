@@ -17,6 +17,7 @@
 pub mod clock;
 pub mod command;
 pub mod engine;
+pub mod folder;
 pub mod model;
 pub mod sample;
 pub mod shared;
@@ -31,8 +32,19 @@ pub const MAX_NOTES_PER_TRACK: usize = 256;
 /// Voices in the pool. Run out and the oldest gets stolen.
 pub const MAX_VOICES: usize = 64;
 
-/// Longest pattern the engine will play. Stage 1 only ever asks for 16.
+/// Longest pattern the engine will play.
 pub const MAX_STEPS: u16 = 64;
+
+/// Boxes a new pattern has.
+pub const DEFAULT_STEPS: u32 = 16;
+
+/// Pattern slots the engine keeps notes for. A pattern's id in the project *is* its slot,
+/// the same trick as tracks, so the engine never has to be told a pattern has moved.
+pub const MAX_PATTERNS: usize = 32;
+
+/// Slots in the song. One slot is one whole pattern, so this is long enough for a song of
+/// two hundred and fifty six patterns end to end.
+pub const MAX_SONG_SLOTS: usize = 256;
 
 /// Frames the mixer works on at a time. Longer callbacks get chopped into these.
 pub const MAX_BLOCK: usize = 1024;
@@ -48,7 +60,7 @@ pub const PREVIEW_TRACK: u16 = u16::MAX;
 
 pub use command::{Command, EngineNote, Trash};
 pub use engine::Engine;
-pub use model::{Note, Pattern, Project, SampleRef, Track};
+pub use model::{Lane, Note, Pattern, Project, SampleRef, Track};
 pub use sample::Sample;
 pub use shared::{Playhead, Shared};
 

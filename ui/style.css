@@ -11,8 +11,15 @@
   --accent-soft: #ff4d8733;
   --lit: #ffd75e;
   --ok: #6ee7a8;
+  /* One row of the step grid. Must match ROW in main.js. */
   --row: 46px;
+  /* The instrument column in the pattern editor. Must match HEADERS in main.js. */
   --headers: 296px;
+  /* The patterns panel, and one pattern in it. Must match PATTERNS and LANE in main.js. */
+  --patterns: 208px;
+  --lane: 34px;
+  /* The strip along the top of both views: the ruler, and the scrubber. */
+  --head: 30px;
 }
 
 * {
@@ -40,6 +47,10 @@ button {
   font: inherit;
   color: inherit;
   cursor: pointer;
+}
+
+.hidden {
+  display: none !important;
 }
 
 /* --- transport --- */
@@ -148,16 +159,37 @@ input[type="range"]:active::-webkit-slider-thumb {
   transition: width 0.06s linear;
 }
 
-.status {
+/* The project is a folder, and this is its name. */
+.project {
+  display: flex;
+  align-items: center;
+  gap: 7px;
   margin-left: auto;
+}
+
+.project-name {
+  font-size: 11px;
+  color: var(--dim);
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status {
   color: var(--dim);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   text-align: right;
+  min-width: 92px;
 }
 
 .status .warn {
   color: var(--accent);
+}
+
+.status .ok {
+  color: var(--ok);
 }
 
 /* --- layout --- */
@@ -168,7 +200,24 @@ main {
   min-height: 0;
 }
 
-/* --- add instrument --- */
+.workspace {
+  flex: 1;
+  display: flex;
+  min-width: 0;
+  position: relative;
+}
+
+body.drop-target::after {
+  content: "";
+  position: fixed;
+  inset: 6px;
+  border: 2px dashed var(--accent);
+  border-radius: 10px;
+  pointer-events: none;
+  z-index: 10;
+}
+
+/* --- buttons --- */
 
 .add {
   background: var(--panel-2);
@@ -199,104 +248,6 @@ main {
 
 .add-big:hover {
   filter: brightness(1.08);
-}
-
-/* --- pattern --- */
-
-.pattern {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  position: relative;
-}
-
-body.drop-target::after {
-  content: "";
-  position: fixed;
-  inset: 6px;
-  border: 2px dashed var(--accent);
-  border-radius: 10px;
-  pointer-events: none;
-  z-index: 10;
-}
-
-.pattern-head {
-  display: flex;
-  border-bottom: 1px solid var(--line);
-  background: var(--panel);
-  flex: none;
-}
-
-.head-tracks {
-  width: var(--headers);
-  flex: none;
-  padding: 5px 9px;
-  border-right: 1px solid var(--line);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.head-label {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.09em;
-  color: var(--dim);
-}
-
-.ruler {
-  height: 29px;
-  display: block;
-}
-
-.pattern-body {
-  flex: 1;
-  display: flex;
-  overflow-y: auto;
-  overflow-x: auto;
-  min-height: 0;
-}
-
-.track-headers {
-  width: var(--headers);
-  flex: none;
-  border-right: 1px solid var(--line);
-  background: var(--panel);
-  position: sticky;
-  left: 0;
-  z-index: 2;
-}
-
-.track {
-  height: var(--row);
-  border-bottom: 1px solid var(--line);
-  padding: 0 9px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-/* The name comes first and gets whatever room is left: it is the one thing you read. */
-.track .name {
-  flex: 1;
-  min-width: 64px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.track .name:hover {
-  color: var(--accent);
-}
-
-.track canvas.wave {
-  width: 34px;
-  height: 18px;
-  opacity: 0.45;
-  flex: none;
 }
 
 .tick {
@@ -336,14 +287,313 @@ body.drop-target::after {
   color: var(--accent);
 }
 
-.track input[type="range"] {
-  width: 46px;
+.head-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--dim);
+}
+
+/* --- the patterns panel --- */
+
+.patterns {
+  width: var(--patterns);
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  min-height: 0;
+}
+
+.panel-head {
+  height: var(--head);
+  flex: none;
+  padding: 0 8px 0 10px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.panel-head .add {
+  padding: 1px 8px;
+  font-size: 13px;
+  line-height: 1.1;
+}
+
+.pattern-list {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  min-height: 0;
+}
+
+.prow {
+  height: var(--lane);
+  padding: 0 8px 0 10px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.prow:hover {
+  background: var(--panel-2);
+}
+
+/* The pattern the editor has open. Click it again and it closes. */
+.prow.open {
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.prow.playing .pname {
+  color: var(--lit);
+}
+
+.prow .pname {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.prow .rename {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 1px 4px;
+  outline: none;
+}
+
+.prow .plen {
+  font-size: 10px;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
   flex: none;
 }
 
-.grid-wrap {
+/* Duplicate and delete stay out of the way until you go looking for them. */
+.prow .tick {
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+
+.prow:hover .tick,
+.prow .tick:focus-visible {
+  opacity: 1;
+}
+
+/* --- the song --- */
+
+.song {
   flex: 1;
   min-width: 0;
+  display: flex;
+  position: relative;
+}
+
+.song-scroll {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+}
+
+/* The scrubber sticks to the top so it is still there when the lanes scroll. */
+.song-grid {
+  display: grid;
+  grid-template-columns: max-content;
+  grid-template-rows: var(--head) max-content;
+  min-width: 100%;
+  /*
+   * One line under each lane, drawn by the stylesheet rather than by the canvas so it runs
+   * the whole way across even when the song is short. Tiles are a lane tall and start
+   * below the scrubber, which puts them where the canvas draws its blocks and where the
+   * panel on the left puts its rows. The strip above is under the scrubber, which is
+   * opaque and sticky.
+   */
+  background-image: linear-gradient(
+    to bottom,
+    transparent calc(var(--lane) - 1px),
+    var(--line) calc(var(--lane) - 1px)
+  );
+  background-size: 100% var(--lane);
+  background-position: 0 var(--head);
+}
+
+.scrubber {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: block;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+}
+
+.lanes {
+  display: block;
+}
+
+.hint {
+  position: absolute;
+  inset: var(--head) 0 0 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 6px;
+  text-align: center;
+  color: var(--dim);
+  pointer-events: none;
+}
+
+.hint p {
+  margin: 0;
+}
+
+.small {
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+/* --- the pattern editor --- */
+
+.editor {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  position: relative;
+}
+
+.editor-scroll {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+}
+
+/*
+ * Two sticky edges: the ruler holds the top, the instruments hold the left, and the corner
+ * holds both. One scroll container, so the ruler can never drift out of step with the grid.
+ */
+.editor-grid {
+  display: grid;
+  grid-template-columns: var(--headers) max-content;
+  grid-template-rows: var(--head) max-content;
+  min-width: 100%;
+  /* A line under each track, all the way across. Same trick as the song lanes. */
+  background-image: linear-gradient(
+    to bottom,
+    transparent calc(var(--row) - 1px),
+    var(--line) calc(var(--row) - 1px)
+  );
+  background-size: 100% var(--row);
+  background-position: 0 var(--head);
+}
+
+.corner {
+  position: sticky;
+  top: 0;
+  left: 0;
+  z-index: 3;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 9px;
+}
+
+.steps {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.steps input {
+  width: 34px;
+  font: inherit;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 0;
+  outline: none;
+  -moz-appearance: textfield;
+}
+
+.steps input::-webkit-inner-spin-button,
+.steps input::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.steps input:focus {
+  border-color: var(--accent);
+}
+
+.ruler {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: block;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+.track-headers {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  border-right: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.track {
+  height: var(--row);
+  border-bottom: 1px solid var(--line);
+  padding: 0 9px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* The name comes first and gets whatever room is left: it is the one thing you read. */
+.track .name {
+  flex: 1;
+  min-width: 64px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.track .name:hover {
+  color: var(--accent);
+}
+
+.track canvas.wave {
+  width: 34px;
+  height: 18px;
+  opacity: 0.45;
+  flex: none;
+}
+
+.track input[type="range"] {
+  width: 46px;
+  flex: none;
 }
 
 .grid {
@@ -352,7 +602,7 @@ body.drop-target::after {
 
 .empty {
   position: absolute;
-  inset: 30px 0 0 0;
+  inset: var(--head) 0 0 var(--headers);
   display: grid;
   place-content: center;
   justify-items: center;
@@ -364,13 +614,4 @@ body.drop-target::after {
 
 .empty p {
   margin: 0;
-}
-
-.empty .small {
-  font-size: 11px;
-  opacity: 0.7;
-}
-
-.empty.hidden {
-  display: none;
 }

@@ -104,6 +104,7 @@ fn silent_until_told_to_play() {
     let mut rig = Rig::new(120.0, 16);
     track_with(&mut rig, 0, dc_sample(1000));
     rig.send(Command::SetNote {
+        pattern: 0,
         track: 0,
         note: note(0),
     });
@@ -117,6 +118,7 @@ fn steps_land_on_the_right_frame() {
     track_with(&mut rig, 0, dc_sample(400));
     for step in [0u16, 4, 8, 12] {
         rig.send(Command::SetNote {
+            pattern: 0,
             track: 0,
             note: note(step),
         });
@@ -137,10 +139,12 @@ fn tempo_decides_the_spacing() {
     let mut rig = Rig::new(240.0, 16);
     track_with(&mut rig, 0, dc_sample(200));
     rig.send(Command::SetNote {
+        pattern: 0,
         track: 0,
         note: note(0),
     });
     rig.send(Command::SetNote {
+        pattern: 0,
         track: 0,
         note: note(1),
     });
@@ -160,6 +164,7 @@ fn mute_silences_and_solo_beats_mute() {
         for id in 0..2u16 {
             track_with_gain(&mut rig, id, dc_sample(6000), 0.2);
             rig.send(Command::SetNote {
+                pattern: 0,
                 track: id,
                 note: note(0),
             });
@@ -201,6 +206,7 @@ fn master_never_clips_hard() {
     for id in 0..16u16 {
         track_with_gain(&mut rig, id, dc_sample(6000), 1.5);
         rig.send(Command::SetNote {
+            pattern: 0,
             track: id,
             note: note(0),
         });
@@ -228,6 +234,7 @@ fn every_note_gets_a_voice_and_the_pool_holds() {
         track_with(&mut rig, id, dc_sample(48_000));
         for step in 0..16u16 {
             rig.send(Command::SetNote {
+                pattern: 0,
                 track: id,
                 note: note(step),
             });
@@ -256,6 +263,7 @@ fn stealing_voices_does_not_click() {
         track_with_gain(&mut rig, id, dc_sample(200_000), 0.015);
         for step in 0..16u16 {
             rig.send(Command::SetNote {
+                pattern: 0,
                 track: id,
                 note: note(step),
             });
@@ -324,6 +332,7 @@ fn deleting_a_track_stops_it() {
     let mut rig = Rig::new(120.0, 16);
     track_with(&mut rig, 0, dc_sample(48_000));
     rig.send(Command::SetNote {
+        pattern: 0,
         track: 0,
         note: note(0),
     });
@@ -387,6 +396,7 @@ fn a_track_with_no_sample_is_harmless() {
         gain: 1.0,
     });
     rig.send(Command::SetNote {
+        pattern: 0,
         track: 3,
         note: note(0),
     });
@@ -403,6 +413,7 @@ fn commands_for_slots_that_do_not_exist_are_ignored() {
         gain: 1.0,
     });
     rig.send(Command::SetNote {
+        pattern: 0,
         track: 9_999,
         note: note(0),
     });
@@ -410,4 +421,238 @@ fn commands_for_slots_that_do_not_exist_are_ignored() {
     rig.send(Command::SetPlaying(true));
     let out = rig.render(6000);
     assert!(out.iter().all(|s| *s == 0.0));
+}
+
+// --- patterns and the song ------------------------------------------------
+
+fn note_in(rig: &mut Rig, pattern: u16, track: u16, step: u16) {
+    rig.send(Command::SetNote {
+        pattern,
+        track,
+        note: note(step),
+    });
+}
+
+/// Hand the engine a song and switch it to playing the song rather than one pattern.
+fn song(rig: &mut Rig, slots: &[u16]) {
+    rig.send(Command::SetSongLen(slots.len() as u16));
+    for (index, pattern) in slots.iter().enumerate() {
+        rig.send(Command::SetSongSlot {
+            index: index as u16,
+            pattern: *pattern,
+        });
+    }
+    rig.send(Command::SetSongMode(true));
+}
+
+/// One step at 120bpm and 48k. Sixteenths, so four of these to a beat.
+const STEP: usize = 6000;
+
+#[test]
+fn notes_belong_to_the_pattern_they_were_drawn_in() {
+    let mut rig = Rig::new(120.0, 16);
+    track_with(&mut rig, 0, dc_sample(400));
+    note_in(&mut rig, 0, 0, 0);
+    note_in(&mut rig, 1, 0, 8);
+    rig.send(Command::SetPlaying(true));
+
+    // Pattern 0 is the open one, so only what was drawn there sounds.
+    let out = rig.render_chunked(STEP * 16, 512);
+    assert_eq!(onsets(&out), vec![0]);
+
+    rig.send(Command::SetActivePattern(1));
+    let out = rig.render_chunked(STEP * 16, 512);
+    assert_eq!(
+        onsets(&out),
+        vec![8 * STEP],
+        "pattern 1 played someone else's notes"
+    );
+}
+
+#[test]
+fn the_song_plays_one_whole_pattern_a_slot() {
+    let mut rig = Rig::new(120.0, 16);
+    track_with(&mut rig, 0, dc_sample(400));
+    // Two patterns of different lengths, each hitting on its first step.
+    rig.send(Command::SetPatternSteps {
+        pattern: 1,
+        steps: 8,
+    });
+    note_in(&mut rig, 0, 0, 0);
+    note_in(&mut rig, 1, 0, 0);
+    song(&mut rig, &[0, 1]);
+    rig.send(Command::SetPlaying(true));
+
+    // Sixteen steps of pattern 0, eight of pattern 1, then round again. A slot lasts as
+    // long as the pattern in it, which is the whole point of one slot being one pattern.
+    let out = rig.render_chunked(STEP * 48, 373);
+    assert_eq!(
+        onsets(&out),
+        vec![0, 16 * STEP, 24 * STEP, 40 * STEP],
+        "the song did not follow its patterns' own lengths"
+    );
+}
+
+#[test]
+fn the_playhead_says_where_in_the_song_it_is() {
+    let mut rig = Rig::new(120.0, 16);
+    track_with(&mut rig, 0, dc_sample(400));
+    rig.send(Command::SetPatternSteps {
+        pattern: 2,
+        steps: 4,
+    });
+    song(&mut rig, &[0, 2]);
+    rig.send(Command::SetPlaying(true));
+
+    rig.render_chunked(STEP * 2, 512);
+    let head = rig.shared.playhead();
+    assert_eq!((head.song_slot, head.pattern, head.step), (0, 0, 2));
+
+    // Into the second slot, which is a different pattern and only four steps long.
+    rig.render_chunked(STEP * 15, 512);
+    let head = rig.shared.playhead();
+    assert_eq!((head.song_slot, head.pattern, head.step), (1, 2, 1));
+}
+
+#[test]
+fn seeking_starts_the_song_from_that_slot() {
+    let mut rig = Rig::new(120.0, 16);
+    track_with(&mut rig, 0, dc_sample(400));
+    rig.send(Command::SetPatternSteps {
+        pattern: 1,
+        steps: 8,
+    });
+    note_in(&mut rig, 1, 0, 0);
+    song(&mut rig, &[0, 1]);
+    rig.send(Command::SeekSong(1));
+    rig.send(Command::SetPlaying(true));
+
+    // Straight in at the top of slot 1, then on round to slot 0 after its eight steps.
+    let out = rig.render_chunked(STEP * 8, 512);
+    assert_eq!(onsets(&out), vec![0]);
+    assert_eq!(rig.shared.playhead().song_slot, 0);
+}
+
+#[test]
+fn stopping_goes_back_to_the_top_of_the_song() {
+    let mut rig = Rig::new(120.0, 16);
+    track_with(&mut rig, 0, dc_sample(100));
+    song(&mut rig, &[0, 1, 0]);
+    rig.send(Command::SetPlaying(true));
+    rig.render_chunked(STEP * 20, 512);
+    assert_eq!(rig.shared.playhead().song_slot, 1);
+
+    rig.send(Command::SetPlaying(false));
+    rig.render(64);
+    let head = rig.shared.playhead();
+    assert_eq!((head.song_slot, head.step), (0, 0));
+}
+
+#[test]
+fn an_empty_song_makes_no_sound() {
+    let mut rig = Rig::new(120.0, 16);
+    track_with(&mut rig, 0, dc_sample(4000));
+    note_in(&mut rig, 0, 0, 0);
+    song(&mut rig, &[]);
+    rig.send(Command::SetPlaying(true));
+
+    let out = rig.render_chunked(STEP * 20, 512);
+    assert!(
+        out.iter().all(|s| *s == 0.0),
+        "an empty song played something"
+    );
+}
+
+#[test]
+fn changing_a_pattern_length_changes_the_loop_under_the_playhead() {
+    let mut rig = Rig::new(120.0, 16);
+    track_with(&mut rig, 0, dc_sample(400));
+    note_in(&mut rig, 0, 0, 0);
+    rig.send(Command::SetPlaying(true));
+
+    // Sixteen steps round: one hit.
+    let out = rig.render_chunked(STEP * 16, 512);
+    assert_eq!(onsets(&out).len(), 1);
+
+    // Four steps round, without stopping: four hits in the same stretch of time.
+    rig.send(Command::SetPatternSteps {
+        pattern: 0,
+        steps: 4,
+    });
+    let out = rig.render_chunked(STEP * 16, 512);
+    assert_eq!(onsets(&out), vec![0, 4 * STEP, 8 * STEP, 12 * STEP]);
+}
+
+#[test]
+fn a_pattern_will_not_be_longer_than_the_engine_holds() {
+    let mut rig = Rig::new(120.0, 16);
+    track_with(&mut rig, 0, dc_sample(400));
+    rig.send(Command::SetPatternSteps {
+        pattern: 0,
+        steps: 9_000,
+    });
+    note_in(&mut rig, 0, 0, 0);
+    rig.send(Command::SetPlaying(true));
+
+    // Clamped to MAX_STEPS, so the loop comes round there rather than never.
+    let out = rig.render_chunked(STEP * 130, 512);
+    assert_eq!(onsets(&out), vec![0, 64 * STEP, 128 * STEP]);
+}
+
+#[test]
+fn a_new_track_in_a_reused_slot_starts_with_no_notes() {
+    let mut rig = Rig::new(120.0, 16);
+    track_with(&mut rig, 0, dc_sample(400));
+    note_in(&mut rig, 0, 0, 0);
+    note_in(&mut rig, 1, 0, 0);
+    rig.send(Command::RemoveTrack { track: 0 });
+
+    // Slot 0 comes back as a different instrument. It must not inherit the old one's
+    // notes, in this pattern or any other.
+    track_with(&mut rig, 0, dc_sample(400));
+    rig.send(Command::SetPlaying(true));
+    let out = rig.render_chunked(STEP * 16, 512);
+    assert!(out.iter().all(|s| *s == 0.0), "the old notes came back");
+
+    rig.send(Command::SetActivePattern(1));
+    let out = rig.render_chunked(STEP * 16, 512);
+    assert!(out.iter().all(|s| *s == 0.0), "and in another pattern too");
+}
+
+#[test]
+fn deleting_a_pattern_silences_it_everywhere() {
+    let mut rig = Rig::new(120.0, 16);
+    track_with(&mut rig, 0, dc_sample(400));
+    note_in(&mut rig, 3, 0, 0);
+    song(&mut rig, &[3]);
+    rig.send(Command::SetPlaying(true));
+    assert_eq!(onsets(&rig.render_chunked(STEP * 16, 512)), vec![0]);
+
+    rig.send(Command::ClearPattern { pattern: 3 });
+    let out = rig.render_chunked(STEP * 16, 512);
+    assert!(
+        out.iter().all(|s| *s == 0.0),
+        "a deleted pattern kept playing"
+    );
+}
+
+#[test]
+fn a_song_slot_that_names_nothing_real_is_ignored() {
+    let mut rig = Rig::new(120.0, 16);
+    track_with(&mut rig, 0, dc_sample(400));
+    note_in(&mut rig, 0, 0, 0);
+    song(&mut rig, &[0]);
+    // Way past MAX_PATTERNS, and past MAX_SONG_SLOTS. Neither should stick.
+    rig.send(Command::SetSongSlot {
+        index: 0,
+        pattern: 9_999,
+    });
+    rig.send(Command::SetSongSlot {
+        index: 9_999,
+        pattern: 0,
+    });
+    rig.send(Command::SetPlaying(true));
+
+    let out = rig.render_chunked(STEP * 16, 512);
+    assert_eq!(onsets(&out), vec![0], "the song lost its pattern");
 }

@@ -18,14 +18,16 @@ pub struct EngineNote {
 }
 
 /// App thread to audio thread. Never blocks either side.
+///
+/// Patterns and tracks are addressed by their id, which is also their slot, so nothing
+/// here ever has to say "the pattern that used to be third".
 #[derive(Debug)]
 pub enum Command {
     /// Start or stop the transport. Stopping leaves ringing voices to finish.
     SetPlaying(bool),
-    /// Jump to the top of the pattern.
+    /// Jump to the top of what is playing.
     Rewind,
     SetBpm(f32),
-    SetSteps(u32),
     SetMasterGain(f32),
     /// Claim a slot at a starting gain. A track with no sample is silent but keeps its
     /// notes. The gain is set, not slid to: a track that has just appeared has no sound of
@@ -34,7 +36,7 @@ pub enum Command {
         track: u16,
         gain: f32,
     },
-    /// Free a slot and release anything it was holding.
+    /// Free a slot, release anything it was holding, and forget its notes in every pattern.
     RemoveTrack {
         track: u16,
     },
@@ -54,19 +56,47 @@ pub enum Command {
         track: u16,
         soloed: bool,
     },
-    /// Add or replace the note at this step and pitch.
+    /// How many steps a pattern is. Applies to the clock straight away if that pattern is
+    /// the one playing.
+    SetPatternSteps {
+        pattern: u16,
+        steps: u32,
+    },
+    /// Add or replace the note at this step and pitch, in one pattern.
     SetNote {
+        pattern: u16,
         track: u16,
         note: EngineNote,
     },
     ClearNote {
+        pattern: u16,
         track: u16,
         step: u16,
         pitch: u8,
     },
+    /// Forget one track's notes in one pattern.
     ClearNotes {
+        pattern: u16,
         track: u16,
     },
+    /// Forget everything in a pattern, for a pattern that has been deleted.
+    ClearPattern {
+        pattern: u16,
+    },
+    /// The pattern the editor has open. It is what plays, on a loop, in pattern mode.
+    SetActivePattern(u16),
+    /// True to play the song, false to loop the open pattern. The UI ties this to which
+    /// view you are looking at.
+    SetSongMode(bool),
+    /// How many slots of the song are in use.
+    SetSongLen(u16),
+    /// Which pattern plays in a song slot.
+    SetSongSlot {
+        index: u16,
+        pattern: u16,
+    },
+    /// Jump the song to a slot and start it from the top of that pattern.
+    SeekSong(u16),
     /// Play a track's sample right now, for clicking a row.
     Audition {
         track: u16,
@@ -92,8 +122,10 @@ pub enum Trash {
 }
 
 /// Commands the ring buffer holds before the app thread has to wait. A callback drains the
-/// lot, so this only has to cover one burst — loading a project sends a few hundred.
-pub const COMMAND_CAPACITY: usize = 1024;
+/// lot, so this only has to cover one burst. Opening a project sends one per note in the
+/// whole song, which is more than fits: the app thread waits for room in that one case,
+/// which it can afford to do and the audio thread never notices.
+pub const COMMAND_CAPACITY: usize = 4096;
 
 /// Room for returned samples. Overflowing means dropping on the audio thread, which is
 /// counted in [`crate::Shared::dropped_on_audio_thread`].

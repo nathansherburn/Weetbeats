@@ -11,9 +11,9 @@ A tiny, fun, free music maker for macOS. Point it at a folder of samples, tick b
 | Audio out | `cpal` |
 | Instruments | Sampler first. Host real plugins later |
 | Plugin format | CLAP only. No VST3, no AU |
-| Pattern length | 16 steps to start, adjustable later |
+| Pattern length | 16 steps by default, adjustable per pattern up to 64 |
 | Steps | Plain on/off boxes |
-| Projects | A folder, with samples copied inside it |
+| Projects | A folder, with samples copied in as they are added |
 | Export | None yet, playback only |
 | Distribution | Unsigned .app, users click through the warning |
 | Licence | Open source, free forever |
@@ -102,7 +102,7 @@ Freesound (filter to CC0), the Legowelt sample archive, 99Sounds, SampleRadar. S
 **What it does**
 
 - Patterns get names, you can add, duplicate and delete them
-- Song view: patterns down the left, bars across the top, tick a box to place a pattern
+- Song view: patterns down the left, a scrubber across the top, tick a slot to place a pattern
 - Playhead sweeps across the song view
 - Switch between pattern view and song view with one click
 - Save and load projects
@@ -119,11 +119,13 @@ MySong.beat/
     clap.wav
 ```
 
-`project.json` holds BPM, patterns, tracks and the song grid. Sample paths are relative to the folder. Copy samples in on save so nothing ever breaks.
+`project.json` holds BPM, patterns, tracks and the song. Sample paths are relative to the folder.
 
-**Decide now**
+**Samples are copied in when they are added, not when the project is saved.** A save-time copy leaves a window where the project points at a file somewhere else, which can move or be deleted in the meantime. Copying on the way in closes it: from the moment a sound is in the project, the project owns a copy, and the only way to break a project is to go into its folder and break it by hand. The other half of the deal is that a sample is deleted when the last track using it goes, so the folder holds exactly what the project uses and nothing else.
 
-Does a song slot mean one bar, or one whole pattern? Recommendation: one slot equals one pattern, however long it is. Simpler once pattern lengths vary.
+**Decided**
+
+A song slot is one whole pattern, however long that pattern is — not one bar. Patterns in the same song do not have to be the same length, and changing a pattern's length changes the width of its block in the song view. The engine holds every pattern's notes so it can move on to the next slot on the boundary frame, without asking the app thread for anything.
 
 ## Stage 3 - Sampler instrument
 

@@ -95,19 +95,41 @@ fn render_does_not_allocate() {
             sample: Some(Arc::clone(&samples[(id % 8) as usize])),
         })
         .unwrap();
-        for step in 0..16u16 {
-            tx.push(Command::SetNote {
-                track: id,
-                note: EngineNote {
-                    step,
-                    pitch: 48 + (step as u8),
-                    velocity: 100,
-                    length: 1,
-                },
-            })
-            .unwrap();
+        // Notes in four patterns, so switching between them and walking the song both
+        // happen inside the armed window below.
+        for pattern in 0..4u16 {
+            for step in 0..8u16 {
+                tx.push(Command::SetNote {
+                    pattern,
+                    track: id,
+                    note: EngineNote {
+                        step,
+                        pitch: 48 + (step as u8) + (pattern as u8),
+                        velocity: 100,
+                        length: 1,
+                    },
+                })
+                .unwrap();
+            }
         }
     }
+
+    // A short song, so the engine crosses a slot boundary every few blocks. Moving on to
+    // the next pattern is the one place the audio thread reaches for something it was not
+    // already holding, so it is the one most worth counting.
+    for pattern in 0..4u16 {
+        tx.push(Command::SetPatternSteps { pattern, steps: 8 })
+            .unwrap();
+    }
+    tx.push(Command::SetSongLen(4)).unwrap();
+    for index in 0..4u16 {
+        tx.push(Command::SetSongSlot {
+            index,
+            pattern: index,
+        })
+        .unwrap();
+    }
+    tx.push(Command::SetSongMode(true)).unwrap();
     tx.push(Command::SetPlaying(true)).unwrap();
 
     // Preallocated output, exactly as the real callback gets from the device.
@@ -139,6 +161,21 @@ fn render_does_not_allocate() {
                 sample: Arc::clone(&samples[block % 8]),
                 gain: 0.4,
             });
+            // And leaning on the parts that are new: the song, and switching between
+            // patterns and the song the way opening and closing the editor does.
+            let _ = tx.push(Command::SetSongSlot {
+                index: (block % 4) as u16,
+                pattern: (block % 4) as u16,
+            });
+            let _ = tx.push(Command::SetPatternSteps {
+                pattern: (block % 4) as u16,
+                steps: 4 + (block % 12) as u32,
+            });
+            if block % 37 == 0 {
+                let _ = tx.push(Command::SetActivePattern((block % 4) as u16));
+                let _ = tx.push(Command::SetSongMode(block % 74 == 0));
+                let _ = tx.push(Command::SeekSong((block % 4) as u16));
+            }
 
             engine.render(&mut out, 2);
 
