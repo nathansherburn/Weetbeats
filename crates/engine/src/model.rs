@@ -73,6 +73,16 @@ pub struct Track {
     pub gain: f32,
     pub muted: bool,
     pub soloed: bool,
+    /// A sampler instrument rather than a one-shot.
+    ///
+    /// A one-shot is a drum: hit it and the whole sample plays, however short the note is.
+    /// An instrument is a sound played across the keyboard: the note's pitch reads the
+    /// sample faster or slower, and the sound stops when the note ends. The piano roll is
+    /// the editor for one, and opening it is what turns this on.
+    ///
+    /// Defaulted rather than required, so projects written before instruments existed load.
+    #[serde(default)]
+    pub pitched: bool,
 }
 
 impl Track {
@@ -84,6 +94,7 @@ impl Track {
             gain: 0.8,
             muted: false,
             soloed: false,
+            pitched: false,
         }
     }
 }
@@ -137,9 +148,49 @@ impl Lane {
         }
     }
 
+    /// Add a note, or replace the one already at its step and pitch. False when the lane is
+    /// as full as the engine will hold.
+    pub fn set_note(&mut self, note: Note) -> bool {
+        match self.find(note.step, note.pitch) {
+            Some(i) => {
+                self.notes[i] = note;
+                true
+            }
+            None => {
+                if self.notes.len() >= MAX_NOTES_PER_TRACK {
+                    return false;
+                }
+                self.notes.push(note);
+                true
+            }
+        }
+    }
+
+    /// Take out the note at a step and pitch, if there is one.
+    pub fn clear_note(&mut self, step: u32, pitch: u8) -> bool {
+        match self.find(step, pitch) {
+            Some(i) => {
+                self.notes.remove(i);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The note at a step and pitch.
+    pub fn note(&self, step: u32, pitch: u8) -> Option<Note> {
+        self.find(step, pitch).map(|i| self.notes[i])
+    }
+
     /// Drop notes that fall outside a shortened pattern.
+    ///
+    /// A note that starts inside the pattern but runs off the end is shortened rather than
+    /// dropped: it is still a note you drew, it just has less room now.
     pub fn trim_to(&mut self, steps: u32) {
         self.notes.retain(|n| n.step < steps);
+        for note in &mut self.notes {
+            note.length = note.length.min(steps - note.step).max(1);
+        }
     }
 }
 
@@ -182,6 +233,20 @@ impl Pattern {
 
     pub fn has_step(&self, track: u16, step: u32) -> bool {
         self.lane(track).is_some_and(|l| l.has_step(step))
+    }
+
+    /// Add or replace a note, at any pitch and any length. What the piano roll draws with.
+    pub fn set_note(&mut self, track: u16, note: Note) -> bool {
+        let fits = self.lane_mut(track).set_note(note);
+        self.lanes.retain(|l| !l.notes.is_empty());
+        fits
+    }
+
+    /// Take a note out, wherever it is.
+    pub fn clear_note(&mut self, track: u16, step: u32, pitch: u8) -> bool {
+        let gone = self.lane_mut(track).clear_note(step, pitch);
+        self.lanes.retain(|l| !l.notes.is_empty());
+        gone
     }
 
     /// Tick or untick a box. Returns what the box now is.
@@ -455,6 +520,60 @@ mod tests {
         assert_eq!(pattern.note_count(), 0);
         // And the empty lane goes with it, so a pattern nobody drew in stays empty.
         assert!(pattern.lanes.is_empty());
+    }
+
+    #[test]
+    fn the_piano_roll_writes_into_the_same_lane_as_the_boxes() {
+        let mut pattern = Pattern::new(0, "p".into());
+        pattern.set_step(0, 0, true);
+        // A note somewhere the boxes cannot reach: another pitch, and longer than a step.
+        assert!(pattern.set_note(
+            0,
+            Note {
+                step: 4,
+                pitch: 67,
+                velocity: 90,
+                length: 3,
+            }
+        ));
+        assert_eq!(pattern.note_count(), 2);
+        // The box is still a box, and the note is not one.
+        assert!(pattern.has_step(0, 0));
+        assert!(!pattern.has_step(0, 4));
+
+        // Setting one where another already is replaces it rather than doubling up.
+        pattern.set_note(
+            0,
+            Note {
+                step: 4,
+                pitch: 67,
+                velocity: 20,
+                length: 1,
+            },
+        );
+        assert_eq!(pattern.note_count(), 2);
+        assert_eq!(pattern.lane(0).unwrap().note(4, 67).unwrap().velocity, 20);
+
+        assert!(pattern.clear_note(0, 4, 67));
+        assert!(!pattern.clear_note(0, 4, 67));
+        assert_eq!(pattern.note_count(), 1);
+    }
+
+    #[test]
+    fn a_note_that_runs_off_a_shortened_pattern_is_cut_rather_than_lost() {
+        let mut pattern = Pattern::new(0, "p".into());
+        pattern.set_note(
+            0,
+            Note {
+                step: 4,
+                pitch: 60,
+                velocity: 100,
+                length: 8,
+            },
+        );
+        pattern.set_steps(8);
+        let note = pattern.lane(0).unwrap().note(4, 60).unwrap();
+        assert_eq!(note.length, 4, "it should reach the end and no further");
     }
 
     #[test]

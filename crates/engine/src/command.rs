@@ -56,6 +56,12 @@ pub enum Command {
         track: u16,
         soloed: bool,
     },
+    /// True for a sampler instrument, false for a one-shot. An instrument's notes are
+    /// pitched and stop when they end; a one-shot rings out however short the note is.
+    SetTrackPitched {
+        track: u16,
+        pitched: bool,
+    },
     /// How many steps a pattern is. Applies to the clock straight away if that pattern is
     /// the one playing.
     SetPatternSteps {

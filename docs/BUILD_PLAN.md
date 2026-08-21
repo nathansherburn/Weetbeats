@@ -152,6 +152,14 @@ Why this earns its place:
 
 Sits in the pattern grid as a track row, same as a sample. In step mode it plays one fixed note, so a bass line can be a rhythm part.
 
+**Decided**
+
+It is one flag on a track: an instrument, or a one-shot. A one-shot is a drum — hit it and the whole sample plays, and the note's length means nothing. An instrument is a sound played across the keyboard — the note's pitch reads the sample faster or slower, and **the sound stops when the note ends**, with the same few milliseconds of fade the voice pool already used for stealing.
+
+That last part is the only new thing on the audio thread: a voice carries how many frames of note it has left, and counting to zero is the note off. A one-shot's is infinity, so a drum hit is over when the sample is over and not before.
+
+Opening the piano roll on a track turns the flag on, because a roll full of pitches and lengths that mean nothing would be a lie. The corner of the roll says which it is and turns it back.
+
 ## Stage 4 - Piano roll
 
 **What it does**
@@ -169,6 +177,16 @@ Real polyphony and note-off handling. Each note takes a voice at its start and r
 **Rendering**
 
 This is where the webview gets tested. Hundreds of notes at 60fps means canvas, not one DOM node per note. Only redraw when something changes or the playhead moves.
+
+**Decided**
+
+The roll is a third view of the same pattern, opened per track from a button on its row rather than a right click — right click is "rub this out" everywhere else in the app now, and it would be strange for it to open a menu here. Escape walks back out: the roll, then the pattern, then the panic button.
+
+A box in the step grid and a note in the roll are the same thing in the same lane: a box is a note at the sampler's own pitch, one step long. Draw one in the roll at that pitch and it is a ticked box; the two editors never disagree because there is nothing to disagree about.
+
+Drawing: press to make a note and keep dragging to set how long it is, and the next one you draw is that long too. Grab a note to move it, grab its right hand end to stretch it, right click to rub it out. Every note you touch plays as you touch it, and so does a key on the keyboard, because you cannot write a melody you cannot hear. How hard each note is hit is a lane under the roll, dragged.
+
+Moving a note is one command rather than a delete and an add, so a dragged note is never briefly nowhere.
 
 ## Stage 5 - Effects
 

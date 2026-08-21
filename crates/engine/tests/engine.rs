@@ -778,3 +778,157 @@ fn a_placement_past_the_end_of_what_we_hold_is_ignored() {
     let out = rig.render_chunked(BAR, 512);
     assert_eq!(onsets(&out), vec![0], "the song lost its pattern");
 }
+
+// --- instruments ----------------------------------------------------------
+
+/// Stage 3, and the audio half of stage 4: a note on an instrument stops when it ends.
+#[test]
+fn an_instruments_note_stops_when_it_ends() {
+    let mut rig = Rig::new(120.0, 16);
+    // A sample far longer than the note, so the only thing that can stop it is the note off.
+    track_with(&mut rig, 0, dc_sample(200_000));
+    rig.send(Command::SetTrackPitched {
+        track: 0,
+        pitched: true,
+    });
+    rig.send(Command::SetNote {
+        pattern: 0,
+        track: 0,
+        note: EngineNote {
+            step: 0,
+            pitch: 60,
+            velocity: 127,
+            length: 2,
+        },
+    });
+    rig.send(Command::SetPlaying(true));
+
+    let out = rig.render_chunked(STEP * 8, 512);
+    let sounding = out.chunks(2).filter(|c| c[0].abs() > 1e-4).count();
+    // Two steps, plus a few hundred frames of release so it does not click off.
+    assert!(
+        (2 * STEP..2 * STEP + 400).contains(&sounding),
+        "a two step note lasted {sounding} frames, expected about {}",
+        2 * STEP
+    );
+}
+
+/// And a one-shot ignores the note's length entirely, which is what a drum wants.
+#[test]
+fn a_one_shot_rings_out_past_the_end_of_its_note() {
+    let mut rig = Rig::new(120.0, 16);
+    track_with(&mut rig, 0, dc_sample(30_000));
+    rig.send(Command::SetNote {
+        pattern: 0,
+        track: 0,
+        note: EngineNote {
+            step: 0,
+            pitch: 60,
+            velocity: 127,
+            length: 1,
+        },
+    });
+    rig.send(Command::SetPlaying(true));
+
+    let out = rig.render_chunked(STEP * 8, 512);
+    let sounding = out.chunks(2).filter(|c| c[0].abs() > 1e-4).count();
+    assert!(
+        sounding > STEP * 4,
+        "a one step drum hit only lasted {sounding} frames: something cut it off"
+    );
+}
+
+/// Turning an instrument back into a one-shot lets it ring again.
+#[test]
+fn a_track_can_stop_being_an_instrument() {
+    let mut rig = Rig::new(120.0, 16);
+    track_with(&mut rig, 0, dc_sample(200_000));
+    rig.send(Command::SetTrackPitched {
+        track: 0,
+        pitched: true,
+    });
+    rig.send(Command::SetNote {
+        pattern: 0,
+        track: 0,
+        note: EngineNote {
+            step: 0,
+            pitch: 60,
+            velocity: 127,
+            length: 1,
+        },
+    });
+    rig.send(Command::SetPlaying(true));
+    let held = rig.render_chunked(STEP * 4, 512);
+
+    rig.send(Command::SetTrackPitched {
+        track: 0,
+        pitched: false,
+    });
+    rig.send(Command::Rewind);
+    let rung = rig.render_chunked(STEP * 4, 512);
+
+    let loud = |out: &[f32]| out.chunks(2).filter(|c| c[0].abs() > 1e-4).count();
+    assert!(loud(&held) < STEP * 2, "the note did not stop when held");
+    assert!(loud(&rung) > STEP * 3, "the note did not ring when let go");
+}
+
+/// A note's pitch reads the sample faster or slower. The whole of stage 3.
+#[test]
+fn an_instrument_is_pitched_by_its_notes() {
+    let mut rig = Rig::new(120.0, 16);
+    track_with(&mut rig, 0, dc_sample(4_800));
+    rig.send(Command::SetTrackPitched {
+        track: 0,
+        pitched: true,
+    });
+    // An octave up, held long enough that the sample running out is what ends it.
+    rig.send(Command::SetNote {
+        pattern: 0,
+        track: 0,
+        note: EngineNote {
+            step: 0,
+            pitch: 72,
+            velocity: 127,
+            length: 16,
+        },
+    });
+    rig.send(Command::SetPlaying(true));
+
+    let out = rig.render_chunked(STEP * 4, 512);
+    let sounding = out.chunks(2).filter(|c| c[0].abs() > 1e-4).count();
+    assert!(
+        (2_200..2_600).contains(&sounding),
+        "an octave up should read twice as fast and last about 2400 frames, lasted {sounding}"
+    );
+}
+
+/// Notes at different pitches at the same time, which is what a chord is.
+#[test]
+fn notes_at_different_pitches_play_together() {
+    let mut rig = Rig::new(120.0, 16);
+    track_with_gain(&mut rig, 0, dc_sample(200_000), 0.2);
+    rig.send(Command::SetTrackPitched {
+        track: 0,
+        pitched: true,
+    });
+    for pitch in [60u8, 64, 67] {
+        rig.send(Command::SetNote {
+            pattern: 0,
+            track: 0,
+            note: EngineNote {
+                step: 0,
+                pitch,
+                velocity: 100,
+                length: 4,
+            },
+        });
+    }
+    rig.send(Command::SetPlaying(true));
+
+    rig.render(600);
+    assert_eq!(
+        rig.shared.playhead().active_voices,
+        3,
+        "three notes on one step should be three voices"
+    );
+}

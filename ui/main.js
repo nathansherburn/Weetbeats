@@ -35,6 +35,17 @@ const STEPS_PER_BEAT = 4; // sixteenth notes
 const STEPS_PER_BAR = 16; // a bar of the song, and the length of a new pattern
 const MAX_STEPS = 64; // as far as the engine will play
 
+// The piano roll. Must match --keys, --semitone and --velocity in the stylesheet.
+const KEYS = 152;
+const SEMITONE = 15;
+const VELOCITY = 54;
+const ROLL_CELL = 30; // one step, narrower than a box: melodies are longer than beats
+const DEFAULT_PITCH = 60; // middle C, and the sampler's unity pitch
+const LOW_PITCH = 36; // two octaves below unity
+const HIGH_PITCH = 96; // and three above
+const PITCHES = HIGH_PITCH - LOW_PITCH + 1;
+const BLACK_KEYS = [1, 3, 6, 8, 10]; // semitones from C that are black
+
 // The song is drawn in real time, so a bar is always the same width and a pattern painted
 // across two bars is twice as wide as one painted across one.
 const SONG_STEP = 4;
@@ -49,6 +60,8 @@ const state = {
   patterns: [], // { id, name, steps, notes: Map<trackId, Set<step>> }
   song: [], // { pattern, step }, sorted: what plays where
   open: null, // the pattern the editor has, or null for the song view
+  roll: null, // the track the piano roll has, or null for the boxes
+  drawLength: 1, // how long the last note drawn was, so the next one matches
   playing: false,
   step: 0,
   progress: 0,
@@ -62,7 +75,8 @@ for (const id of [
   "patternList", "song",
   "songScroll", "scrubber", "lanes", "songHint", "editor", "editorScroll", "closePattern",
   "add", "addBig", "steps", "fewerSteps", "moreSteps", "trackHeaders", "grid", "ruler",
-  "empty",
+  "empty", "roll", "rollScroll", "rollName", "rollRuler", "keys", "notes", "velocity",
+  "oneShot", "closeRoll",
 ]) {
   el[id] = document.getElementById(id);
 }
@@ -110,6 +124,7 @@ function applyStartup(startup) {
   el.projectName.textContent = startup.name;
   el.projectName.title = startup.folder;
 
+  state.roll = null;
   // Land on the song when there is one, and in the first pattern when there is not: a new
   // project has nothing to arrange yet, so the grid is the only place worth being.
   if (state.song.length) {
@@ -123,11 +138,17 @@ function applyStartup(startup) {
   if (startup.message) showError(startup.message);
 }
 
-/* Notes arrive as a lane per track. A Set of steps is what the grid wants. */
+/*
+ * Notes arrive as a lane per track, and that is how they are kept. The step grid is the
+ * notes at the sampler's own pitch, one step long; the piano roll is all of them.
+ */
 function readPattern(pattern) {
   const notes = new Map();
   for (const lane of pattern.lanes) {
-    notes.set(lane.track, new Set(lane.notes.map((note) => note.step)));
+    notes.set(
+      lane.track,
+      lane.notes.map((note) => ({ ...note })),
+    );
   }
   return { id: pattern.id, name: pattern.name, steps: pattern.steps, notes };
 }
@@ -144,24 +165,44 @@ function stepsOf(id) {
   return patternById(id)?.steps ?? STEPS_PER_BAR;
 }
 
-/* The steps a track has ticked in a pattern, made on the spot if it has none yet. */
+/* A track's notes in a pattern, made on the spot if it has none yet. */
 function notesFor(pattern, track) {
-  let set = pattern.notes.get(track);
-  if (!set) {
-    set = new Set();
-    pattern.notes.set(track, set);
+  let notes = pattern.notes.get(track);
+  if (!notes) {
+    notes = [];
+    pattern.notes.set(track, notes);
   }
-  return set;
+  return notes;
+}
+
+/* The note a step box means: the sampler's own pitch, one step long. */
+function stepNote(pattern, track, step) {
+  return notesFor(pattern, track).find(
+    (note) => note.step === step && note.pitch === DEFAULT_PITCH,
+  );
+}
+
+function trackById(id) {
+  return state.tracks.find((track) => track.id === id) ?? null;
 }
 
 // --- the two views --------------------------------------------------------
 
+/* One of the three at a time: the song, a pattern's boxes, or a pattern's piano roll. */
+function showView() {
+  const inPattern = state.open !== null;
+  const inRoll = inPattern && state.roll !== null;
+  el.song.classList.toggle("hidden", inPattern);
+  el.editor.classList.toggle("hidden", !inPattern || inRoll);
+  el.roll.classList.toggle("hidden", !inRoll);
+}
+
 function openPattern(id) {
   if (patternById(id) === null) return;
   state.open = id;
-  el.editor.classList.remove("hidden");
-  el.song.classList.add("hidden");
+  state.roll = null;
   el.steps.value = String(stepsOf(id));
+  showView();
   invoke("open_pattern", { id });
   drawPatternPanel();
   resize();
@@ -169,8 +210,8 @@ function openPattern(id) {
 
 function closePattern() {
   state.open = null;
-  el.editor.classList.add("hidden");
-  el.song.classList.remove("hidden");
+  state.roll = null;
+  showView();
   invoke("close_pattern");
   drawPatternPanel();
   resize();
@@ -186,7 +227,7 @@ function togglePattern(id) {
 
 el.closePattern.addEventListener("click", closePattern);
 
-/* The panel's heading is a way back to the song, for when no pattern is open to close. */
+/* The panel's heading is the way back to the song, from wherever you are. */
 el.songMode.addEventListener("click", () => {
   if (state.open !== null) closePattern();
 });
@@ -528,13 +569,21 @@ function drawTrackHeaders() {
         invoke("set_track_gain", { id: track.id, gain: track.gain });
       });
 
+      // The way into the piano roll, and a light showing which tracks are instruments
+      // rather than one-shots.
+      const roll = document.createElement("button");
+      roll.className = `tick keys-on${track.pitched ? " on" : ""}`;
+      roll.textContent = "♪";
+      roll.title = "Piano roll: play this one pitched";
+      roll.addEventListener("click", () => openRoll(track.id));
+
       const kill = document.createElement("button");
       kill.className = "tick kill";
       kill.textContent = "×";
       kill.title = "Delete this track";
       kill.addEventListener("click", () => removeTrack(track.id));
 
-      row.append(mute, solo, gain, kill);
+      row.append(roll, mute, solo, gain, kill);
       return row;
     }),
   );
@@ -560,6 +609,7 @@ function removeTrack(id) {
   for (const pattern of state.patterns) {
     pattern.notes.delete(id);
   }
+  if (state.roll === id) closeRoll();
   drawTrackHeaders();
   resize();
 }
@@ -643,6 +693,10 @@ function songBars() {
 function resize() {
   size(el.grid, gridWidth(), gridHeight());
   size(el.ruler, gridWidth(), HEAD - 1);
+  size(el.notes, stepsOf(state.open) * ROLL_CELL, PITCHES * SEMITONE);
+  size(el.rollRuler, stepsOf(state.open) * ROLL_CELL, HEAD - 1);
+  size(el.keys, KEYS, PITCHES * SEMITONE);
+  size(el.velocity, stepsOf(state.open) * ROLL_CELL, VELOCITY);
   size(el.lanes, songBars() * BAR_PX, Math.max(LANE, state.patterns.length * LANE));
   size(el.scrubber, songBars() * BAR_PX, HEAD - 1);
   el.songHint.classList.toggle("hidden", state.song.length > 0);
@@ -697,14 +751,19 @@ function drawGrid() {
 
   for (let row = 0; row < state.tracks.length; row++) {
     const track = state.tracks[row];
-    const steps = pattern.notes.get(track.id);
+    // Only the notes a box can mean: the sampler's own pitch. Anything drawn in the piano
+    // roll lives in the same lane and is left to the roll to show.
+    const ticked = new Set();
+    for (const note of pattern.notes.get(track.id) ?? []) {
+      if (note.pitch === DEFAULT_PITCH) ticked.add(note.step);
+    }
     const y = row * ROW;
 
     for (let step = 0; step < pattern.steps; step++) {
       const x = step * CELL + GAP;
       const w = CELL - GAP * 2;
       const h = ROW - GAP * 2 - 1;
-      const on = steps ? steps.has(step) : false;
+      const on = ticked.has(step);
       const onBeat = step % STEPS_PER_BEAT === 0;
 
       if (on) {
@@ -746,13 +805,8 @@ function cellAt(event) {
 
 function paint(cell, on) {
   if (!cell) return;
-  const steps = notesFor(cell.pattern, cell.track);
-  if (steps.has(cell.step) === on) return;
-  if (on) {
-    steps.add(cell.step);
-  } else {
-    steps.delete(cell.step);
-  }
+  if ((stepNote(cell.pattern, cell.track, cell.step) !== undefined) === on) return;
+  setStepLocally(cell, on);
   state.needsDraw = true;
   invoke("set_step", {
     pattern: cell.pattern.id,
@@ -762,11 +816,21 @@ function paint(cell, on) {
   }).then((actual) => {
     // Rust has the final say: a track that is full will not take another note.
     if (actual !== on) {
-      if (actual) steps.add(cell.step);
-      else steps.delete(cell.step);
+      setStepLocally(cell, actual);
       state.needsDraw = true;
     }
   });
+}
+
+function setStepLocally(cell, on) {
+  const notes = notesFor(cell.pattern, cell.track);
+  const at = notes.findIndex(
+    (note) => note.step === cell.step && note.pitch === DEFAULT_PITCH,
+  );
+  if (on && at < 0) {
+    notes.push({ step: cell.step, pitch: DEFAULT_PITCH, velocity: 100, length: 1 });
+  }
+  if (!on && at >= 0) notes.splice(at, 1);
 }
 
 /* True when a press is the right button, which always rubs out rather than draws. */
@@ -780,7 +844,9 @@ el.grid.addEventListener("pointerdown", (e) => {
   // Drag across boxes to paint, like FL Studio: what the first box becomes is what the
   // rest become, so a drag never toggles boxes back and forth under your finger. The right
   // button always rubs out, which saves aiming at the box you meant to remove.
-  painting = erasing(e) ? false : !notesFor(cell.pattern, cell.track).has(cell.step);
+  painting = erasing(e)
+    ? false
+    : stepNote(cell.pattern, cell.track, cell.step) === undefined;
   el.grid.setPointerCapture(e.pointerId);
   paint(cell, painting);
 });
@@ -795,6 +861,383 @@ const stopPainting = () => {
 };
 el.grid.addEventListener("pointerup", stopPainting);
 el.grid.addEventListener("pointercancel", stopPainting);
+
+// --- the piano roll -------------------------------------------------------
+
+/*
+ * The same pattern as the step grid, seen as notes: the keyboard down the left, the notes in
+ * the middle, how hard each is hit underneath. Nothing here is a different kind of data —
+ * a box is a note at the sampler's own pitch, one step long, and this is the editor that
+ * lets you put one anywhere.
+ */
+function openRoll(track) {
+  if (state.open === null || trackById(track) === null) return;
+  state.roll = track;
+  showView();
+  // Notes only mean pitch and length on an instrument, so opening the roll makes it one.
+  // The button in the corner is there to change your mind.
+  const instrument = trackById(track);
+  if (!instrument.pitched) setPitched(track, true);
+  showPitched();
+  resize();
+  // Land on the sampler's own pitch, which is where the notes will be.
+  el.rollScroll.scrollTop = Math.max(
+    0,
+    (HIGH_PITCH - DEFAULT_PITCH - 6) * SEMITONE,
+  );
+}
+
+function closeRoll() {
+  state.roll = null;
+  showView();
+  resize();
+}
+
+el.closeRoll.addEventListener("click", closeRoll);
+
+function rollNotes() {
+  const pattern = openPatternNow();
+  if (!pattern || state.roll === null) return [];
+  return notesFor(pattern, state.roll);
+}
+
+function setPitched(track, pitched) {
+  const instrument = trackById(track);
+  if (!instrument) return;
+  instrument.pitched = pitched;
+  invoke("set_track_pitched", { id: track, pitched });
+  drawTrackHeaders();
+  showPitched();
+}
+
+function showPitched() {
+  const instrument = state.roll === null ? null : trackById(state.roll);
+  if (!instrument) return;
+  el.rollName.textContent = instrument.name;
+  el.oneShot.textContent = instrument.pitched ? "held" : "rings out";
+  el.oneShot.title = instrument.pitched
+    ? "Notes stop when they end. Click to let them ring out instead."
+    : "Notes ring out, however short they are. Click to hold them instead.";
+}
+
+el.oneShot.addEventListener("click", () => {
+  const instrument = state.roll === null ? null : trackById(state.roll);
+  if (instrument) setPitched(instrument.id, !instrument.pitched);
+});
+
+const isBlack = (pitch) => BLACK_KEYS.includes(((pitch % 12) + 12) % 12);
+const pitchName = (pitch) =>
+  ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"][
+    ((pitch % 12) + 12) % 12
+  ] + String(Math.floor(pitch / 12) - 1);
+
+/* Rows run high to low, the way a keyboard stands up. */
+const pitchRow = (pitch) => HIGH_PITCH - pitch;
+const rowPitch = (row) => HIGH_PITCH - row;
+
+function drawRoll() {
+  drawKeys();
+  drawRollRuler();
+  drawNotes();
+  drawVelocity();
+}
+
+function drawKeys() {
+  const ctx = el.keys.getContext("2d");
+  const height = PITCHES * SEMITONE;
+  ctx.clearRect(0, 0, KEYS, height);
+  ctx.font = "10px ui-sans-serif, system-ui, sans-serif";
+  ctx.textBaseline = "middle";
+
+  for (let row = 0; row < PITCHES; row++) {
+    const pitch = rowPitch(row);
+    const y = row * SEMITONE;
+    // Black keys are drawn short, so the column reads as a keyboard rather than a list.
+    const black = isBlack(pitch);
+    const w = black ? KEYS * 0.62 : KEYS - 1;
+    ctx.fillStyle = black ? "#15121c" : "#2b2636";
+    ctx.fillRect(0, y, w, SEMITONE - 1);
+    // The sampler's own pitch is the one that plays the sample as it was recorded.
+    if (pitch === DEFAULT_PITCH) {
+      ctx.fillStyle = "rgba(255,77,135,0.4)";
+      ctx.fillRect(0, y, w, SEMITONE - 1);
+    }
+    if (pitch % 12 === 0 || pitch === DEFAULT_PITCH) {
+      ctx.fillStyle = PALETTE.dim;
+      ctx.fillText(pitchName(pitch), KEYS - 30, y + SEMITONE / 2);
+    }
+  }
+}
+
+function drawRollRuler() {
+  const ctx = el.rollRuler.getContext("2d");
+  const steps = stepsOf(state.open);
+  ctx.clearRect(0, 0, drawnWidth(el.rollRuler), HEAD);
+  ctx.font = "10px ui-sans-serif, system-ui, sans-serif";
+  ctx.textBaseline = "middle";
+  for (let step = 0; step < steps; step++) {
+    const onBeat = step % STEPS_PER_BEAT === 0;
+    ctx.fillStyle = onBeat ? PALETTE.dim : PALETTE.line;
+    if (onBeat) {
+      ctx.fillText(String(step / STEPS_PER_BEAT + 1), step * ROLL_CELL + 3, 15);
+    } else {
+      ctx.fillRect(step * ROLL_CELL, 14, 2, 1);
+    }
+  }
+}
+
+function drawNotes() {
+  const ctx = el.notes.getContext("2d");
+  const steps = stepsOf(state.open);
+  const width = steps * ROLL_CELL;
+  const height = PITCHES * SEMITONE;
+  ctx.clearRect(0, 0, width, height);
+
+  // The keyboard's own stripes, so you can tell a C from an F at a glance.
+  for (let row = 0; row < PITCHES; row++) {
+    const pitch = rowPitch(row);
+    ctx.fillStyle = isBlack(pitch) ? "#191621" : "#201c29";
+    ctx.fillRect(0, row * SEMITONE, width, SEMITONE - 1);
+    if (pitch % 12 === 0) {
+      ctx.fillStyle = "rgba(0,0,0,0.35)";
+      ctx.fillRect(0, row * SEMITONE + SEMITONE - 1, width, 1);
+    }
+  }
+
+  // Beats and bars over the top.
+  for (let step = 0; step <= steps; step++) {
+    if (step % STEPS_PER_BEAT !== 0) continue;
+    ctx.fillStyle = step % STEPS_PER_BAR === 0 ? "rgba(0,0,0,0.5)" : "rgba(0,0,0,0.25)";
+    ctx.fillRect(step * ROLL_CELL, 0, 1, height);
+  }
+
+  if (state.playing) {
+    ctx.fillStyle = "rgba(255,215,94,0.10)";
+    ctx.fillRect(state.step * ROLL_CELL, 0, ROLL_CELL, height);
+  }
+
+  for (const note of rollNotes()) {
+    if (note.pitch < LOW_PITCH || note.pitch > HIGH_PITCH) continue;
+    const x = note.step * ROLL_CELL;
+    const y = pitchRow(note.pitch) * SEMITONE;
+    const w = Math.max(4, note.length * ROLL_CELL - 2);
+    const live = state.playing && state.step >= note.step && state.step < note.step + note.length;
+    ctx.fillStyle = live ? PALETTE.lit : PALETTE.accent;
+    roundRect(ctx, x + 1, y + 1, w, SEMITONE - 3, 3);
+    ctx.fill();
+    // The right hand edge is the handle for how long it is, so it says so.
+    ctx.fillStyle = "rgba(0,0,0,0.25)";
+    ctx.fillRect(x + w - 2, y + 1, 2, SEMITONE - 3);
+  }
+}
+
+function drawVelocity() {
+  const ctx = el.velocity.getContext("2d");
+  const width = stepsOf(state.open) * ROLL_CELL;
+  ctx.clearRect(0, 0, width, VELOCITY);
+  for (const note of rollNotes()) {
+    const x = note.step * ROLL_CELL;
+    const h = Math.max(2, (note.velocity / 127) * (VELOCITY - 8));
+    ctx.fillStyle = PALETTE.accent;
+    ctx.fillRect(x + 1, VELOCITY - h - 3, Math.max(3, ROLL_CELL - 3), h);
+  }
+}
+
+// --- drawing notes --------------------------------------------------------
+
+/* Where in the roll a pointer is. */
+function rollAt(event) {
+  const rect = el.notes.getBoundingClientRect();
+  const x = event.clientX - rect.left;
+  const step = Math.floor(x / ROLL_CELL);
+  const row = Math.floor((event.clientY - rect.top) / SEMITONE);
+  if (step < 0 || step >= stepsOf(state.open)) return null;
+  if (row < 0 || row >= PITCHES) return null;
+  return { step, pitch: rowPitch(row), x };
+}
+
+/* The note under a pointer, and whether it is being held by its right hand edge. */
+function noteUnder(at) {
+  for (const note of rollNotes()) {
+    if (note.pitch !== at.pitch) continue;
+    if (at.step < note.step || at.step >= note.step + note.length) continue;
+    const end = (note.step + note.length) * ROLL_CELL;
+    return { note, edge: end - at.x <= 7 };
+  }
+  return null;
+}
+
+let dragging = null;
+
+el.notes.addEventListener("pointerdown", (e) => {
+  const at = rollAt(e);
+  if (!at) return;
+  const pattern = openPatternNow();
+  const under = noteUnder(at);
+
+  if (erasing(e)) {
+    if (under) {
+      remove(under.note);
+    }
+    return;
+  }
+
+  el.notes.setPointerCapture(e.pointerId);
+  if (under && under.edge) {
+    // Grabbed by the end: this is how long it is.
+    dragging = { mode: "length", note: under.note, was: { ...under.note } };
+    return;
+  }
+  if (under) {
+    dragging = {
+      mode: "move",
+      note: under.note,
+      was: { ...under.note },
+      grab: { step: at.step - under.note.step, pitch: at.pitch - under.note.pitch },
+    };
+    invoke("audition", { id: state.roll, pitch: under.note.pitch });
+    return;
+  }
+
+  // Nothing there, so draw one — and keep hold of its end, so dragging straight on sets
+  // how long it is.
+  const note = {
+    step: at.step,
+    pitch: at.pitch,
+    velocity: 100,
+    length: Math.min(state.drawLength, stepsOf(state.open) - at.step),
+  };
+  notesFor(pattern, state.roll).push(note);
+  state.needsDraw = true;
+  invoke("audition", { id: state.roll, pitch: note.pitch });
+  send(note);
+  dragging = { mode: "length", note, was: { ...note }, fresh: true };
+});
+
+el.notes.addEventListener("pointermove", (e) => {
+  if (!dragging) return;
+  const at = rollAt(e);
+  if (!at) return;
+  const note = dragging.note;
+
+  if (dragging.mode === "length") {
+    const length = Math.max(1, Math.min(at.step - note.step + 1, stepsOf(state.open) - note.step));
+    if (length !== note.length) {
+      note.length = length;
+      state.needsDraw = true;
+    }
+    return;
+  }
+
+  const step = Math.max(
+    0,
+    Math.min(at.step - dragging.grab.step, stepsOf(state.open) - note.length),
+  );
+  const pitch = Math.max(LOW_PITCH, Math.min(HIGH_PITCH, at.pitch - dragging.grab.pitch));
+  if (step === note.step && pitch === note.pitch) return;
+  if (pitch !== note.pitch) invoke("audition", { id: state.roll, pitch });
+  note.step = step;
+  note.pitch = pitch;
+  state.needsDraw = true;
+});
+
+const dropNote = () => {
+  if (!dragging) return;
+  const { note, was, mode } = dragging;
+  dragging = null;
+  if (mode === "length") {
+    state.drawLength = note.length;
+    send(note);
+    return;
+  }
+  if (note.step === was.step && note.pitch === was.pitch) return;
+  // One trip rather than two, so the note is never briefly nowhere.
+  invoke("move_note", {
+    pattern: state.open,
+    track: state.roll,
+    at: { step: was.step, pitch: was.pitch },
+    to: { step: note.step, pitch: note.pitch },
+  }).then((moved) => {
+    if (!moved) {
+      Object.assign(note, was);
+      state.needsDraw = true;
+    }
+  });
+};
+el.notes.addEventListener("pointerup", dropNote);
+el.notes.addEventListener("pointercancel", dropNote);
+
+/* Put a note where Rust can see it. Adding and changing one are the same thing. */
+function send(note) {
+  invoke("set_note", {
+    pattern: state.open,
+    track: state.roll,
+    at: { step: note.step, pitch: note.pitch },
+    velocity: note.velocity,
+    length: note.length,
+  }).then((fits) => {
+    if (!fits) {
+      remove(note, true);
+      showError("that track is as full of notes as the engine will hold");
+    }
+  });
+}
+
+function remove(note, alreadyGone) {
+  const notes = rollNotes();
+  const at = notes.indexOf(note);
+  if (at >= 0) notes.splice(at, 1);
+  state.needsDraw = true;
+  if (!alreadyGone) {
+    invoke("clear_note", {
+      pattern: state.open,
+      track: state.roll,
+      at: { step: note.step, pitch: note.pitch },
+    });
+  }
+}
+
+/* How hard each note is hit, dragged in the lane underneath. */
+let velocityDrag = false;
+
+function setVelocity(event) {
+  const rect = el.velocity.getBoundingClientRect();
+  const step = Math.floor((event.clientX - rect.left) / ROLL_CELL);
+  const from = Math.round((1 - (event.clientY - rect.top) / (VELOCITY - 8)) * 127);
+  const velocity = Math.max(1, Math.min(127, from));
+  let changed = false;
+  for (const note of rollNotes()) {
+    if (note.step !== step) continue;
+    if (note.velocity === velocity) continue;
+    note.velocity = velocity;
+    changed = true;
+    send(note);
+  }
+  if (changed) state.needsDraw = true;
+}
+
+el.velocity.addEventListener("pointerdown", (e) => {
+  velocityDrag = true;
+  el.velocity.setPointerCapture(e.pointerId);
+  setVelocity(e);
+});
+el.velocity.addEventListener("pointermove", (e) => {
+  if (velocityDrag) setVelocity(e);
+});
+const stopVelocity = () => {
+  velocityDrag = false;
+};
+el.velocity.addEventListener("pointerup", stopVelocity);
+el.velocity.addEventListener("pointercancel", stopVelocity);
+
+/* Click a key to hear the sample at that pitch. */
+el.keys.addEventListener("pointerdown", (e) => {
+  if (state.roll === null) return;
+  const rect = el.keys.getBoundingClientRect();
+  const row = Math.floor((e.clientY - rect.top) / SEMITONE);
+  if (row < 0 || row >= PITCHES) return;
+  invoke("audition", { id: state.roll, pitch: rowPitch(row) });
+});
 
 // --- the song -------------------------------------------------------------
 
@@ -1072,7 +1515,9 @@ window.addEventListener("keydown", (e) => {
     // pattern, and only then the panic button. The rename box keeps escape for itself and
     // stops it reaching here, because there it means "forget the new name".
     if (e.target instanceof HTMLElement) e.target.blur();
-    if (state.open !== null) {
+    if (state.roll !== null) {
+      closeRoll();
+    } else if (state.open !== null) {
       closePattern();
     } else {
       invoke("panic_stop");
@@ -1124,6 +1569,7 @@ async function tick(now) {
   if (state.needsDraw) {
     state.needsDraw = false;
     if (state.open === null) drawSong();
+    else if (state.roll !== null) drawRoll();
     else drawGrid();
   }
 }

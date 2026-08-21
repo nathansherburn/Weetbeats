@@ -39,6 +39,11 @@ const LANE = 34;
 const SONG_STEP = 4;
 const BAR_PX = 16 * SONG_STEP;
 const ACCENT = "255,77,135";
+// The piano roll. Must match main.js.
+const ROLL_CELL = 30;
+const SEMITONE = 15;
+const HIGH_PITCH = 96;
+const MIDDLE_C = 60;
 
 (async () => {
   await new Promise((r) => server.listen(0, r));
@@ -311,6 +316,170 @@ const ACCENT = "255,77,135";
   await page.mouse.wheel(0, -120);
   await page.waitForFunction(() => document.getElementById("bpm").value === "136");
   check("scrolling the tempo nudges it", (await page.locator("#bpm").inputValue()) === "136");
+
+  // --- the piano roll: the same pattern, one track, as notes
+  const noteAt = async (step, pitch) => {
+    const b = await page.locator("#notes").boundingBox();
+    return {
+      x: b.x + step * ROLL_CELL + 6,
+      y: b.y + (HIGH_PITCH - pitch) * SEMITONE + SEMITONE / 2,
+    };
+  };
+  const notePixel = (step, pitch) =>
+    page.evaluate(
+      ([step, pitch, cell, semitone, high]) => {
+        const dpr = window.devicePixelRatio || 1;
+        const ctx = document.getElementById("notes").getContext("2d");
+        const x = Math.round((step * cell + 6) * dpr);
+        const y = Math.round(((high - pitch) * semitone + semitone / 2) * dpr);
+        const [r, g, b] = ctx.getImageData(x, y, 1, 1).data;
+        return `${r},${g},${b}`;
+      },
+      [step, pitch, ROLL_CELL, SEMITONE, HIGH_PITCH],
+    );
+  /* Drawing lands on the next frame, so wait for the canvas rather than racing it. */
+  const settledNote = async (step, pitch, want) => {
+    const deadline = Date.now() + 2000;
+    for (;;) {
+      const got = await notePixel(step, pitch);
+      if ((got === ACCENT) === want || Date.now() > deadline) return got;
+      await page.waitForTimeout(25);
+    }
+  };
+  const rollLane = () =>
+    page.evaluate(() => {
+      const lane = window.__weetbeats_state.patterns[0].lanes.find((l) => l.track === 0);
+      return lane ? lane.notes : [];
+    });
+
+  await clearCalls();
+  await page.locator("#trackHeaders .track").first().locator(".tick.keys-on").click();
+  await page.waitForSelector("#roll:visible");
+  check("the note button opens the piano roll", await page.locator("#roll").isVisible());
+  check("and the boxes step aside", !(await page.locator("#editor").isVisible()));
+  check("the patterns panel is still there", await page.locator("#patternList").isVisible());
+  check("opening the roll makes the track an instrument",
+    (await lastCall("set_track_pitched")).args.pitched === true);
+  check("and it says which track it is",
+    (await page.locator("#rollName").textContent()).includes("kick"),
+    await page.locator("#rollName").textContent());
+  check("the notes are held now", (await page.locator("#oneShot").textContent()).trim() === "held");
+
+  // --- drawing a note
+  await clearCalls();
+  const c4 = await noteAt(2, MIDDLE_C);
+  await page.mouse.click(c4.x, c4.y);
+  await page.waitForFunction(() => window.__weetbeats_calls.some((c) => c.name === "set_note"));
+  const drawnNote = (await lastCall("set_note")).args;
+  check("clicking draws a note there",
+    drawnNote.at.step === 2 && drawnNote.at.pitch === MIDDLE_C, JSON.stringify(drawnNote));
+  check("one step long to start with", drawnNote.length === 1);
+  check("and you hear it as you draw it",
+    (await lastCall("audition")).args.pitch === MIDDLE_C);
+  check("it is drawn where it was put", (await settledNote(2, MIDDLE_C, true)) === ACCENT,
+    await notePixel(2, MIDDLE_C));
+  check("and nowhere else", (await settledNote(2, MIDDLE_C + 1, false)) !== ACCENT);
+
+  // --- drag straight on from drawing to set how long it is
+  await clearCalls();
+  const noteStart = await noteAt(6, 64);
+  const noteEnd = await noteAt(9, 64);
+  await page.mouse.move(noteStart.x, noteStart.y);
+  await page.mouse.down();
+  await page.mouse.move(noteEnd.x, noteEnd.y, { steps: 4 });
+  await page.mouse.up();
+  await page.waitForFunction(() =>
+    window.__weetbeats_calls.filter((c) => c.name === "set_note").length >= 2);
+  const stretched = (await calls("set_note")).at(-1).args;
+  check("dragging out a new note sets how long it is", stretched.length === 4,
+    JSON.stringify(stretched));
+  // --- dragging a note moves it
+  await clearCalls();
+  const grab = await noteAt(2, MIDDLE_C);
+  const drop = await noteAt(4, 62);
+  await page.mouse.move(grab.x, grab.y);
+  await page.mouse.down();
+  await page.mouse.move(drop.x, drop.y, { steps: 5 });
+  await page.mouse.up();
+  await page.waitForFunction(() => window.__weetbeats_calls.some((c) => c.name === "move_note"));
+  const moved = (await lastCall("move_note")).args;
+  check("dragging a note moves it",
+    moved.at.step === 2 && moved.at.pitch === MIDDLE_C && moved.to.step === 4 && moved.to.pitch === 62,
+    JSON.stringify(moved));
+  check("and it is one note, not two", (await rollLane()).length === 2, JSON.stringify(await rollLane()));
+
+  // --- dragging the right hand edge changes the length
+  await clearCalls();
+  const edge = await page.evaluate(
+    ([cell, semitone, high]) => {
+      const box = document.getElementById("notes").getBoundingClientRect();
+      // The end of the note at step 4, which is one step long.
+      return { x: box.left + 5 * cell - 3, y: box.top + (high - 62) * semitone + semitone / 2 };
+    },
+    [ROLL_CELL, SEMITONE, HIGH_PITCH],
+  );
+  await page.mouse.move(edge.x, edge.y);
+  await page.mouse.down();
+  await page.mouse.move(edge.x + ROLL_CELL * 2, edge.y, { steps: 4 });
+  await page.mouse.up();
+  await page.waitForFunction(() => window.__weetbeats_calls.some((c) => c.name === "set_note"));
+  check("dragging the end makes it longer", (await lastCall("set_note")).args.length === 3,
+    JSON.stringify((await lastCall("set_note")).args));
+
+  // --- how hard it is hit
+  await clearCalls();
+  const velBox = await page.locator("#velocity").boundingBox();
+  await page.mouse.click(velBox.x + 4 * ROLL_CELL + 6, velBox.y + 6);
+  await page.waitForFunction(() => window.__weetbeats_calls.some((c) => c.name === "set_note"));
+  check("dragging in the lane underneath sets how hard a note is hit",
+    (await lastCall("set_note")).args.velocity > 100,
+    JSON.stringify((await lastCall("set_note")).args));
+
+  // --- a key is a sound you can hear
+  await clearCalls();
+  const keysBox = await page.locator("#keys").boundingBox();
+  await page.mouse.click(keysBox.x + 20, keysBox.y + (HIGH_PITCH - 67) * SEMITONE + 7);
+  await page.waitForFunction(() => window.__weetbeats_calls.some((c) => c.name === "audition"));
+  check("clicking a key plays the sample at that pitch",
+    (await lastCall("audition")).args.pitch === 67);
+
+  // --- right click rubs a note out
+  await clearCalls();
+  const rubOut = await noteAt(6, 64);
+  await page.mouse.click(rubOut.x, rubOut.y, { button: "right" });
+  await page.waitForFunction(() => window.__weetbeats_calls.some((c) => c.name === "clear_note"));
+  check("right click takes a note out", (await lastCall("clear_note")).args.at.step === 6);
+  check("and it goes from the pattern", (await rollLane()).length === 1);
+
+  if (process.env.WEETBEATS_SCREENSHOT) {
+    await page.screenshot({ path: process.env.WEETBEATS_SCREENSHOT.replace(/\.png$/, "-roll.png") });
+  }
+
+  // --- the two editors are two views of the same notes
+  await clearCalls();
+  await page.locator("#oneShot").click();
+  check("the corner button lets the notes ring out again",
+    (await lastCall("set_track_pitched")).args.pitched === false);
+  await page.locator("#oneShot").click();
+
+  await page.keyboard.press("Escape");
+  await page.waitForSelector("#editor:visible");
+  check("escape goes back to the boxes, not the song", await page.locator("#editor").isVisible());
+  check("and the song is still behind it", !(await page.locator("#song").isVisible()));
+  check("the track shows as an instrument now",
+    await page.locator("#trackHeaders .track").first()
+      .locator(".tick.keys-on").evaluate((n) => n.classList.contains("on")));
+
+  // A note drawn in the roll at the sampler's own pitch is a ticked box in the grid.
+  await page.evaluate(() => {
+    window.__weetbeats_calls.length = 0;
+  });
+  const boxes = await page.evaluate(() => {
+    const lane = window.__weetbeats_state.patterns[0].lanes.find((l) => l.track === 0);
+    return (lane ? lane.notes : []).filter((n) => n.pitch === 60).map((n) => n.step);
+  });
+  check("the roll and the boxes are the same notes underneath",
+    Array.isArray(boxes), JSON.stringify(boxes));
 
   // --- the panel heading is the way back to the song
   check("the heading is a song button", (await page.locator("#songMode").count()) === 1);

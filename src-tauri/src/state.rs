@@ -186,6 +186,10 @@ impl AppState {
                 track: track.id,
                 soloed: track.soloed,
             });
+            self.send(Command::SetTrackPitched {
+                track: track.id,
+                pitched: track.pitched,
+            });
             if let Some(reference) = &track.sample {
                 match folder::resolve(&dir, &reference.path)
                     .and_then(|path| self.load_sample(&path))

@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use weetbeats_engine::folder;
@@ -68,6 +68,14 @@ pub struct Added {
 pub struct Arrangement {
     pub patterns: Vec<Pattern>,
     pub song: Vec<Placement>,
+}
+
+/// Where a note is: the two things that identify one inside a lane.
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub struct At {
+    pub step: u32,
+    pub pitch: u8,
 }
 
 /// Polled every frame while playing. Kept small on purpose.
@@ -361,14 +369,27 @@ pub fn set_track_soloed(id: u16, soloed: bool, state: State<'_, Arc<AppState>>) 
     state.touch();
 }
 
-/// Hear a track without waiting for its next step.
+/// Hear a track without waiting for its next step, at whatever pitch is asked for. Clicking
+/// a row sends the sampler's own pitch; clicking a key in the piano roll sends that key's.
 #[tauri::command]
-pub fn audition(id: u16, state: State<'_, Arc<AppState>>) {
+pub fn audition(id: u16, pitch: Option<u8>, state: State<'_, Arc<AppState>>) {
     state.send(Command::Audition {
         track: id,
-        pitch: DEFAULT_PITCH,
+        pitch: pitch.unwrap_or(DEFAULT_PITCH),
         velocity: 110,
     });
+}
+
+/// A sampler instrument rather than a one-shot: pitched, and its notes stop when they end.
+#[tauri::command]
+pub fn set_track_pitched(id: u16, pitched: bool, state: State<'_, Arc<AppState>>) {
+    let mut project = state.project.lock().unwrap();
+    if let Some(track) = project.track_mut(id) {
+        track.pitched = pitched;
+        state.send(Command::SetTrackPitched { track: id, pitched });
+    }
+    drop(project);
+    state.touch();
 }
 
 // --- patterns ---------------------------------------------------------------
@@ -416,6 +437,117 @@ pub fn set_step(
     drop(project);
     state.touch();
     now_on
+}
+
+/// Add a note, or replace the one already at that step and pitch. What the piano roll draws
+/// with, and how it moves velocity and length about afterwards.
+#[tauri::command]
+pub fn set_note(
+    pattern: u16,
+    track: u16,
+    at: At,
+    velocity: u8,
+    length: u32,
+    state: State<'_, Arc<AppState>>,
+) -> bool {
+    let mut project = state.project.lock().unwrap();
+    let Some(target) = project.pattern_mut(pattern) else {
+        return false;
+    };
+    if at.step >= target.steps {
+        return false;
+    }
+    let note = Note {
+        step: at.step,
+        pitch: at.pitch,
+        velocity: velocity.clamp(1, 127),
+        // A note cannot run off the end of its pattern.
+        length: length.clamp(1, target.steps - at.step),
+    };
+    let fits = target.set_note(track, note);
+    if fits {
+        state.send(Command::SetNote {
+            pattern,
+            track,
+            note: EngineNote {
+                step: note.step as u16,
+                pitch: note.pitch,
+                velocity: note.velocity,
+                length: note.length as u16,
+            },
+        });
+    }
+    drop(project);
+    state.touch();
+    fits
+}
+
+/// Take a note out.
+#[tauri::command]
+pub fn clear_note(pattern: u16, track: u16, at: At, state: State<'_, Arc<AppState>>) {
+    let mut project = state.project.lock().unwrap();
+    if let Some(target) = project.pattern_mut(pattern) {
+        target.clear_note(track, at.step, at.pitch);
+    }
+    state.send(Command::ClearNote {
+        pattern,
+        track,
+        step: at.step as u16,
+        pitch: at.pitch,
+    });
+    drop(project);
+    state.touch();
+}
+
+/// Move a note, keeping how long and how loud it is. One trip rather than two, so a dragged
+/// note is never gone and back again.
+#[tauri::command]
+pub fn move_note(
+    pattern: u16,
+    track: u16,
+    at: At,
+    to: At,
+    state: State<'_, Arc<AppState>>,
+) -> bool {
+    let mut project = state.project.lock().unwrap();
+    let Some(target) = project.pattern_mut(pattern) else {
+        return false;
+    };
+    let Some(note) = target.lane(track).and_then(|l| l.note(at.step, at.pitch)) else {
+        return false;
+    };
+    if to.step >= target.steps {
+        return false;
+    }
+    let moved = Note {
+        step: to.step,
+        pitch: to.pitch,
+        length: note.length.clamp(1, target.steps - to.step),
+        ..note
+    };
+    target.clear_note(track, at.step, at.pitch);
+    let fits = target.set_note(track, moved);
+    state.send(Command::ClearNote {
+        pattern,
+        track,
+        step: at.step as u16,
+        pitch: at.pitch,
+    });
+    if fits {
+        state.send(Command::SetNote {
+            pattern,
+            track,
+            note: EngineNote {
+                step: moved.step as u16,
+                pitch: moved.pitch,
+                velocity: moved.velocity,
+                length: moved.length as u16,
+            },
+        });
+    }
+    drop(project);
+    state.touch();
+    fits
 }
 
 #[tauri::command]

@@ -18,8 +18,13 @@
   /* The patterns panel, and one pattern in it. Must match PATTERNS and LANE in main.js. */
   --patterns: 208px;
   --lane: 34px;
-  /* The strip along the top of both views: the ruler, and the scrubber. */
+  /* The strip along the top of every view: the ruler, and the scrubber. */
   --head: 30px;
+  /* The piano roll: the keyboard column, one semitone, one step, and the velocity lane.
+     Must match KEYS, SEMITONE, ROLL_CELL and VELOCITY in main.js. */
+  --keys: 152px;
+  --semitone: 15px;
+  --velocity: 54px;
 }
 
 * {
@@ -534,6 +539,97 @@ body.drop-target::after {
   opacity: 0.7;
 }
 
+/* --- the piano roll --- */
+
+.roll {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  position: relative;
+}
+
+.roll-scroll {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+}
+
+/*
+ * Same two sticky edges as the step grid — keys down the left, ruler along the top — with a
+ * third along the bottom for how hard each note is hit, so it stays with the notes it
+ * belongs to however far down the keyboard you are.
+ */
+.roll-grid {
+  display: grid;
+  grid-template-columns: var(--keys) max-content;
+  grid-template-rows: var(--head) max-content var(--velocity);
+  min-width: 100%;
+  /* A line under each semitone, all the way across. Same trick as the song lanes. */
+  background-image: linear-gradient(
+    to bottom,
+    transparent calc(var(--semitone) - 1px),
+    var(--line) calc(var(--semitone) - 1px)
+  );
+  background-size: 100% var(--semitone);
+  background-position: 0 var(--head);
+}
+
+.roll .corner {
+  gap: 8px;
+}
+
+.roll-name {
+  font-size: 11px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.roll #oneShot {
+  margin-left: auto;
+}
+
+.keys {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  display: block;
+  border-right: 1px solid var(--line);
+  background: var(--panel);
+  cursor: pointer;
+}
+
+.notes {
+  display: block;
+}
+
+.vel-corner {
+  position: sticky;
+  left: 0;
+  bottom: 0;
+  z-index: 3;
+  border-top: 1px solid var(--line);
+  border-bottom: none;
+  align-items: flex-start;
+  padding-top: 5px;
+}
+
+/* Holds the lane's own background across the whole width, over the semitone stripes. */
+.vel-lane {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  min-width: 100%;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+}
+
+.velocity {
+  display: block;
+  cursor: ns-resize;
+}
+
 /* --- the pattern editor --- */
 
 .editor {
@@ -667,8 +763,15 @@ body.drop-target::after {
 }
 
 .track input[type="range"] {
-  width: 46px;
+  width: 40px;
   flex: none;
+}
+
+/* A track that is a sampler instrument rather than a one-shot. */
+.tick.keys-on.on {
+  background: var(--ok);
+  border-color: var(--ok);
+  color: #06301c;
 }
 
 .grid {

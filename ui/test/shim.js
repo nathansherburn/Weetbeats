@@ -11,6 +11,7 @@ const MAX_PATTERNS = 32;
 const MAX_TRACKS = 32;
 const MAX_STEPS = 64;
 const MAX_SONG_BARS = 256;
+const MAX_NOTES = 256;
 
 const fake = {
   bpm: 120,
@@ -112,6 +113,7 @@ function addAll(paths) {
       gain: 0.8,
       muted: false,
       soloed: false,
+      pitched: false,
     };
     fake.tracks.set(id, track);
     added.tracks.push({ track, peaks: fake.peaks });
@@ -144,6 +146,44 @@ const handlers = {
   set_track_gain: ({ id, gain }) => { fake.tracks.get(id).gain = gain; return null; },
   set_track_muted: ({ id, muted }) => { fake.tracks.get(id).muted = muted; return null; },
   set_track_soloed: ({ id, soloed }) => { fake.tracks.get(id).soloed = soloed; return null; },
+  set_track_pitched: ({ id, pitched }) => { fake.tracks.get(id).pitched = pitched; return null; },
+
+  // The piano roll's three commands. A note is identified by where it is.
+  set_note: ({ pattern: id, track, at, velocity, length }) => {
+    const p = pattern(id);
+    if (!p || at.step >= p.steps) return false;
+    const l = lane(p, track);
+    const note = {
+      step: at.step,
+      pitch: at.pitch,
+      velocity: Math.max(1, Math.min(127, velocity)),
+      length: Math.max(1, Math.min(length, p.steps - at.step)),
+    };
+    const was = l.notes.findIndex((n) => n.step === at.step && n.pitch === at.pitch);
+    if (was >= 0) l.notes[was] = note;
+    else if (l.notes.length >= MAX_NOTES) return false;
+    else l.notes.push(note);
+    return true;
+  },
+  clear_note: ({ pattern: id, track, at }) => {
+    const p = pattern(id);
+    if (!p) return null;
+    const l = lane(p, track);
+    l.notes = l.notes.filter((n) => !(n.step === at.step && n.pitch === at.pitch));
+    p.lanes = p.lanes.filter((one) => one.notes.length);
+    return null;
+  },
+  move_note: ({ pattern: id, track, at, to }) => {
+    const p = pattern(id);
+    if (!p || to.step >= p.steps) return false;
+    const l = lane(p, track);
+    const found = l.notes.find((n) => n.step === at.step && n.pitch === at.pitch);
+    if (!found) return false;
+    found.step = to.step;
+    found.pitch = to.pitch;
+    found.length = Math.max(1, Math.min(found.length, p.steps - to.step));
+    return true;
+  },
 
   add_pattern: () => {
     const id = freeId(fake.patterns.map((p) => p.id));

@@ -53,6 +53,8 @@ struct TrackState {
     gain: f32,
     muted: bool,
     soloed: bool,
+    /// A sampler instrument rather than a one-shot: its notes stop when they end.
+    pitched: bool,
 }
 
 impl TrackState {
@@ -64,6 +66,7 @@ impl TrackState {
             gain: 0.8,
             muted: false,
             soloed: false,
+            pitched: false,
         }
     }
 }
@@ -416,6 +419,9 @@ impl Engine {
             let Some(sample) = self.tracks[track].sample.clone() else {
                 continue;
             };
+            // An instrument's notes are held for as long as they are long; a one-shot's
+            // ring out, so its length is nothing to do with the sound.
+            let held = self.tracks[track].pitched;
             for i in 0..self.patterns[pattern].tracks[track].count {
                 let note = self.patterns[pattern].tracks[track].notes[i];
                 if note.step != step {
@@ -426,6 +432,11 @@ impl Engine {
                     track: track as u16,
                     ratio: self.playback_ratio(&sample, note.pitch),
                     gain: velocity_gain(note.velocity),
+                    frames: if held {
+                        note.length.max(1) as f64 * self.clock.samples_per_step()
+                    } else {
+                        f64::INFINITY
+                    },
                 };
                 self.voices.trigger(trigger);
             }
@@ -475,6 +486,7 @@ impl Engine {
                     t.active = true;
                     t.muted = false;
                     t.soloed = false;
+                    t.pitched = false;
                     t.target_gain = gain.clamp(0.0, 2.0);
                     t.gain = t.target_gain;
                 }
@@ -511,6 +523,11 @@ impl Engine {
             Command::SetTrackSoloed { track, soloed } => {
                 if let Some(t) = self.tracks.get_mut(track as usize) {
                     t.soloed = soloed;
+                }
+            }
+            Command::SetTrackPitched { track, pitched } => {
+                if let Some(t) = self.tracks.get_mut(track as usize) {
+                    t.pitched = pitched;
                 }
             }
             Command::SetPatternSteps { pattern, steps } => {
@@ -618,6 +635,8 @@ impl Engine {
                     track,
                     ratio: self.playback_ratio(sample, pitch),
                     gain: velocity_gain(velocity),
+                    // Clicking a row is "let me hear it", so it plays out whatever the track is.
+                    frames: f64::INFINITY,
                 };
                 self.voices.trigger(trigger);
             }
@@ -628,6 +647,7 @@ impl Engine {
                     track: PREVIEW_TRACK,
                     ratio,
                     gain,
+                    frames: f64::INFINITY,
                 });
             }
             Command::StopAll => {

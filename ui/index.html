@@ -108,6 +108,29 @@
             <p class="small">Or drop a sound on the window. Then tick some boxes and hit space.</p>
           </div>
         </div>
+
+        <!--
+          The piano roll: the same pattern, one track, seen as notes instead of boxes. Keys
+          down the left, the notes in the middle, how hard each one is hit underneath.
+        -->
+        <div class="roll hidden" id="roll">
+          <div class="roll-scroll" id="rollScroll">
+            <div class="roll-grid">
+              <div class="corner">
+                <span class="roll-name" id="rollName"></span>
+                <button id="oneShot" class="add" title="Let the notes ring out instead">
+                  held
+                </button>
+              </div>
+              <canvas id="rollRuler" class="ruler"></canvas>
+              <canvas id="keys" class="keys" title="Click a key to hear it"></canvas>
+              <canvas id="notes" class="notes"></canvas>
+              <div class="corner vel-corner"><span class="head-label">hit</span></div>
+              <div class="vel-lane"><canvas id="velocity" class="velocity"></canvas></div>
+            </div>
+          </div>
+          <button id="closeRoll" class="close" title="Back to the boxes (esc)">&times;</button>
+        </div>
       </section>
     </main>
 

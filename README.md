@@ -10,8 +10,9 @@ Open source, free forever.
 
 ## Where it is up to
 
-Stages 1 and 2 of [the build plan](docs/BUILD_PLAN.md) are done: a step sequencer, and
-patterns strung together into a song.
+Stages 1 to 4 of [the build plan](docs/BUILD_PLAN.md) are done: a step sequencer, patterns
+strung together into a song, samples played across the keyboard, and a piano roll to write
+with.
 
 - Add instruments from the system file picker, or drop sounds on the window
 - Eight drums ship with it, and the picker opens on them the first time
@@ -19,11 +20,12 @@ patterns strung together into a song.
 - Set how many boxes a pattern has, one step at a time
 - Patterns down the left: click to open one, click it again to go back to the song
 - Song view: paint a pattern across the bars, and stack patterns to build a beat up
-- Click a track's name to hear it
+- Any track can be a pitched instrument instead of a drum, with a piano roll to write in
+- Click a track's name to hear it, or a key in the roll to hear that note
 - Play, stop, tempo
 - Per track: volume, mute, solo, delete
 
-The sampler instrument is stage 3, the piano roll stage 4.
+Effects are stage 5, hosting CLAP plugins stage 6.
 
 ### Patterns and the song
 
@@ -45,6 +47,23 @@ play from anywhere, and right click one to empty it.
 
 Patterns are windows over the song. Click one in the panel to open it, click it again — or
 press escape, or the × in the corner, or **song** at the top of the panel — to put it away.
+
+### Instruments and the piano roll
+
+A track is a drum until you say otherwise: hit it and the whole sample plays, however short
+the note is. Press **♪** on a track and it becomes an instrument instead — the sample is
+pitched across the keyboard, faster for higher notes and slower for lower ones, and a note
+**stops when it ends**. The button in the corner of the roll says which it is and changes it
+back.
+
+The piano roll is a second view of the same pattern, one track at a time. Press to draw a
+note and keep dragging to set how long it is; the next one you draw comes out that long.
+Grab a note to move it, grab its right hand end to stretch it, right click to rub it out.
+Everything you touch plays as you touch it. How hard each note is hit is the lane
+underneath — drag it.
+
+A box in the step grid *is* a note in the roll: middle C, one step long. There is no
+converting between them and nothing to keep in step.
 
 ## Projects
 
@@ -127,8 +146,9 @@ Everything the audio thread needs is prepared elsewhere and handed over:
 
 ### Steps are notes
 
-A ticked box is a note at middle C, one step long — not a boolean. The piano roll in
-stage 4 is then a different editor over the same data instead of a project file migration.
+A ticked box is a note at middle C, one step long — not a boolean. Which is why the piano
+roll, four stages later, was a new editor rather than a project file migration: it writes
+into the same lane the boxes do, at any pitch and any length.
 
 ### Every pattern lives on the audio thread
 
