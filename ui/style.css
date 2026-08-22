@@ -368,9 +368,9 @@ body.drop-target::after {
 }
 
 /*
- * The way back to the song, and where the song's name lives. It fills the head because it
- * is the thing everything else in this panel sits under: the patterns are windows over the
- * song, and this is the song.
+ * The song's name, which is also the way back to it. It fills the head because it is the
+ * thing everything else in this panel sits under: the patterns are windows over the song,
+ * and this is the song.
  */
 .song-mode {
   flex: 1;
@@ -384,17 +384,6 @@ body.drop-target::after {
   border-right: 1px solid transparent;
   text-align: left;
   transition: color 0.12s, background 0.12s;
-}
-
-.song-tag {
-  font-size: 9px;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  color: var(--dim);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  padding: 1px 5px;
-  flex: none;
 }
 
 .song-name {
@@ -422,11 +411,6 @@ body.drop-target::after {
 
 .song-mode.on .song-name {
   color: var(--text);
-}
-
-.song-mode.on .song-tag {
-  color: var(--accent);
-  border-color: var(--accent);
 }
 
 /* Renaming the song, in place, the same way a pattern is renamed. */
@@ -770,16 +754,9 @@ input.number.small-number {
   background-position: 0 var(--head);
 }
 
-.roll .corner {
-  gap: 8px;
-}
-
-.roll-name {
-  font-size: 11px;
-  color: var(--text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.keys-chip .pattern-tab {
+  max-width: none;
+  min-width: 0;
 }
 
 .keys {
@@ -803,6 +780,7 @@ input.number.small-number {
   z-index: 3;
   border-top: 1px solid var(--line);
   border-bottom: none;
+  padding-left: 9px;
   align-items: flex-start;
   padding-top: 5px;
 }
@@ -863,11 +841,43 @@ input.number.small-number {
   z-index: 3;
   background: var(--panel);
   border-right: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
+  /* The pattern's colour, picked up again by the line the ruler draws along its own bottom
+     edge, so one band of it runs the whole way across the top of the editor. */
+  border-bottom: 3px solid var(--pattern);
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   padding: 0 9px;
+}
+
+/*
+ * The pattern's titlebar, sitting over the top left corner of the editor and the roll.
+ *
+ * Outside the scrolling area, because there is nowhere inside it that is safe. Pinned to the
+ * far right, a button can be clipped by a scrollbar or the window's own corner — which is
+ * what happened to the close button. Put in the grid as a sticky cell, it holds for a while
+ * and then slides away: a sticky grid item is clamped to the space its own column leaves, so
+ * past roughly a windowful of scrolling it stops sticking. Absolutely placed over the corner
+ * it covers, it cannot go anywhere at all.
+ */
+.head-chip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: var(--headers);
+  height: var(--head);
+  z-index: 5;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  border-bottom: 3px solid var(--pattern);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 9px;
+}
+
+.keys-chip {
+  width: var(--keys);
 }
 
 .steps {
@@ -971,30 +981,34 @@ input.number.small-number {
 }
 
 /*
- * The pattern is a window over the song, and this shuts it. In the pattern's own colour, at
- * the far end of the same strip the name tab starts: the two of them bracket the ruler, so
- * the top of the editor reads as the block it belongs to.
+ * The pattern is a window over the song, and this shuts it. In the pattern's own colour,
+ * right beside its name, at the top left of the editor.
+ *
+ * It used to be pinned to the far right of the workspace, which is a bad place for the one
+ * control you always need: at the far edge of the window it can end up under a scrollbar or
+ * clipped by the window's own corner, and it is the longest possible journey from the
+ * patterns panel you just clicked in. The corner it is in now is stuck to the top left of
+ * the editor, so nothing can ever cover it and it is never more than a few pixels from the
+ * pattern list.
  */
-.close {
-  position: absolute;
-  top: 0;
-  right: 0;
-  width: 30px;
-  height: var(--head);
+.shut {
+  width: 22px;
+  height: 22px;
   border: none;
-  border-bottom: 1px solid var(--line);
+  border-radius: 5px;
   background: var(--pattern);
   color: #1a0b12;
-  font-size: 17px;
+  font-size: 15px;
+  font-weight: 600;
   line-height: 1;
-  z-index: 4;
   display: grid;
   place-items: center;
   padding: 0;
+  flex: none;
   transition: filter 0.12s;
 }
 
-.close:hover {
+.shut:hover {
   filter: brightness(1.25);
 }
 

@@ -67,7 +67,6 @@
             class="song-mode"
             title="Back to the song (esc) — double click to rename it"
           >
-            <span class="song-tag">song</span>
             <span class="song-name" id="songName">Untitled</span>
           </button>
         </div>
@@ -125,17 +124,31 @@
 
         <!-- The pattern editor: the step grid, and the instruments it plays. -->
         <div class="editor hidden" id="editor">
+          <!--
+            The pattern's own titlebar: the way out, the block from the song pulled open —
+            same colour, same name — and how long it is.
+
+            Outside the scrolling area on purpose. Pinned to the far right it could end up
+            under a scrollbar or clipped by the window's corner; inside the grid as a sticky
+            cell it slides away once the pattern is scrolled far enough, which is a thing
+            sticky grid items do. Absolutely placed over the top left of the editor, it
+            cannot go anywhere.
+          -->
+          <div class="head-chip" id="patternChip">
+            <button id="closePattern" class="shut" title="Close this pattern (esc)">
+              &times;
+            </button>
+            <span class="pattern-tab" id="patternTab"></span>
+            <span class="steps" title="How many boxes this pattern has">
+              <button id="fewerSteps" class="tick" aria-label="One box fewer">&minus;</button>
+              <input id="steps" class="number" type="text" inputmode="numeric" value="16" />
+              <button id="moreSteps" class="tick" aria-label="One box more">+</button>
+            </span>
+          </div>
           <div class="editor-scroll" id="editorScroll">
             <div class="editor-grid">
-              <div class="corner">
-                <!-- The block from the song, pulled open: same colour, same name. -->
-                <span class="pattern-tab" id="patternTab"></span>
-                <span class="steps" title="How many boxes this pattern has">
-                  <button id="fewerSteps" class="tick" aria-label="One box fewer">&minus;</button>
-                  <input id="steps" class="number" type="text" inputmode="numeric" value="16" />
-                  <button id="moreSteps" class="tick" aria-label="One box more">+</button>
-                </span>
-              </div>
+              <!-- Holds the corner of the grid open. What goes in it is over the top. -->
+              <div class="corner"></div>
               <canvas id="ruler" class="ruler"></canvas>
               <!-- The instruments, and under them the way to add another. -->
               <div class="header-col">
@@ -145,7 +158,6 @@
               <canvas id="grid" class="grid"></canvas>
             </div>
           </div>
-          <button id="closePattern" class="close" title="Close this pattern (esc)">&times;</button>
           <div class="empty" id="empty">
             <button id="addBig" class="add-big">Add an instrument</button>
             <p class="small">Or drop a sound on the window. Then tick some boxes and hit space.</p>
@@ -157,12 +169,15 @@
           down the left, the notes in the middle, how hard each one is hit underneath.
         -->
         <div class="roll hidden" id="roll">
+          <!-- The same chip, over the top left of the roll. -->
+          <div class="head-chip keys-chip" id="rollChip">
+            <button id="closeRoll" class="shut" title="Back to the boxes (esc)">&times;</button>
+            <!-- The track, in the colour of the pattern it is a part of. -->
+            <span class="pattern-tab" id="rollName"></span>
+          </div>
           <div class="roll-scroll" id="rollScroll">
             <div class="roll-grid">
-              <div class="corner">
-                <span class="pattern-tab" id="rollTab"></span>
-                <span class="roll-name" id="rollName"></span>
-              </div>
+              <div class="corner"></div>
               <canvas id="rollRuler" class="ruler"></canvas>
               <canvas id="keys" class="keys" title="Click a key to hear it"></canvas>
               <canvas id="notes" class="notes"></canvas>
@@ -178,7 +193,6 @@
               <button id="rollZoomIn" class="tick" aria-label="Zoom in">+</button>
             </span>
           </div>
-          <button id="closeRoll" class="close" title="Back to the boxes (esc)">&times;</button>
         </div>
       </section>
     </main>

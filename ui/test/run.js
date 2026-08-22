@@ -33,8 +33,8 @@ const check = (name, ok, detail = "") => {
 };
 
 // Sizes the front end draws with. Must match the constants in main.js.
-const CELL = 42;
-const GAP = 4;
+const CELL = 30;
+const GAP = 3;
 const ROW = 46;
 const LANE = 34;
 const SONG_STEP = 4;
@@ -768,6 +768,35 @@ try {
   check("and so is the button that closes it",
     rgb(await cssColour("closePattern", "backgroundColor")) === blockColour(0),
     await cssColour("closePattern", "backgroundColor"));
+  check("the way out sits with the name, not out at the window's edge", await page.evaluate(() => {
+    const shut = document.getElementById("closePattern").getBoundingClientRect();
+    const corner = document.querySelector("#editor .corner").getBoundingClientRect();
+    return shut.left >= corner.left && shut.right <= corner.right;
+  }));
+
+  // Scrolled a long way along, it is still exactly where it was: the corner is stuck to the
+  // top left, which is what stops a scrollbar or the window's own edge ever covering it.
+  await page.locator("#steps").click();
+  await page.locator("#steps").fill("64");
+  await page.locator("#steps").press("Enter");
+  await page.waitForFunction(() => document.getElementById("steps").value === "64");
+  const restingPlace = await page.locator("#closePattern").boundingBox();
+  await page.evaluate(() => {
+    document.getElementById("editorScroll").scrollLeft = 2000;
+  });
+  await page.waitForTimeout(80);
+  const scrolled = await page.locator("#closePattern").boundingBox();
+  check("and scrolling the grid does not move it",
+    Math.abs(scrolled.x - restingPlace.x) < 1 && scrolled.width > 0,
+    `${scrolled.x} vs ${restingPlace.x}`);
+  await page.evaluate(() => {
+    document.getElementById("editorScroll").scrollLeft = 0;
+  });
+  await page.locator("#steps").click();
+  await page.locator("#steps").fill("16");
+  await page.locator("#steps").press("Enter");
+  await page.waitForFunction(() => document.getElementById("steps").value === "16");
+
   check("the ruler is underlined in it", await page.evaluate(
     ([head]) => {
       const dpr = window.devicePixelRatio || 1;

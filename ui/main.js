@@ -29,8 +29,15 @@
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
-const CELL = 42; // width of one step in the pattern editor
-const GAP = 4; // gap between steps
+/*
+ * One step of the pattern editor. Narrow on purpose: a bar of sixteen is what you are
+ * usually looking at, and at forty two pixels a two bar pattern did not fit on a laptop.
+ * The boxes are inset more from the top and bottom than from the sides, which keeps them
+ * looking like boxes rather than tall thin slots now that they are narrower than the row.
+ */
+const CELL = 30; // width of one step in the pattern editor
+const GAP = 3; // gap between steps
+const BOX_INSET = 7; // and from the top and bottom of the row
 const ROW = 46; // must match --row in the stylesheet
 const HEADERS = 296; // the instrument column: must match --headers
 const LANE = 34; // one pattern's row, in the panel and in the song: must match --lane
@@ -114,8 +121,7 @@ for (const id of [
   "closePattern",
   "add", "addBig", "steps", "fewerSteps", "moreSteps", "trackHeaders", "grid", "ruler",
   "empty", "roll", "rollScroll", "rollName", "rollRuler", "keys", "notes", "velocity",
-  "closeRoll", "rollZoomIn", "rollZoomOut", "rollZoomRead", "workspace",
-  "patternTab", "rollTab",
+  "closeRoll", "rollZoomIn", "rollZoomOut", "rollZoomRead", "workspace", "patternTab",
 ]) {
   el[id] = document.getElementById(id);
 }
@@ -288,8 +294,6 @@ function showPatternColour() {
   const name = open === null ? "" : open.name;
   el.patternTab.textContent = name;
   el.patternTab.title = name;
-  el.rollTab.textContent = name;
-  el.rollTab.title = name;
 }
 
 function openPattern(id) {
@@ -1047,7 +1051,7 @@ function drawGrid() {
     for (let step = 0; step < pattern.steps; step++) {
       const x = step * CELL + GAP;
       const w = CELL - GAP * 2;
-      const h = ROW - GAP * 2 - 1;
+      const h = ROW - BOX_INSET * 2 - 1;
       const on = ticked.has(step);
       const onBeat = step % STEPS_PER_BEAT === 0;
 
@@ -1057,7 +1061,7 @@ function drawGrid() {
       } else {
         ctx.fillStyle = onBeat ? "#272132" : "#201c29";
       }
-      roundRect(ctx, x, y + GAP, w, h, 5);
+      roundRect(ctx, x, y + BOX_INSET, w, h, 4);
       ctx.fill();
     }
   }
@@ -1276,7 +1280,9 @@ function setPitched(track, pitched) {
 function showPitched() {
   const instrument = state.roll === null ? null : trackById(state.roll);
   if (!instrument) return;
+  // The track's name, worn in the colour of the pattern it belongs to.
   el.rollName.textContent = instrument.name;
+  el.rollName.title = instrument.name;
 }
 
 const isBlack = (pitch) => BLACK_KEYS.includes(((pitch % 12) + 12) % 12);

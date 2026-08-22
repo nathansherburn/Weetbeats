@@ -60,15 +60,20 @@ on its row in the panel changes it. Bars of sixteen steps are the ruler along th
 along it to move the playhead, playing or not, and right click a bar to empty it. Zoom with
 the buttons in the corner or by pinching the trackpad.
 
-Patterns are windows over the song. **Double click a block to edit its pattern**, and press
-escape, or the × in the corner, or the **song** button at the top of the panel, to put it
-away. A click in the patterns panel only picks a pattern out — highlighting its row and its
-lane — so nothing in that list can take you off the song you are looking at. The song button
-carries the project's name; double click it to rename the project, which renames its folder.
+Patterns are windows over the song. Click one in the panel to open it, click it again — or
+press escape, or the × at the top left of the editor — to put it away, and **double click a
+block in the song** to open the pattern in it. The name at the top of the panel is the
+project's, and it is also the way back to the song; double click it to rename the project,
+which renames its folder.
 
-A brand new pattern opens as soon as it is made, because there is nothing in the song to
-double click yet. Close it without putting it anywhere and the way back in is to draw a block
-for it first.
+An open pattern wears the colour of its blocks: the × and the name tab at the top left, the
+line under the ruler, and every box and note inside. Opening a pattern should look like
+pulling one of its blocks open, not like going somewhere else.
+
+That titlebar sits outside the scrolling area, which is deliberate. Pinned to the far right
+the close button could end up under a scrollbar or clipped by the window's own corner; put in
+the grid as a sticky cell it holds for about a windowful of scrolling and then slides away,
+which is a thing sticky grid items do.
 
 ### Instruments and the piano roll
 
