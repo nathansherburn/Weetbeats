@@ -113,6 +113,12 @@ MySong.beat/
     .undo/        # samples a deleted track might still want back
 ```
 
+Anything the file picker will let you choose can be decoded: wav, aiff, caf, mp3, flac, ogg,
+and the Apple family (m4a, mp4, aac, alac). That is not a coincidence — the picker's list of
+extensions and the decoder's list of readers are checked against each other by a test, because
+they got out of step once and the result was a sample that was copied into the project and
+then would not play.
+
 Samples are copied in the moment their track is added, and deleted when the last track using
 one goes — not gathered up at save time. So the folder always holds exactly what the project
 uses, and moving or deleting the file you dragged in cannot break anything. The only way to

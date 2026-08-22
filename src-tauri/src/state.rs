@@ -492,9 +492,15 @@ impl AppState {
         if let Some(sample) = self.cache.lock().unwrap().get(path) {
             return Ok(Arc::clone(sample));
         }
-        let sample = Arc::new(
-            decode_file(path).map_err(|e| format!("could not read {}: {e}", path.display()))?,
-        );
+        // Named by its file, not its path: the status line has one line, and a project
+        // folder on the Desktop uses most of it up before the reason gets a look in.
+        let sample = Arc::new(decode_file(path).map_err(|e| {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("that sound");
+            format!("{name} could not be read: {e}")
+        })?);
         self.cache
             .lock()
             .unwrap()
