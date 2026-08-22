@@ -22,7 +22,7 @@ const fake = {
   songMode: false,
   nextTrackId: 0,
   tracks: new Map(),
-  patterns: [{ id: 0, name: "Pattern 1", steps: 16, lanes: [] }],
+  patterns: [{ id: 0, name: "Pattern 1", steps: 16, pitched: [], lanes: [] }],
   // { step, pattern, length }: what plays where, and for how long.
   song: [],
   name: "Untitled",
@@ -119,7 +119,6 @@ function addAll(paths) {
       gain: 0.8,
       muted: false,
       soloed: false,
-      pitched: false,
     };
     fake.tracks.set(id, track);
     added.tracks.push({ track, peaks: fake.peaks });
@@ -136,6 +135,7 @@ const handlers = {
     fake.tracks.delete(id);
     for (const p of fake.patterns) {
       p.lanes = p.lanes.filter((l) => l.track !== id);
+      p.pitched = (p.pitched ?? []).filter((t) => t !== id);
     }
     return null;
   },
@@ -152,7 +152,15 @@ const handlers = {
   set_track_gain: ({ id, gain }) => { fake.tracks.get(id).gain = gain; return null; },
   set_track_muted: ({ id, muted }) => { fake.tracks.get(id).muted = muted; return null; },
   set_track_soloed: ({ id, soloed }) => { fake.tracks.get(id).soloed = soloed; return null; },
-  set_track_pitched: ({ id, pitched }) => { fake.tracks.get(id).pitched = pitched; return null; },
+  // Which tracks are instruments belongs to the pattern, not to the track.
+  set_pattern_pitched: ({ pattern: id, track, pitched }) => {
+    const p = pattern(id);
+    if (!p) return null;
+    p.pitched = (p.pitched ?? []).filter((t) => t !== track);
+    if (pitched) p.pitched.push(track);
+    p.pitched.sort((a, b) => a - b);
+    return null;
+  },
 
   // The piano roll's three commands. A note is identified by where it is.
   set_note: ({ pattern: id, track, at, velocity, length }) => {
@@ -198,7 +206,7 @@ const handlers = {
   add_pattern: () => {
     const id = freeId(fake.patterns.map((p) => p.id));
     if (id === null) throw new Error("that is as many patterns as there is room for");
-    fake.patterns.push({ id, name: nextName(), steps: 16, lanes: [] });
+    fake.patterns.push({ id, name: nextName(), steps: 16, pitched: [], lanes: [] });
     return arrangement();
   },
   duplicate_pattern: ({ id }) => {
@@ -377,7 +385,7 @@ const EDITS = {
   set_track_gain: "gain",
   set_track_muted: "mute",
   set_track_soloed: "solo",
-  set_track_pitched: "pitched",
+  set_pattern_pitched: "pitched",
   set_step: "boxes",
   set_note: "notes",
   clear_note: "notes",

@@ -135,15 +135,15 @@
             cannot go anywhere.
           -->
           <div class="head-chip" id="patternChip">
-            <button id="closePattern" class="shut" title="Close this pattern (esc)">
-              &times;
-            </button>
             <span class="pattern-tab" id="patternTab"></span>
             <span class="steps" title="How many boxes this pattern has">
               <button id="fewerSteps" class="tick" aria-label="One box fewer">&minus;</button>
               <input id="steps" class="number" type="text" inputmode="numeric" value="16" />
               <button id="moreSteps" class="tick" aria-label="One box more">+</button>
             </span>
+            <button id="closePattern" class="shut" title="Close this pattern (esc)">
+              &times;
+            </button>
           </div>
           <div class="editor-scroll" id="editorScroll">
             <div class="editor-grid">
@@ -171,9 +171,9 @@
         <div class="roll hidden" id="roll">
           <!-- The same chip, over the top left of the roll. -->
           <div class="head-chip keys-chip" id="rollChip">
-            <button id="closeRoll" class="shut" title="Back to the boxes (esc)">&times;</button>
             <!-- The track, in the colour of the pattern it is a part of. -->
             <span class="pattern-tab" id="rollName"></span>
+            <button id="closeRoll" class="shut" title="Back to the boxes (esc)">&times;</button>
           </div>
           <div class="roll-scroll" id="rollScroll">
             <div class="roll-grid">

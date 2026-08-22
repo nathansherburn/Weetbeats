@@ -628,7 +628,8 @@ fn a_row_of_boxes_plays_only_what_the_boxes_show() {
     assert_eq!(onsets(&out), vec![0], "a hidden roll note made a sound");
 
     // Turn the row into a piano roll and the whole lane plays, the box included.
-    rig.send(Command::SetTrackPitched {
+    rig.send(Command::SetPatternPitched {
+        pattern: 0,
         track: 0,
         pitched: true,
     });
@@ -641,6 +642,49 @@ fn a_row_of_boxes_plays_only_what_the_boxes_show() {
         vec![0, 8 * STEP],
         "the roll's own note did not come back"
     );
+}
+
+/// Being an instrument belongs to the pattern, not to the sound. The same kick can hold a
+/// rhythm down in one pattern and play a melody in the next, and turning the roll off in one
+/// says nothing about the other.
+#[test]
+fn being_an_instrument_belongs_to_the_pattern() {
+    let mut rig = Rig::new(120.0, 16);
+    track_with(&mut rig, 0, dc_sample(400));
+    // The same note, off the sampler's own pitch, drawn in two patterns.
+    for pattern in [0u16, 1] {
+        rig.send(Command::SetNote {
+            pattern,
+            track: 0,
+            note: EngineNote {
+                step: 0,
+                pitch: 67,
+                velocity: 100,
+                length: 2,
+            },
+        });
+    }
+    // A piano roll in pattern one only.
+    rig.send(Command::SetPatternPitched {
+        pattern: 1,
+        track: 0,
+        pitched: true,
+    });
+    rig.send(Command::SetPlaying(true));
+
+    // Pattern nought is a row of boxes, so a note the boxes cannot show stays quiet.
+    let out = rig.render_chunked(STEP * 4, 373);
+    assert!(
+        out.iter().all(|s| *s == 0.0),
+        "the pattern with the roll turned off made a sound"
+    );
+
+    // Pattern one has the roll, so the same note plays.
+    rig.send(Command::SetActivePattern(1));
+    rig.send(Command::SetPlaying(false));
+    rig.send(Command::SetPlaying(true));
+    let out = rig.render_chunked(STEP * 4, 373);
+    assert_eq!(onsets(&out), vec![0], "the roll's note did not play");
 }
 
 /// The meter in song mode, which is where it was reported dead. Nothing about it is
@@ -929,7 +973,8 @@ fn an_instruments_note_stops_when_it_ends() {
     let mut rig = Rig::new(120.0, 16);
     // A sample far longer than the note, so the only thing that can stop it is the note off.
     track_with(&mut rig, 0, dc_sample(200_000));
-    rig.send(Command::SetTrackPitched {
+    rig.send(Command::SetPatternPitched {
+        pattern: 0,
         track: 0,
         pitched: true,
     });
@@ -985,7 +1030,8 @@ fn a_one_shot_rings_out_past_the_end_of_its_note() {
 fn a_track_can_stop_being_an_instrument() {
     let mut rig = Rig::new(120.0, 16);
     track_with(&mut rig, 0, dc_sample(200_000));
-    rig.send(Command::SetTrackPitched {
+    rig.send(Command::SetPatternPitched {
+        pattern: 0,
         track: 0,
         pitched: true,
     });
@@ -1002,7 +1048,8 @@ fn a_track_can_stop_being_an_instrument() {
     rig.send(Command::SetPlaying(true));
     let held = rig.render_chunked(STEP * 4, 512);
 
-    rig.send(Command::SetTrackPitched {
+    rig.send(Command::SetPatternPitched {
+        pattern: 0,
         track: 0,
         pitched: false,
     });
@@ -1019,7 +1066,8 @@ fn a_track_can_stop_being_an_instrument() {
 fn an_instrument_is_pitched_by_its_notes() {
     let mut rig = Rig::new(120.0, 16);
     track_with(&mut rig, 0, dc_sample(4_800));
-    rig.send(Command::SetTrackPitched {
+    rig.send(Command::SetPatternPitched {
+        pattern: 0,
         track: 0,
         pitched: true,
     });
@@ -1049,7 +1097,8 @@ fn an_instrument_is_pitched_by_its_notes() {
 fn notes_at_different_pitches_play_together() {
     let mut rig = Rig::new(120.0, 16);
     track_with_gain(&mut rig, 0, dc_sample(200_000), 0.2);
-    rig.send(Command::SetTrackPitched {
+    rig.send(Command::SetPatternPitched {
+        pattern: 0,
         track: 0,
         pitched: true,
     });

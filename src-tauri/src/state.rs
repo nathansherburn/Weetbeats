@@ -211,10 +211,6 @@ impl AppState {
                 track: track.id,
                 soloed: track.soloed,
             });
-            self.send(Command::SetTrackPitched {
-                track: track.id,
-                pitched: track.pitched,
-            });
             if let Some(reference) = &track.sample {
                 match folder::resolve(&dir, &reference.path)
                     .and_then(|path| self.load_sample(&path))
@@ -235,6 +231,13 @@ impl AppState {
                 pattern: pattern.id,
                 steps: pattern.steps,
             });
+            for &track in &pattern.pitched {
+                self.send(Command::SetPatternPitched {
+                    pattern: pattern.id,
+                    track,
+                    pitched: true,
+                });
+            }
             for lane in &pattern.lanes {
                 for note in &lane.notes {
                     self.send(Command::SetNote {
@@ -287,6 +290,13 @@ impl AppState {
             pattern: id,
             steps: pattern.steps,
         });
+        for &track in &pattern.pitched {
+            self.send(Command::SetPatternPitched {
+                pattern: id,
+                track,
+                pitched: true,
+            });
+        }
         for lane in &pattern.lanes {
             for note in &lane.notes {
                 self.send(Command::SetNote {

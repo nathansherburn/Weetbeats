@@ -183,7 +183,7 @@ function applyProject(startup) {
 
   if (state.open !== null && patternById(state.open) === null) {
     closePattern();
-  } else if (state.roll !== null && !trackById(state.roll)?.pitched) {
+  } else if (state.roll !== null && !isPitched(state.roll)) {
     // The track it was showing is a row of boxes again, or gone altogether.
     closeRoll();
   } else if (state.open !== null) {
@@ -234,6 +234,10 @@ function readPattern(pattern) {
     name: pattern.name,
     steps: pattern.steps,
     colour: pattern.colour ?? null,
+    // Which tracks are instruments in this pattern rather than one-shots. A decision about
+    // the part, not about the sound, so it belongs to the pattern: the same bass can hold
+    // down a rhythm in one and play a melody in the next.
+    pitched: new Set(pattern.pitched ?? []),
     notes,
   };
 }
@@ -271,6 +275,11 @@ function trackById(id) {
   return state.tracks.find((track) => track.id === id) ?? null;
 }
 
+/* True if this track is an instrument in the pattern that is open. */
+function isPitched(track) {
+  return openPatternNow()?.pitched.has(track) === true;
+}
+
 // --- the two views --------------------------------------------------------
 
 /* One of the three at a time: the song, a pattern's boxes, or a pattern's piano roll. */
@@ -306,6 +315,9 @@ function openPattern(id) {
   showView();
   invoke("open_pattern", { id });
   drawPatternPanel();
+  // Which rows are piano rolls is this pattern's own business, so the instrument column is
+  // built again for the pattern being opened.
+  drawTrackHeaders();
   resize();
 }
 
@@ -791,13 +803,14 @@ function drawTrackHeaders() {
 
       // Turns the row into a piano roll and back. Nothing is thrown away either way: the
       // boxes and the roll are two views of one lane of notes.
+      const pitched = isPitched(track.id);
       const roll = document.createElement("button");
-      roll.className = `tick keys-on${track.pitched ? " on" : ""}`;
+      roll.className = `tick keys-on${pitched ? " on" : ""}`;
       roll.textContent = "♪";
-      roll.title = track.pitched
-        ? "Back to the boxes, and back to a one-shot"
-        : "Piano roll: play this one pitched, and show its notes";
-      roll.addEventListener("click", () => setPitched(track.id, !track.pitched));
+      roll.title = pitched
+        ? "Back to the boxes in this pattern, and back to a one-shot"
+        : "Piano roll: in this pattern, play this one pitched and show its notes";
+      roll.addEventListener("click", () => setPitched(track.id, !isPitched(track.id)));
 
       const kill = document.createElement("button");
       kill.className = "tick kill";
@@ -1037,7 +1050,7 @@ function drawGrid() {
     const y = row * ROW;
     // An instrument's row is its notes rather than a line of boxes: boxes cannot say what
     // pitch or how long, which is the whole point of turning it into one.
-    if (track.pitched) {
+    if (pattern.pitched.has(track.id)) {
       drawMiniRoll(ctx, pattern, track, y);
       continue;
     }
@@ -1192,7 +1205,7 @@ el.grid.addEventListener("pointerdown", (e) => {
   const cell = cellAt(e);
   if (!cell) return;
   // An instrument's row is a piano roll, and a piano roll opens rather than being ticked.
-  if (trackById(cell.track)?.pitched) {
+  if (isPitched(cell.track)) {
     openRoll(cell.track);
     return;
   }
@@ -1209,7 +1222,7 @@ el.grid.addEventListener("pointerdown", (e) => {
 el.grid.addEventListener("pointermove", (e) => {
   if (painting === null) {
     const cell = cellAt(e);
-    const cursor = !cell ? "default" : trackById(cell.track)?.pitched ? "pointer" : "cell";
+    const cursor = !cell ? "default" : isPitched(cell.track) ? "pointer" : "cell";
     if (el.grid.style.cursor !== cursor) el.grid.style.cursor = cursor;
     return;
   }
@@ -1234,10 +1247,9 @@ function openRoll(track) {
   if (state.open === null || trackById(track) === null) return;
   state.roll = track;
   showView();
-  // Notes only mean pitch and length on an instrument, so opening the roll makes it one.
-  // The button in the corner is there to change your mind.
-  const instrument = trackById(track);
-  if (!instrument.pitched) setPitched(track, true);
+  // Notes only mean pitch and length on an instrument, so opening the roll makes it one in
+  // this pattern. The ♪ button on the row is there to change your mind.
+  if (!isPitched(track)) setPitched(track, true);
   showPitched();
   resize();
   // Land on the sampler's own pitch, which is where the notes will be.
@@ -1265,12 +1277,15 @@ function rollNotes() {
  * One flag does two things, because they are the same thing: an instrument's notes mean a
  * pitch and a length, so it is played pitched and its row shows the notes. A one-shot's
  * notes mean "here", so it rings out and its row is a line of boxes.
+ *
+ * It belongs to the pattern, so turning it off here says nothing about any other pattern.
  */
 function setPitched(track, pitched) {
-  const instrument = trackById(track);
-  if (!instrument) return;
-  instrument.pitched = pitched;
-  invoke("set_track_pitched", { id: track, pitched });
+  const pattern = openPatternNow();
+  if (!pattern || trackById(track) === null) return;
+  if (pitched) pattern.pitched.add(track);
+  else pattern.pitched.delete(track);
+  invoke("set_pattern_pitched", { pattern: pattern.id, track, pitched });
   if (!pitched && state.roll === track) closeRoll();
   drawTrackHeaders();
   showPitched();

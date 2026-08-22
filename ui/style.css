@@ -992,6 +992,7 @@ input.number.small-number {
  * pattern list.
  */
 .shut {
+  margin-left: auto;
   width: 22px;
   height: 22px;
   border: none;

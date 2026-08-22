@@ -403,14 +403,25 @@ pub fn audition(id: u16, pitch: Option<u8>, state: State<'_, Arc<AppState>>) {
     });
 }
 
-/// A sampler instrument rather than a one-shot: pitched, and its notes stop when they end.
+/// A sampler instrument in this pattern rather than a one-shot: pitched, and its notes stop
+/// when they end. Per pattern, so the same sound can be a rhythm in one and a melody in the
+/// next.
 #[tauri::command]
-pub fn set_track_pitched(id: u16, pitched: bool, state: State<'_, Arc<AppState>>) {
+pub fn set_pattern_pitched(
+    pattern: u16,
+    track: u16,
+    pitched: bool,
+    state: State<'_, Arc<AppState>>,
+) {
     state.remember("pitched");
     let mut project = state.project.lock().unwrap();
-    if let Some(track) = project.track_mut(id) {
-        track.pitched = pitched;
-        state.send(Command::SetTrackPitched { track: id, pitched });
+    if let Some(target) = project.pattern_mut(pattern) {
+        target.set_pitched(track, pitched);
+        state.send(Command::SetPatternPitched {
+            pattern,
+            track,
+            pitched,
+        });
     }
     drop(project);
     state.touch();

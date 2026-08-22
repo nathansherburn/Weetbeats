@@ -61,8 +61,6 @@ struct TrackState {
     gain: f32,
     muted: bool,
     soloed: bool,
-    /// A sampler instrument rather than a one-shot: its notes stop when they end.
-    pitched: bool,
 }
 
 impl TrackState {
@@ -74,7 +72,6 @@ impl TrackState {
             gain: 0.8,
             muted: false,
             soloed: false,
-            pitched: false,
         }
     }
 }
@@ -128,6 +125,9 @@ impl NoteList {
 /// One pattern: how long it is, and what every track plays in it.
 struct PatternState {
     steps: u32,
+    /// One bit per track: the ones played as instruments in this pattern rather than as
+    /// one-shots. A bitmask because MAX_TRACKS is 32 and this is read on every step.
+    pitched: u32,
     tracks: Vec<NoteList>,
 }
 
@@ -137,6 +137,7 @@ impl PatternState {
     fn new(steps: u32) -> Self {
         PatternState {
             steps,
+            pitched: 0,
             tracks: (0..MAX_TRACKS).map(|_| NoteList::empty()).collect(),
         }
     }
@@ -462,7 +463,7 @@ impl Engine {
             };
             // An instrument's notes are held for as long as they are long; a one-shot's
             // ring out, so its length is nothing to do with the sound.
-            let held = self.tracks[track].pitched;
+            let held = self.patterns[pattern].pitched & (1 << track) != 0;
             for i in 0..self.patterns[pattern].tracks[track].count {
                 let note = self.patterns[pattern].tracks[track].notes[i];
                 if note.step != step {
@@ -534,7 +535,6 @@ impl Engine {
                     t.active = true;
                     t.muted = false;
                     t.soloed = false;
-                    t.pitched = false;
                     t.target_gain = gain.clamp(0.0, 2.0);
                     t.gain = t.target_gain;
                 }
@@ -573,9 +573,21 @@ impl Engine {
                     t.soloed = soloed;
                 }
             }
-            Command::SetTrackPitched { track, pitched } => {
-                if let Some(t) = self.tracks.get_mut(track as usize) {
-                    t.pitched = pitched;
+            Command::SetPatternPitched {
+                pattern,
+                track,
+                pitched,
+            } => {
+                if let (Some(state), true) = (
+                    self.patterns.get_mut(pattern as usize),
+                    (track as usize) < MAX_TRACKS,
+                ) {
+                    let bit = 1u32 << track;
+                    if pitched {
+                        state.pitched |= bit;
+                    } else {
+                        state.pitched &= !bit;
+                    }
                 }
             }
             Command::SetPatternSteps { pattern, steps } => {
@@ -618,6 +630,10 @@ impl Engine {
                     for notes in &mut p.tracks {
                         notes.count = 0;
                     }
+                    // Which tracks are instruments in it goes too: the app thread sends the
+                    // pattern again straight after, flags and all, so nothing is left over
+                    // from whatever used to be in this slot.
+                    p.pitched = 0;
                 }
             }
             Command::SetActivePattern(pattern) => {
@@ -713,10 +729,16 @@ impl Engine {
     /// Drop a track's notes everywhere. A deleted track must not keep playing out of a
     /// pattern nobody is looking at, and a new track in a reused slot starts empty.
     fn forget_track(&mut self, track: u16) {
+        let bit = if (track as usize) < MAX_TRACKS {
+            1u32 << track
+        } else {
+            0
+        };
         for pattern in &mut self.patterns {
             if let Some(notes) = pattern.tracks.get_mut(track as usize) {
                 notes.count = 0;
             }
+            pattern.pitched &= !bit;
         }
     }
 }

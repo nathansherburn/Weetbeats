@@ -82,6 +82,10 @@ the note is. Press **♪** on a track and it becomes an instrument instead — t
 pitched across the keyboard, faster for higher notes and slower for lower ones, and a note
 **stops when it ends**. Press it again and it is a drum again.
 
+That switch belongs to the **pattern**, not to the track: it is a decision about the part, not
+about the sound. The same bass can hold a rhythm down as a row of boxes in one pattern and
+play a melody in the next, and turning the roll off in one says nothing about any other.
+
 That one switch also changes what its row looks like. An instrument's row is a **small piano
 roll** of its own notes rather than a line of boxes, because boxes cannot say which pitch or
 how long. Click the small one to open the roll proper, and press **♪** to go back to boxes.

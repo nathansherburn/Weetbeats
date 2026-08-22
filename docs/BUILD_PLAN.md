@@ -173,7 +173,11 @@ Sits in the pattern grid as a track row, same as a sample. In step mode it plays
 
 **Decided**
 
-It is one flag on a track: an instrument, or a one-shot. A one-shot is a drum — hit it and the whole sample plays, and the note's length means nothing. An instrument is a sound played across the keyboard — the note's pitch reads the sample faster or slower, and **the sound stops when the note ends**, with the same few milliseconds of fade the voice pool already used for stealing.
+It is one flag: an instrument, or a one-shot. **On the pattern rather than on the track**,
+because it is a decision about the part and not about the sound — the same bass can hold a
+rhythm down as a row of boxes in one pattern and play a melody in the next. A project written
+when it lived on the track has it applied to every pattern on the way in, so it sounds the way
+it did. A one-shot is a drum — hit it and the whole sample plays, and the note's length means nothing. An instrument is a sound played across the keyboard — the note's pitch reads the sample faster or slower, and **the sound stops when the note ends**, with the same few milliseconds of fade the voice pool already used for stealing.
 
 That last part is the only new thing on the audio thread: a voice carries how many frames of note it has left, and counting to zero is the note off. A one-shot's is infinity, so a drum hit is over when the sample is over and not before.
 

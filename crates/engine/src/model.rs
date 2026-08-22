@@ -73,16 +73,16 @@ pub struct Track {
     pub gain: f32,
     pub muted: bool,
     pub soloed: bool,
-    /// A sampler instrument rather than a one-shot.
-    ///
-    /// A one-shot is a drum: hit it and the whole sample plays, however short the note is.
-    /// An instrument is a sound played across the keyboard: the note's pitch reads the
-    /// sample faster or slower, and the sound stops when the note ends. The piano roll is
-    /// the editor for one, and opening it is what turns this on.
-    ///
-    /// Defaulted rather than required, so projects written before instruments existed load.
-    #[serde(default)]
+    /// Left over from when being an instrument belonged to the track rather than to each
+    /// pattern. Only read on the way in, by [`Project::repair`], which marks every pattern
+    /// for a track that was pitched and then clears this — so an old project still sounds
+    /// the way it did. Never written by this version.
+    #[serde(default, skip_serializing_if = "not")]
     pub pitched: bool,
+}
+
+fn not(flag: &bool) -> bool {
+    !*flag
 }
 
 impl Track {
@@ -208,6 +208,15 @@ pub struct Pattern {
     /// front end picks from the pattern's id so a new pattern looks different from the last.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub colour: Option<u8>,
+    /// The tracks played as instruments *in this pattern*: pitched across the keyboard, with
+    /// each note stopping when it ends, and edited as a piano roll rather than a row of
+    /// boxes. Everything else is a one-shot here — hit it and the whole sample plays.
+    ///
+    /// Per pattern rather than per track, because it is a decision about the part, not about
+    /// the sound: the same bass can be a row of boxes holding down a rhythm in one pattern
+    /// and a melody in the next.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pitched: Vec<u16>,
     pub lanes: Vec<Lane>,
 }
 
@@ -218,8 +227,40 @@ impl Pattern {
             name,
             steps: DEFAULT_STEPS,
             colour: None,
+            pitched: Vec::new(),
             lanes: Vec::new(),
         }
+    }
+
+    /// True if this track is an instrument in this pattern rather than a one-shot.
+    pub fn is_pitched(&self, track: u16) -> bool {
+        self.pitched.contains(&track)
+    }
+
+    /// Make a track an instrument in this pattern, or a one-shot again. Returns what it is
+    /// now. Nothing is thrown away either way: the notes are the same notes, and turning it
+    /// back on shows them again.
+    pub fn set_pitched(&mut self, track: u16, pitched: bool) -> bool {
+        let at = self.pitched.iter().position(|&t| t == track);
+        match (pitched, at) {
+            (true, None) => {
+                self.pitched.push(track);
+                self.pitched.sort_unstable();
+            }
+            (false, Some(at)) => {
+                self.pitched.remove(at);
+            }
+            _ => {}
+        }
+        pitched
+    }
+
+    /// The instruments, as one bit per track, which is how the audio thread holds them.
+    pub fn pitched_mask(&self) -> u32 {
+        self.pitched
+            .iter()
+            .filter(|&&t| (t as usize) < MAX_TRACKS)
+            .fold(0u32, |mask, &t| mask | (1 << t))
     }
 
     pub fn lane(&self, track: u16) -> Option<&Lane> {
@@ -280,6 +321,7 @@ impl Pattern {
     /// Forget a track that has been deleted from the project.
     pub fn forget_track(&mut self, track: u16) {
         self.lanes.retain(|l| l.track != track);
+        self.pitched.retain(|&t| t != track);
     }
 }
 
@@ -481,6 +523,25 @@ impl Project {
 
     /// Take out the placement of a pattern that starts here.
     pub fn unplace(&mut self, pattern: u16, step: u32) -> bool {
+        // Being an instrument used to belong to the track, so it was the same in every
+        // pattern. Carry that into every pattern, which is what it sounded like, and clear
+        // the old flag so it is never read again.
+        let was_pitched: Vec<u16> = self
+            .tracks
+            .iter()
+            .filter(|track| track.pitched)
+            .map(|track| track.id)
+            .collect();
+        if !was_pitched.is_empty() {
+            for pattern in &mut self.patterns {
+                for &track in &was_pitched {
+                    pattern.set_pitched(track, true);
+                }
+            }
+            for track in &mut self.tracks {
+                track.pitched = false;
+            }
+        }
         let before = self.song.len();
         self.song
             .retain(|one| !(one.pattern == pattern && one.step == step));
@@ -520,6 +581,25 @@ impl Project {
     pub fn clear_bar(&mut self, bar: u32) -> usize {
         let from = bar * STEPS_PER_BAR;
         let to = from + STEPS_PER_BAR;
+        // Being an instrument used to belong to the track, so it was the same in every
+        // pattern. Carry that into every pattern, which is what it sounded like, and clear
+        // the old flag so it is never read again.
+        let was_pitched: Vec<u16> = self
+            .tracks
+            .iter()
+            .filter(|track| track.pitched)
+            .map(|track| track.id)
+            .collect();
+        if !was_pitched.is_empty() {
+            for pattern in &mut self.patterns {
+                for &track in &was_pitched {
+                    pattern.set_pitched(track, true);
+                }
+            }
+            for track in &mut self.tracks {
+                track.pitched = false;
+            }
+        }
         let before = self.song.len();
         self.song.retain(|p| p.step < from || p.step >= to);
         before - self.song.len()
@@ -559,6 +639,25 @@ impl Project {
             .iter()
             .map(|pattern| (pattern.id, pattern.steps.max(1)))
             .collect();
+        // Being an instrument used to belong to the track, so it was the same in every
+        // pattern. Carry that into every pattern, which is what it sounded like, and clear
+        // the old flag so it is never read again.
+        let was_pitched: Vec<u16> = self
+            .tracks
+            .iter()
+            .filter(|track| track.pitched)
+            .map(|track| track.id)
+            .collect();
+        if !was_pitched.is_empty() {
+            for pattern in &mut self.patterns {
+                for &track in &was_pitched {
+                    pattern.set_pitched(track, true);
+                }
+            }
+            for track in &mut self.tracks {
+                track.pitched = false;
+            }
+        }
         let before = self.song.len();
         // A placement of a pattern that is not there any more can only confuse things.
         self.song
@@ -969,6 +1068,46 @@ mod tests {
         // The last pattern stays put, whatever anyone asks.
         assert!(!project.remove_pattern(0));
         assert_eq!(project.patterns.len(), 1);
+    }
+
+    /// Being an instrument is the pattern's business, so two patterns can disagree about the
+    /// same track.
+    #[test]
+    fn a_track_can_be_an_instrument_in_one_pattern_and_a_drum_in_another() {
+        let mut project = kit();
+        let second = project.add_pattern().unwrap();
+        assert!(project.pattern_mut(second).unwrap().set_pitched(0, true));
+        assert!(project.pattern(second).unwrap().is_pitched(0));
+        assert!(!project.pattern(0).unwrap().is_pitched(0));
+        assert_eq!(project.pattern(second).unwrap().pitched_mask(), 1);
+        assert_eq!(project.pattern(0).unwrap().pitched_mask(), 0);
+
+        // A copy of a pattern carries it, because it is part of the part.
+        let copy = project.duplicate_pattern(second).unwrap();
+        assert!(project.pattern(copy).unwrap().is_pitched(0));
+
+        // And deleting the track takes it out of every pattern.
+        project.remove_track(0);
+        assert!(!project.pattern(second).unwrap().is_pitched(0));
+    }
+
+    /// It used to belong to the track, which meant every pattern. An old project has to sound
+    /// the way it did, so opening one marks every pattern for a track that was pitched.
+    #[test]
+    fn an_old_project_keeps_its_instruments() {
+        let mut project = kit();
+        project.add_pattern().unwrap();
+        project.track_mut(1).unwrap().pitched = true;
+
+        project.repair();
+        for pattern in &project.patterns {
+            assert!(pattern.is_pitched(1), "pattern {} lost it", pattern.id);
+            assert!(!pattern.is_pitched(0));
+        }
+        assert!(
+            !project.track(1).unwrap().pitched,
+            "the old flag is still set, so it would be read again"
+        );
     }
 
     #[test]

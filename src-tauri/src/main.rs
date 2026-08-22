@@ -47,7 +47,7 @@ fn main() {
             commands::set_track_muted,
             commands::set_track_soloed,
             commands::audition,
-            commands::set_track_pitched,
+            commands::set_pattern_pitched,
             commands::set_note,
             commands::clear_note,
             commands::move_note,

@@ -56,9 +56,15 @@ pub enum Command {
         track: u16,
         soloed: bool,
     },
-    /// True for a sampler instrument, false for a one-shot. An instrument's notes are
-    /// pitched and stop when they end; a one-shot rings out however short the note is.
-    SetTrackPitched {
+    /// True for a sampler instrument in this pattern, false for a one-shot. An instrument's
+    /// notes are pitched and stop when they end; a one-shot rings out however short the note
+    /// is, and only its notes at the sampler's own pitch sound at all, because a row of boxes
+    /// cannot show any others.
+    ///
+    /// Per pattern: the same sound can hold down a rhythm in one and play a melody in the
+    /// next.
+    SetPatternPitched {
+        pattern: u16,
         track: u16,
         pitched: bool,
     },

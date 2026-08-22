@@ -483,9 +483,12 @@ try {
     await gridPixel(9, 0));
   await page.locator("#trackHeaders .track").first().locator(".tick.keys-on").click();
   await page.waitForFunction(() =>
-    window.__weetbeats_calls.some((c) => c.name === "set_track_pitched"));
+    window.__weetbeats_calls.some((c) => c.name === "set_pattern_pitched"));
   check("the note button makes the track an instrument",
-    (await lastCall("set_track_pitched")).args.pitched === true);
+    (await lastCall("set_pattern_pitched")).args.pitched === true);
+  check("in this pattern, not everywhere",
+    (await lastCall("set_pattern_pitched")).args.pattern === 0,
+    JSON.stringify((await lastCall("set_pattern_pitched")).args));
   check("and its row becomes a piano roll instead of boxes",
     (await settledGrid(9, 0, MINI_ROLL)) === MINI_ROLL, await gridPixel(9, 0));
   check("only that row: the others still have their boxes",
@@ -691,17 +694,40 @@ try {
   const kept = (await rollLane()).length;
   await page.locator("#trackHeaders .track").first().locator(".tick.keys-on").click();
   await page.waitForFunction(() =>
-    window.__weetbeats_calls.some((c) => c.name === "set_track_pitched"));
+    window.__weetbeats_calls.some((c) => c.name === "set_pattern_pitched"));
   check("the note button puts the boxes back",
-    (await lastCall("set_track_pitched")).args.pitched === false);
+    (await lastCall("set_pattern_pitched")).args.pitched === false);
   check("and the row is boxes again",
     (await settledGrid(9, 0, EMPTY_BOX)) === EMPTY_BOX, await gridPixel(9, 0));
   check("switching views keeps every note", (await rollLane()).length === kept,
     `${(await rollLane()).length} vs ${kept}`);
   await page.locator("#trackHeaders .track").first().locator(".tick.keys-on").click();
   await page.waitForFunction(() =>
-    window.__weetbeats_calls.filter((c) => c.name === "set_track_pitched").length === 2);
+    window.__weetbeats_calls.filter((c) => c.name === "set_pattern_pitched").length === 2);
   check("and switching back keeps them too", (await rollLane()).length === kept);
+
+  // --- and it is this pattern's setting, not the track's
+  await page.locator("#addPattern").click();
+  await page.waitForFunction(() => document.querySelectorAll("#patternList .prow").length === 2);
+  await page.waitForSelector("#editor:visible");
+  check("a new pattern's rows are boxes, whatever the last one was",
+    !(await page.locator("#trackHeaders .track").first()
+      .locator(".tick.keys-on").evaluate((n) => n.classList.contains("on"))));
+  check("and its row is drawn as boxes",
+    (await settledGrid(9, 0, EMPTY_BOX)) === EMPTY_BOX, await gridPixel(9, 0));
+
+  // Back to the first one, which is still a piano roll.
+  await rows.first().click();
+  await page.waitForFunction(() =>
+    document.querySelector("#trackHeaders .track .tick.keys-on").classList.contains("on"));
+  check("the pattern that had a roll still has one",
+    (await settledGrid(9, 0, MINI_ROLL)) === MINI_ROLL, await gridPixel(9, 0));
+  // The spare pattern goes again; pattern one stays open, which is where the checks below
+  // expect to be.
+  await rows.nth(1).hover();
+  await rows.nth(1).locator(".tick.kill").click();
+  await page.waitForFunction(() => document.querySelectorAll("#patternList .prow").length === 1);
+  check("and the pattern being edited is still open", await page.locator("#editor").isVisible());
 
   // --- the two editors are two views of the same notes
   const miniAgain = await page.locator("#grid").boundingBox();
