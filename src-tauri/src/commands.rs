@@ -9,13 +9,13 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use weetbeats_engine::folder;
 use weetbeats_engine::sample::{is_audio_file, AUDIO_EXTENSIONS};
 use weetbeats_engine::{
-    Command, EngineNote, Note, Pattern, Project, SampleRef, Track, DEFAULT_PITCH,
+    Command, EngineNote, Note, Pattern, Placement, Project, SampleRef, Track, DEFAULT_PITCH,
 };
 
 use crate::state::AppState;
@@ -67,7 +67,33 @@ pub struct Added {
 #[serde(rename_all = "camelCase")]
 pub struct Arrangement {
     pub patterns: Vec<Pattern>,
-    pub song: Vec<Vec<u16>>,
+    pub song: Vec<Placement>,
+}
+
+/// What came of putting a note down: whether it went in — a pattern holds only so many —
+/// and how long the pattern is now, since a note past the end makes it longer.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotePut {
+    pub fits: bool,
+    pub steps: u32,
+}
+
+impl NotePut {
+    fn nowhere() -> Self {
+        NotePut {
+            fits: false,
+            steps: 0,
+        }
+    }
+}
+
+/// Where a note is: the two things that identify one inside a lane.
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub struct At {
+    pub step: u32,
+    pub pitch: u8,
 }
 
 /// Polled every frame while playing. Kept small on purpose.
@@ -77,9 +103,8 @@ pub struct PlayheadPayload {
     pub playing: bool,
     pub step: u32,
     pub progress: f32,
-    /// Which patterns are sounding, one bit each, and which bar of the song is playing.
+    /// Which patterns are sounding, one bit each.
     pub patterns: u32,
-    pub bar: u32,
     pub voices: u32,
     pub peak: f32,
     pub stream_errors: u32,
@@ -217,6 +242,7 @@ pub async fn add_dropped(
 /// Nothing here is silent. A drop that quietly does nothing is worse than an error,
 /// because there is no way to tell it apart from the app being broken.
 fn add_all(state: &AppState, paths: Vec<PathBuf>) -> Added {
+    state.remember("tracks");
     let mut added = Added::default();
     if let Some(folder) = paths.first().and_then(|p| p.parent()) {
         state.remember_folder(folder);
@@ -313,6 +339,7 @@ fn add_track_now(state: &AppState, source: PathBuf) -> Result<NewTrack, String> 
 /// Delete a track, and the sample with it if nothing else was using it.
 #[tauri::command]
 pub fn remove_track(id: u16, state: State<'_, Arc<AppState>>) {
+    state.remember("tracks");
     let orphan = {
         let mut project = state.project.lock().unwrap();
         let removed = project.remove_track(id);
@@ -331,6 +358,7 @@ pub fn remove_track(id: u16, state: State<'_, Arc<AppState>>) {
 
 #[tauri::command]
 pub fn set_track_gain(id: u16, gain: f32, state: State<'_, Arc<AppState>>) {
+    state.remember("gain");
     let mut project = state.project.lock().unwrap();
     if let Some(track) = project.track_mut(id) {
         track.gain = gain.clamp(0.0, 1.5);
@@ -344,6 +372,7 @@ pub fn set_track_gain(id: u16, gain: f32, state: State<'_, Arc<AppState>>) {
 
 #[tauri::command]
 pub fn set_track_muted(id: u16, muted: bool, state: State<'_, Arc<AppState>>) {
+    state.remember("mute");
     let mut project = state.project.lock().unwrap();
     if let Some(track) = project.track_mut(id) {
         track.muted = muted;
@@ -354,6 +383,7 @@ pub fn set_track_muted(id: u16, muted: bool, state: State<'_, Arc<AppState>>) {
 
 #[tauri::command]
 pub fn set_track_soloed(id: u16, soloed: bool, state: State<'_, Arc<AppState>>) {
+    state.remember("solo");
     let mut project = state.project.lock().unwrap();
     if let Some(track) = project.track_mut(id) {
         track.soloed = soloed;
@@ -362,14 +392,39 @@ pub fn set_track_soloed(id: u16, soloed: bool, state: State<'_, Arc<AppState>>) 
     state.touch();
 }
 
-/// Hear a track without waiting for its next step.
+/// Hear a track without waiting for its next step, at whatever pitch is asked for. Clicking
+/// a row sends the sampler's own pitch; clicking a key in the piano roll sends that key's.
 #[tauri::command]
-pub fn audition(id: u16, state: State<'_, Arc<AppState>>) {
+pub fn audition(id: u16, pitch: Option<u8>, state: State<'_, Arc<AppState>>) {
     state.send(Command::Audition {
         track: id,
-        pitch: DEFAULT_PITCH,
+        pitch: pitch.unwrap_or(DEFAULT_PITCH),
         velocity: 110,
     });
+}
+
+/// A sampler instrument in this pattern rather than a one-shot: pitched, and its notes stop
+/// when they end. Per pattern, so the same sound can be a rhythm in one and a melody in the
+/// next.
+#[tauri::command]
+pub fn set_pattern_pitched(
+    pattern: u16,
+    track: u16,
+    pitched: bool,
+    state: State<'_, Arc<AppState>>,
+) {
+    state.remember("pitched");
+    let mut project = state.project.lock().unwrap();
+    if let Some(target) = project.pattern_mut(pattern) {
+        target.set_pitched(track, pitched);
+        state.send(Command::SetPatternPitched {
+            pattern,
+            track,
+            pitched,
+        });
+    }
+    drop(project);
+    state.touch();
 }
 
 // --- patterns ---------------------------------------------------------------
@@ -383,6 +438,7 @@ pub fn set_step(
     on: bool,
     state: State<'_, Arc<AppState>>,
 ) -> bool {
+    state.remember("boxes");
     let mut project = state.project.lock().unwrap();
     let Some(target) = project.pattern_mut(pattern) else {
         return false;
@@ -419,8 +475,138 @@ pub fn set_step(
     now_on
 }
 
+/// Add a note, or replace the one already at that step and pitch. What the piano roll draws
+/// with, and how it moves velocity and length about afterwards.
+///
+/// A note drawn past the end of the pattern makes the pattern longer, so the answer says how
+/// long the pattern is now as well as whether the note went in.
+#[tauri::command]
+pub fn set_note(
+    pattern: u16,
+    track: u16,
+    at: At,
+    velocity: u8,
+    length: u32,
+    state: State<'_, Arc<AppState>>,
+) -> NotePut {
+    state.remember("notes");
+    let mut project = state.project.lock().unwrap();
+    let Some(target) = project.pattern_mut(pattern) else {
+        return NotePut::nowhere();
+    };
+    // A note past the end grows the pattern rather than being refused: drawing off the
+    // right hand side of the roll is how a bar becomes two.
+    let was = target.steps;
+    let wanted = at.step.saturating_add(length.max(1));
+    if wanted > was {
+        target.set_steps(wanted);
+    }
+    let grew = target.steps != was;
+    if at.step >= target.steps {
+        return NotePut::nowhere();
+    }
+    let note = Note {
+        step: at.step,
+        pitch: at.pitch,
+        velocity: velocity.clamp(1, 127),
+        // A note cannot run off the end of its pattern.
+        length: length.clamp(1, target.steps - at.step),
+    };
+    let fits = target.set_note(track, note);
+    let steps = target.steps;
+    if fits {
+        state.send(Command::SetNote {
+            pattern,
+            track,
+            note: EngineNote {
+                step: note.step as u16,
+                pitch: note.pitch,
+                velocity: note.velocity,
+                length: note.length as u16,
+            },
+        });
+    }
+    drop(project);
+    if grew {
+        state.send(Command::SetPatternSteps { pattern, steps });
+    }
+    state.touch();
+    NotePut { fits, steps }
+}
+
+/// Take a note out.
+#[tauri::command]
+pub fn clear_note(pattern: u16, track: u16, at: At, state: State<'_, Arc<AppState>>) {
+    state.remember("notes");
+    let mut project = state.project.lock().unwrap();
+    if let Some(target) = project.pattern_mut(pattern) {
+        target.clear_note(track, at.step, at.pitch);
+    }
+    state.send(Command::ClearNote {
+        pattern,
+        track,
+        step: at.step as u16,
+        pitch: at.pitch,
+    });
+    drop(project);
+    state.touch();
+}
+
+/// Move a note, keeping how long and how loud it is. One trip rather than two, so a dragged
+/// note is never gone and back again.
+#[tauri::command]
+pub fn move_note(
+    pattern: u16,
+    track: u16,
+    at: At,
+    to: At,
+    state: State<'_, Arc<AppState>>,
+) -> bool {
+    state.remember("notes");
+    let mut project = state.project.lock().unwrap();
+    let Some(target) = project.pattern_mut(pattern) else {
+        return false;
+    };
+    let Some(note) = target.lane(track).and_then(|l| l.note(at.step, at.pitch)) else {
+        return false;
+    };
+    if to.step >= target.steps {
+        return false;
+    }
+    let moved = Note {
+        step: to.step,
+        pitch: to.pitch,
+        length: note.length.clamp(1, target.steps - to.step),
+        ..note
+    };
+    target.clear_note(track, at.step, at.pitch);
+    let fits = target.set_note(track, moved);
+    state.send(Command::ClearNote {
+        pattern,
+        track,
+        step: at.step as u16,
+        pitch: at.pitch,
+    });
+    if fits {
+        state.send(Command::SetNote {
+            pattern,
+            track,
+            note: EngineNote {
+                step: moved.step as u16,
+                pitch: moved.pitch,
+                velocity: moved.velocity,
+                length: moved.length as u16,
+            },
+        });
+    }
+    drop(project);
+    state.touch();
+    fits
+}
+
 #[tauri::command]
 pub fn add_pattern(state: State<'_, Arc<AppState>>) -> Result<Arrangement, String> {
+    state.remember("patterns");
     let id = state
         .project
         .lock()
@@ -434,6 +620,7 @@ pub fn add_pattern(state: State<'_, Arc<AppState>>) -> Result<Arrangement, Strin
 
 #[tauri::command]
 pub fn duplicate_pattern(id: u16, state: State<'_, Arc<AppState>>) -> Result<Arrangement, String> {
+    state.remember("patterns");
     let copy = state
         .project
         .lock()
@@ -447,9 +634,19 @@ pub fn duplicate_pattern(id: u16, state: State<'_, Arc<AppState>>) -> Result<Arr
 
 #[tauri::command]
 pub fn remove_pattern(id: u16, state: State<'_, Arc<AppState>>) -> Result<Arrangement, String> {
-    let removed = state.project.lock().unwrap().remove_pattern(id);
-    if !removed {
-        return Err("a song needs at least one pattern".into());
+    state.remember("patterns");
+    {
+        let mut project = state.project.lock().unwrap();
+        if project.pattern(id).is_none() {
+            // Nothing to delete means the front end is looking at something we threw away.
+            // Say so rather than blaming the number of patterns.
+            return Err(format!(
+                "there is no pattern {id} to delete — reopen the project"
+            ));
+        }
+        if !project.remove_pattern(id) {
+            return Err("a song needs at least one pattern".into());
+        }
     }
     state.send(Command::ClearPattern { pattern: id });
     state.push_song();
@@ -460,6 +657,7 @@ pub fn remove_pattern(id: u16, state: State<'_, Arc<AppState>>) -> Result<Arrang
 /// Rename a pattern. Returns the name it ended up with: blank is not a name.
 #[tauri::command]
 pub fn rename_pattern(id: u16, name: String, state: State<'_, Arc<AppState>>) -> String {
+    state.remember("name");
     let mut project = state.project.lock().unwrap();
     let fallback = project.next_pattern_name();
     let Some(pattern) = project.pattern_mut(id) else {
@@ -477,22 +675,38 @@ pub fn rename_pattern(id: u16, name: String, state: State<'_, Arc<AppState>>) ->
     named
 }
 
-/// Change how many boxes a pattern has. Returns the length it ended up with, and drops any
-/// notes that no longer fit.
+/// Give a pattern a colour, so its blocks stand out from the others in the song. `None`
+/// puts it back to the one worked out from its place in the list.
 #[tauri::command]
-pub fn set_pattern_steps(id: u16, steps: u32, state: State<'_, Arc<AppState>>) -> u32 {
+pub fn set_pattern_colour(id: u16, colour: Option<u8>, state: State<'_, Arc<AppState>>) -> bool {
+    state.remember("colour");
     let mut project = state.project.lock().unwrap();
     let Some(pattern) = project.pattern_mut(id) else {
-        return 0;
+        return false;
     };
-    let steps = pattern.set_steps(steps);
-    state.send(Command::SetPatternSteps { pattern: id, steps });
+    pattern.colour = colour;
     drop(project);
+    state.touch();
+    true
+}
+
+/// Change how many boxes a pattern has. Returns the length it ended up with and the
+/// arrangement, and drops any notes that no longer fit.
+#[tauri::command]
+pub fn set_pattern_steps(
+    id: u16,
+    steps: u32,
+    state: State<'_, Arc<AppState>>,
+) -> (u32, Arrangement) {
+    state.remember("length");
+    let steps = state.project.lock().unwrap().set_pattern_steps(id, steps);
+    state.send(Command::SetPatternSteps { pattern: id, steps });
     // The trimmed notes have to go from the engine too, and there is no telling which ones
-    // they were, so the pattern goes across again.
+    // they were, so the whole pattern goes across again. The song is left alone: a block is
+    // as long as it was put down, whatever its pattern does afterwards.
     state.push_pattern(id);
     state.touch();
-    steps
+    (steps, arrangement(&state))
 }
 
 /// Open a pattern in the editor: it is what plays, on a loop, until it is closed.
@@ -510,43 +724,141 @@ pub fn close_pattern(state: State<'_, Arc<AppState>>) {
 
 // --- the song ---------------------------------------------------------------
 
-/// Put a pattern in a bar of the song, or take it out. Returns whether it is in there now,
-/// which the front end checks against what it drew.
+/// Put a block of a pattern in the song, or take one out. Returns the song as it now is, so
+/// the front end draws what is there rather than what it hoped for.
 ///
-/// One call a bar, so painting across the song is the same shape of thing as painting across
-/// a pattern: press, drag, and every bar the pointer crosses gets one of these.
+/// `step` is a step of the song, wherever the snap put it, and `length` is how much song the
+/// block fills — zero for one play-through of the pattern. Taking one out wants the step it
+/// starts at, which is what the front end hit tested to find it.
 #[tauri::command]
-pub fn set_song_bar(bar: u32, pattern: u16, on: bool, state: State<'_, Arc<AppState>>) -> bool {
-    let now_on = state
-        .project
-        .lock()
-        .unwrap()
-        .set_bar_pattern(bar as usize, pattern, on);
-    state.push_song_bar(bar as usize);
+pub fn place_pattern(
+    pattern: u16,
+    step: u32,
+    length: u32,
+    on: bool,
+    state: State<'_, Arc<AppState>>,
+) -> Vec<Placement> {
+    state.remember("song");
+    {
+        let mut project = state.project.lock().unwrap();
+        if on {
+            project.place(pattern, step, length);
+        } else {
+            project.unplace(pattern, step);
+        }
+    }
+    state.push_placement(pattern, step, on);
     state.touch();
-    now_on
+    state.project.lock().unwrap().song.clone()
 }
 
-/// Take a whole bar out of the song, so everything after it moves up one.
+/// Slide a block along the song, keeping how long it is. `from` is anywhere along it.
 #[tauri::command]
-pub fn remove_song_bar(bar: u32, state: State<'_, Arc<AppState>>) -> Vec<Vec<u16>> {
-    state.project.lock().unwrap().remove_bar(bar as usize);
-    // Everything shifted, so the whole song goes across rather than one bar.
+pub fn move_placement(
+    pattern: u16,
+    from: u32,
+    to: u32,
+    state: State<'_, Arc<AppState>>,
+) -> Vec<Placement> {
+    state.remember("song");
+    let (was, moved) = {
+        let mut project = state.project.lock().unwrap();
+        let was = project.placement_at(pattern, from);
+        (was, project.move_placement(pattern, from, to))
+    };
+    if let (true, Some(was)) = (moved, was) {
+        state.push_placement(pattern, was.step, false);
+        state.push_placement(pattern, to, true);
+        state.touch();
+    }
+    state.project.lock().unwrap().song.clone()
+}
+
+/// Drag a block's edge: how much song it fills, one step at the least. A block longer than
+/// its pattern repeats it.
+#[tauri::command]
+pub fn resize_placement(
+    pattern: u16,
+    step: u32,
+    length: u32,
+    state: State<'_, Arc<AppState>>,
+) -> Vec<Placement> {
+    state.remember("song");
+    let placed = {
+        let mut project = state.project.lock().unwrap();
+        project
+            .placement_at(pattern, step)
+            .filter(|_| project.resize_placement(pattern, step, length))
+    };
+    if let Some(placed) = placed {
+        state.push_placement(pattern, placed.step, true);
+        state.touch();
+    }
+    state.project.lock().unwrap().song.clone()
+}
+
+/// Everything that starts in a bar, gone. Returns the song as it now is.
+#[tauri::command]
+pub fn clear_song_bar(bar: u32, state: State<'_, Arc<AppState>>) -> Vec<Placement> {
+    state.remember("song");
+    state.project.lock().unwrap().clear_bar(bar);
     state.push_song();
     state.touch();
     state.project.lock().unwrap().song.clone()
 }
 
-/// Drag the scrubber: play the song from this bar.
+/// Drag the scrubber: play the song from this step.
 #[tauri::command]
-pub fn seek_song(bar: u32, state: State<'_, Arc<AppState>>) {
-    state.send(Command::SeekSong(bar.min(u16::MAX as u32) as u16));
+pub fn seek_song(step: u32, state: State<'_, Arc<AppState>>) {
+    state.send(Command::SeekSong(step));
+}
+
+// --- undo and redo ----------------------------------------------------------
+
+/// Step back, and hand the whole project over so the window can draw what is there now.
+///
+/// Whole projects rather than a description of what changed: the front end already knows how
+/// to draw a project it has never seen — that is what opening one is — so undo is that, with
+/// the view left where it was.
+#[tauri::command]
+pub fn undo(state: State<'_, Arc<AppState>>) -> Option<Startup> {
+    stepped(&state, state.undo())
+}
+
+#[tauri::command]
+pub fn redo(state: State<'_, Arc<AppState>>) -> Option<Startup> {
+    stepped(&state, state.redo())
+}
+
+/// Undo from the menu bar. A menu item has nothing to return to, so this tells the front
+/// end what the project is now by emitting the same event opening a project does.
+pub fn stepped_by_menu(app: &AppHandle, back: bool) {
+    let state = app_state(app);
+    let moved = if back { state.undo() } else { state.redo() };
+    if let Some(now) = stepped(&state, moved) {
+        let _ = app.emit(STEPPED_EVENT, now);
+    }
+}
+
+fn stepped(state: &AppState, moved: bool) -> Option<Startup> {
+    if !moved {
+        return None;
+    }
+    state.push_project();
+    state.touch();
+    // A sample that could not be found is the one thing a step back can get wrong — the
+    // stash it would have come from is thrown away when a project is opened — so if the
+    // engine had anything to complain about, it is said out loud rather than left as a
+    // silent track.
+    let message = state.complaint.lock().unwrap().take();
+    Some(startup_payload(state, message))
 }
 
 // --- transport --------------------------------------------------------------
 
 #[tauri::command]
 pub fn set_bpm(bpm: f32, state: State<'_, Arc<AppState>>) -> f32 {
+    state.remember("tempo");
     let mut project = state.project.lock().unwrap();
     project.bpm = bpm.clamp(40.0, 240.0);
     state.send(Command::SetBpm(project.bpm));
@@ -577,7 +889,6 @@ pub fn playhead(state: State<'_, Arc<AppState>>) -> PlayheadPayload {
         step: playhead.step,
         progress: playhead.progress,
         patterns: playhead.patterns,
-        bar: playhead.bar,
         voices: playhead.active_voices,
         peak: playhead.peak,
         stream_errors: state.stream_errors(),
@@ -595,6 +906,8 @@ pub fn playhead(state: State<'_, Arc<AppState>>) -> PlayheadPayload {
 pub const PROJECT_EVENT: &str = "project";
 /// The project has been written out, and here is what it is called.
 pub const SAVED_EVENT: &str = "saved";
+/// A step back or forward. Like `PROJECT_EVENT`, except that the window stays where it is.
+pub const STEPPED_EVENT: &str = "stepped";
 /// Something went wrong, in words fit for the status line.
 pub const TROUBLE_EVENT: &str = "trouble";
 
@@ -655,6 +968,21 @@ pub fn save_as(app: &AppHandle) {
     let _ = app.emit(PROJECT_EVENT, startup_payload(&state, None));
 }
 
+/// Rename the project: the folder on disk gets the new name, since the folder's name *is*
+/// the project's. Returns the name it ended up with.
+#[tauri::command]
+pub fn rename_project(name: String, state: State<'_, Arc<AppState>>) -> Result<String, String> {
+    let from = state.dir();
+    if name.trim() == state.name() {
+        return Ok(state.name());
+    }
+    // Written out where it is before it moves, so a rename cannot lose the last edit.
+    state.save_now()?;
+    let to = folder::rename(&from, &name)?;
+    state.set_dir(to);
+    Ok(state.name())
+}
+
 /// Open another project folder. The one we are in is written out first, so nothing is lost
 /// by wandering off.
 pub fn open(app: &AppHandle) {
@@ -694,6 +1022,9 @@ pub fn open(app: &AppHandle) {
     state.send(Command::StopAll);
     *state.project.lock().unwrap() = opened;
     state.set_dir(target);
+    // The steps that got the last project here mean nothing in this one, and the stash
+    // they could have reached into is thrown away with them.
+    state.forget_history();
     state.tidy_samples();
     state.push_project();
     let message = state.complaint.lock().unwrap().take();

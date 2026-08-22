@@ -39,6 +39,9 @@ pub struct Trigger {
     /// Frames of source audio per frame of output: device rate and pitch rolled together.
     pub ratio: f64,
     pub gain: f32,
+    /// How long the note is held, in output frames. `f64::INFINITY` for a one-shot, which
+    /// is a drum: the sample rings out and the note's length means nothing.
+    pub frames: f64,
 }
 
 /// One playing sample.
@@ -51,6 +54,8 @@ struct Voice {
     track: u16,
     /// Bigger is newer. Used to pick who gets stolen.
     age: u64,
+    /// Frames of the note still to go. Counting to zero is the note off.
+    frames_left: f64,
     /// Current envelope level, 0.0 to 1.0.
     env: f32,
     stage: Stage,
@@ -68,6 +73,7 @@ impl Voice {
             gain: 1.0,
             track: PREVIEW_TRACK,
             age: 0,
+            frames_left: f64::INFINITY,
             env: 0.0,
             stage: Stage::Idle,
             pending: None,
@@ -87,6 +93,7 @@ impl Voice {
         self.gain = trigger.gain;
         self.track = trigger.track;
         self.age = age;
+        self.frames_left = trigger.frames;
         self.env = 0.0;
         self.stage = Stage::Attack;
     }
@@ -219,6 +226,13 @@ impl VoicePool {
             let end = sample.frames as f64;
 
             for frame in 0..frames {
+                // The note off. A one-shot never gets here: its length is infinite, because
+                // a drum hit is over when the sample is over and not before.
+                if voice.frames_left <= 0.0 && voice.stage != Stage::Releasing {
+                    voice.stage = Stage::Releasing;
+                }
+                voice.frames_left -= 1.0;
+
                 match voice.stage {
                     Stage::Attack => {
                         voice.env += self.attack_inc;

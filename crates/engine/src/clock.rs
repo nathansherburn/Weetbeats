@@ -82,7 +82,13 @@ impl StepClock {
 
     /// Back to the top of the pattern, with step 0 due to fire immediately.
     pub fn rewind(&mut self) {
-        self.step = 0;
+        self.jump_to(0);
+    }
+
+    /// Straight to a step, with that step due to fire immediately. Anything past the end
+    /// lands on the last step rather than wrapping round to somewhere unexpected.
+    pub fn jump_to(&mut self, step: u32) {
+        self.step = step.min(self.steps.saturating_sub(1));
         self.accum = 0.0;
         self.pending = true;
         self.wrapped = false;

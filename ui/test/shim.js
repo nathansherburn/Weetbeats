@@ -1,29 +1,29 @@
 /*
  * Stands in for the Rust side so the front end can be driven in a browser.
  * Mirrors what each Tauri command actually does, including what it refuses and the casing
- * it answers in. Where the real thing has a rule — one slot is one pattern, a shortened
- * pattern loses the notes off its end — the rule is here too, so a test that passes here
- * is testing the same behaviour.
+ * it answers in. Where the real thing has a rule — a block is as long as it was drawn, a
+ * shortened pattern loses the notes off its end, a note past the end lengthens the pattern
+ * — the rule is here too, so a test that passes here is testing the same behaviour.
  */
 window.__weetbeats_calls = [];
 
 const MAX_PATTERNS = 32;
 const MAX_TRACKS = 32;
-const MAX_STEPS = 64;
+const MAX_STEPS = 256;
 const MAX_SONG_BARS = 256;
+const MAX_NOTES = 256;
 
 const fake = {
   bpm: 120,
   masterGain: 0.9,
   playing: false,
   step: 0,
-  bar: 0,
   active: 0,
   songMode: false,
   nextTrackId: 0,
   tracks: new Map(),
-  patterns: [{ id: 0, name: "Pattern 1", steps: 16, lanes: [] }],
-  // One entry a bar: the patterns playing in it.
+  patterns: [{ id: 0, name: "Pattern 1", steps: 16, pitched: [], lanes: [] }],
+  // { step, pattern, length }: what plays where, and for how long.
   song: [],
   name: "Untitled",
   folder: "/tmp/Untitled.beat",
@@ -62,6 +62,10 @@ function nextName() {
   }
 }
 
+function sortSong() {
+  fake.song.sort((a, b) => a.step - b.step || a.pattern - b.pattern);
+}
+
 function trim(p) {
   for (const l of p.lanes) {
     l.notes = l.notes.filter((n) => n.step < p.steps);
@@ -70,6 +74,12 @@ function trim(p) {
 }
 
 const arrangement = () => ({ patterns: fake.patterns, song: fake.song });
+
+/* The block of a pattern that covers a step, which is what the song view hit tests. */
+const covering = (id, step) =>
+  fake.song.find(
+    (one) => one.pattern === id && step >= one.step && step < one.step + Math.max(1, one.length),
+  ) ?? null;
 
 const startup = () => ({
   project: {
@@ -125,6 +135,7 @@ const handlers = {
     fake.tracks.delete(id);
     for (const p of fake.patterns) {
       p.lanes = p.lanes.filter((l) => l.track !== id);
+      p.pitched = (p.pitched ?? []).filter((t) => t !== id);
     }
     return null;
   },
@@ -141,11 +152,61 @@ const handlers = {
   set_track_gain: ({ id, gain }) => { fake.tracks.get(id).gain = gain; return null; },
   set_track_muted: ({ id, muted }) => { fake.tracks.get(id).muted = muted; return null; },
   set_track_soloed: ({ id, soloed }) => { fake.tracks.get(id).soloed = soloed; return null; },
+  // Which tracks are instruments belongs to the pattern, not to the track.
+  set_pattern_pitched: ({ pattern: id, track, pitched }) => {
+    const p = pattern(id);
+    if (!p) return null;
+    p.pitched = (p.pitched ?? []).filter((t) => t !== track);
+    if (pitched) p.pitched.push(track);
+    p.pitched.sort((a, b) => a - b);
+    return null;
+  },
+
+  // The piano roll's three commands. A note is identified by where it is.
+  set_note: ({ pattern: id, track, at, velocity, length }) => {
+    const p = pattern(id);
+    if (!p) return { fits: false, steps: 0 };
+    // A note past the end makes the pattern longer rather than being refused.
+    const wanted = at.step + Math.max(1, length);
+    if (wanted > p.steps) p.steps = Math.max(1, Math.min(MAX_STEPS, wanted));
+    if (at.step >= p.steps) return { fits: false, steps: 0 };
+    const l = lane(p, track);
+    const note = {
+      step: at.step,
+      pitch: at.pitch,
+      velocity: Math.max(1, Math.min(127, velocity)),
+      length: Math.max(1, Math.min(length, p.steps - at.step)),
+    };
+    const was = l.notes.findIndex((n) => n.step === at.step && n.pitch === at.pitch);
+    if (was >= 0) l.notes[was] = note;
+    else if (l.notes.length >= MAX_NOTES) return { fits: false, steps: p.steps };
+    else l.notes.push(note);
+    return { fits: true, steps: p.steps };
+  },
+  clear_note: ({ pattern: id, track, at }) => {
+    const p = pattern(id);
+    if (!p) return null;
+    const l = lane(p, track);
+    l.notes = l.notes.filter((n) => !(n.step === at.step && n.pitch === at.pitch));
+    p.lanes = p.lanes.filter((one) => one.notes.length);
+    return null;
+  },
+  move_note: ({ pattern: id, track, at, to }) => {
+    const p = pattern(id);
+    if (!p || to.step >= p.steps) return false;
+    const l = lane(p, track);
+    const found = l.notes.find((n) => n.step === at.step && n.pitch === at.pitch);
+    if (!found) return false;
+    found.step = to.step;
+    found.pitch = to.pitch;
+    found.length = Math.max(1, Math.min(found.length, p.steps - to.step));
+    return true;
+  },
 
   add_pattern: () => {
     const id = freeId(fake.patterns.map((p) => p.id));
     if (id === null) throw new Error("that is as many patterns as there is room for");
-    fake.patterns.push({ id, name: nextName(), steps: 16, lanes: [] });
+    fake.patterns.push({ id, name: nextName(), steps: 16, pitched: [], lanes: [] });
     return arrangement();
   },
   duplicate_pattern: ({ id }) => {
@@ -161,8 +222,7 @@ const handlers = {
   remove_pattern: ({ id }) => {
     if (fake.patterns.length <= 1) throw new Error("a song needs at least one pattern");
     fake.patterns = fake.patterns.filter((p) => p.id !== id);
-    fake.song = fake.song.map((bar) => bar.filter((one) => one !== id));
-    while (fake.song.length && fake.song[fake.song.length - 1].length === 0) fake.song.pop();
+    fake.song = fake.song.filter((one) => one.pattern !== id);
     return arrangement();
   },
   rename_pattern: ({ id, name }) => {
@@ -172,64 +232,190 @@ const handlers = {
     p.name = trimmed ? trimmed.slice(0, 40) : nextName();
     return p.name;
   },
+  set_pattern_colour: ({ id, colour }) => {
+    const p = pattern(id);
+    if (!p) return false;
+    p.colour = colour;
+    return true;
+  },
+  rename_project: ({ name }) => {
+    const wanted = name.trim().slice(0, 60);
+    if (!wanted) throw new Error("a project needs a name");
+    if (wanted.includes("/")) throw new Error(`${wanted} is not a name a folder can have`);
+    fake.name = wanted;
+    fake.folder = `/tmp/${wanted}.beat`;
+    return fake.name;
+  },
+  // Mirrors Project::set_pattern_steps: the notes off the end go, and the song is left
+  // alone — a block in it is as long as it was drawn, whatever its pattern does after.
   set_pattern_steps: ({ id, steps }) => {
     const p = pattern(id);
-    if (!p) return 0;
+    if (!p) return [0, arrangement()];
     p.steps = Math.max(1, Math.min(MAX_STEPS, steps));
     trim(p);
-    return p.steps;
+    return [p.steps, arrangement()];
   },
   open_pattern: ({ id }) => { fake.active = id; fake.songMode = false; return null; },
   close_pattern: () => { fake.songMode = true; return null; },
 
-  // Mirrors Project::set_bar_pattern: bars before it are filled in, and empty bars on the
-  // end are not part of the song.
-  set_song_bar: ({ bar, pattern: id, on }) => {
-    if (!pattern(id)) return false;
+  /*
+   * Mirrors Project::place and Project::unplace. A block starts where it is put, is as long
+   * as it is asked to be — zero meaning one play-through of the pattern — and anything of
+   * the same pattern it lands on makes way for it.
+   */
+  place_pattern: ({ pattern: id, step, length, on }) => {
+    const p = pattern(id);
+    if (!p) return fake.song;
     if (!on) {
-      if (bar < fake.song.length) {
-        fake.song[bar] = fake.song[bar].filter((one) => one !== id);
-        while (fake.song.length && fake.song[fake.song.length - 1].length === 0) fake.song.pop();
-      }
-      return false;
+      fake.song = fake.song.filter((one) => !(one.pattern === id && one.step === step));
+      return fake.song;
     }
-    if (bar >= MAX_SONG_BARS) return false;
-    while (fake.song.length <= bar) fake.song.push([]);
-    if (!fake.song[bar].includes(id)) {
-      fake.song[bar].push(id);
-      fake.song[bar].sort((a, b) => a - b);
-    }
-    return true;
-  },
-  remove_song_bar: ({ bar }) => {
-    if (bar < fake.song.length) fake.song.splice(bar, 1);
-    while (fake.song.length && fake.song[fake.song.length - 1].length === 0) fake.song.pop();
+    const want = length || Math.max(1, p.steps);
+    if (step + want > MAX_SONG_BARS * 16) return fake.song;
+    fake.song = fake.song.filter(
+      (one) => !(one.pattern === id && one.step < step + want && step < one.step + one.length),
+    );
+    fake.song.push({ step, pattern: id, length: want });
+    sortSong();
     return fake.song;
   },
-  seek_song: ({ bar }) => { fake.bar = bar; fake.step = 0; return null; },
+  move_placement: ({ pattern: id, from, to }) => {
+    const one = covering(id, from);
+    if (!one) return fake.song;
+    const length = one.length;
+    fake.song = fake.song.filter((other) => other !== one);
+    return handlers.place_pattern({ pattern: id, step: to, length, on: true });
+  },
+  resize_placement: ({ pattern: id, step, length }) => {
+    const one = covering(id, step);
+    if (!one) return fake.song;
+    const at = one.step;
+    fake.song = fake.song.filter((other) => other !== one);
+    return handlers.place_pattern({
+      pattern: id,
+      step: at,
+      length: Math.max(1, length),
+      on: true,
+    });
+  },
+  clear_song_bar: ({ bar }) => {
+    const from = bar * 16;
+    fake.song = fake.song.filter((one) => one.step < from || one.step >= from + 16);
+    return fake.song;
+  },
+  seek_song: ({ step }) => { fake.step = step; return null; },
+
+  // Undo and redo. `stepBack` is declared below, and hoists.
+  undo: () => stepBack(true),
+  redo: () => stepBack(false),
 
   set_bpm: ({ bpm }) => { fake.bpm = Math.max(40, Math.min(240, bpm)); return fake.bpm; },
   set_playing: ({ playing }) => {
     fake.playing = playing;
-    if (!playing) { fake.step = 0; fake.bar = 0; }
+    if (!playing) fake.step = 0;
     return null;
   },
-  panic_stop: () => { fake.playing = false; fake.step = 0; fake.bar = 0; return null; },
+  panic_stop: () => { fake.playing = false; fake.step = 0; return null; },
   playhead: () => ({
     playing: fake.playing,
     step: fake.step,
     progress: 0.3,
-    // One bit per pattern: everything in the bar sounds at once.
+    // One bit per pattern: everything covering this step sounds at once.
     patterns: fake.songMode
-      ? (fake.song[fake.bar] ?? []).reduce((mask, id) => mask | (1 << id), 0)
+      ? fake.song
+          .filter((one) => fake.step >= one.step && fake.step < one.step + Math.max(1, one.length))
+          .reduce((mask, one) => mask | (1 << one.pattern), 0)
       : 1 << fake.active,
-    bar: fake.bar,
     voices: fake.playing ? 3 : 0,
     peak: fake.playing ? 0.6 : 0,
     streamErrors: 0,
     saveError: null,
   }),
 };
+
+/*
+ * Undo and redo, mirroring AppState: a copy of the whole project before each edit, and edits
+ * of the same kind close together counted as one step, so a drag is one thing to take back.
+ */
+const HISTORY_DEPTH = 128;
+const COALESCE_MS = 600;
+const history = { past: [], future: [], last: null };
+
+const snapshot = () => ({
+  bpm: fake.bpm,
+  tracks: [...fake.tracks.entries()].map(([id, track]) => [id, { ...track }]),
+  patterns: JSON.parse(JSON.stringify(fake.patterns)),
+  song: JSON.parse(JSON.stringify(fake.song)),
+  name: fake.name,
+});
+
+const restore = (kept) => {
+  fake.bpm = kept.bpm;
+  fake.tracks = new Map(kept.tracks.map(([id, track]) => [id, { ...track }]));
+  fake.patterns = JSON.parse(JSON.stringify(kept.patterns));
+  fake.song = JSON.parse(JSON.stringify(kept.song));
+  fake.name = kept.name;
+};
+
+function remember(what, at) {
+  const carryingOn = history.last && history.last.what === what && at - history.last.at < COALESCE_MS;
+  history.last = { what, at };
+  if (carryingOn) return;
+  history.future.length = 0;
+  history.past.push(snapshot());
+  if (history.past.length > HISTORY_DEPTH) history.past.shift();
+}
+
+function stepBack(back) {
+  const taken = back ? history.past.pop() : history.future.pop();
+  if (!taken) return null;
+  const leftBehind = snapshot();
+  if (back) history.future.push(leftBehind);
+  else history.past.push(leftBehind);
+  restore(taken);
+  history.last = null;
+  return startup();
+}
+
+// What each edit is called, which is what decides where one step ends and the next begins.
+const EDITS = {
+  add_instruments: "tracks",
+  add_dropped: "tracks",
+  remove_track: "tracks",
+  set_track_gain: "gain",
+  set_track_muted: "mute",
+  set_track_soloed: "solo",
+  set_pattern_pitched: "pitched",
+  set_step: "boxes",
+  set_note: "notes",
+  clear_note: "notes",
+  move_note: "notes",
+  add_pattern: "patterns",
+  duplicate_pattern: "patterns",
+  remove_pattern: "patterns",
+  rename_pattern: "name",
+  set_pattern_colour: "colour",
+  set_pattern_steps: "length",
+  place_pattern: "song",
+  move_placement: "song",
+  resize_placement: "song",
+  clear_song_bar: "song",
+  set_bpm: "tempo",
+  // Renaming the project is not in here, because it is not in Rust either: the name is the
+  // folder's, and a step back that did not rename the folder would be a step back in name
+  // only.
+};
+
+for (const [name, what] of Object.entries(EDITS)) {
+  const edit = handlers[name];
+  handlers[name] = (args) => {
+    remember(what, performance.now());
+    return edit(args);
+  };
+}
+
+// Lets a test see how many steps back there are without reaching into the history.
+window.__weetbeats_history = () => ({ past: history.past.length, future: history.future.length });
 
 // The native drag-drop events the webview sends instead of HTML5 ones.
 const listeners = new Map();
@@ -258,9 +444,8 @@ window.__weetbeats_drop = (paths) => {
 };
 
 // Lets a test walk the playhead without waiting on real time.
-window.__weetbeats_setStep = (step, bar) => {
+window.__weetbeats_setStep = (step) => {
   fake.step = step;
-  if (bar !== undefined) fake.bar = bar;
   fake.playing = true;
 };
 

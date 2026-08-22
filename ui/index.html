@@ -21,28 +21,33 @@
     -->
     <header class="transport" data-tauri-drag-region>
       <div class="controls" data-tauri-drag-region>
-        <button id="play" class="play" title="Play or stop (space)" aria-label="Play">
-          <span class="glyph">&#9654;</span>
-        </button>
-
-        <label class="dial" title="Tempo — drag up and down, scroll, or click and type">
-          <span class="dial-label">bpm</span>
-          <input id="bpm" class="number" type="text" inputmode="decimal" value="120" />
-        </label>
-
-        <div class="dial" title="Output level">
+        <div class="dial" title="How loud the mix is right now">
           <span class="dial-label">out</span>
+          <!--
+            The gradient is the meter; the cover over it is the level. Scaling a cover is
+            something the browser can do without laying the page out again, which animating
+            a width is not — see .meter-mask in the stylesheet.
+          -->
           <div class="meter">
-            <div class="meter-fill" id="meterFill"></div>
+            <div class="meter-mask" id="meterMask"></div>
           </div>
         </div>
       </div>
 
       <div class="drag-space" data-tauri-drag-region></div>
 
+      <!-- Play at the far right, where your hand is, with the tempo just inside it. -->
       <div class="meta">
-        <span class="project-name" id="projectName" title="">Untitled</span>
         <span class="status" id="status"></span>
+
+        <label class="dial" title="Tempo — drag up and down, scroll, or click and type">
+          <span class="dial-label">bpm</span>
+          <input id="bpm" class="number" type="text" inputmode="decimal" value="120" />
+        </label>
+
+        <button id="play" class="play" title="Play or stop (space)" aria-label="Play">
+          <span class="glyph">&#9654;</span>
+        </button>
       </div>
     </header>
 
@@ -57,42 +62,93 @@
           and this is the desk they sit on.
         -->
         <div class="panel-head">
-          <button id="songMode" class="song-mode" title="Back to the song (esc)">song</button>
+          <button
+            id="songMode"
+            class="song-mode"
+            title="Back to the song (esc) — double click to rename it"
+          >
+            <span class="song-name" id="songName">Untitled</span>
+          </button>
         </div>
         <div class="pattern-list" id="patternList"></div>
         <!-- Under the patterns, where the next one would go. -->
         <button id="addPattern" class="add-row" title="New pattern">+ pattern</button>
       </aside>
 
-      <!-- The song sits underneath; a pattern opens on top of it, like a window. -->
-      <section class="workspace">
+      <!--
+        The song sits underneath; a pattern opens on top of it, like a window. The open
+        pattern's colour is set on here as --pattern, so the editor and the roll can carry
+        the colour of the block you came in through.
+      -->
+      <section class="workspace" id="workspace">
         <div class="song" id="song">
           <div class="song-scroll" id="songScroll">
-            <div class="song-grid">
-              <canvas id="scrubber" class="scrubber" title="Click or drag to play from here"></canvas>
+            <!--
+              The grid is as wide as the whole song; the two canvases are only as wide as
+              the window and stick to its left edge, so drawing costs the same whether the
+              song is four bars or two hundred and however far in it is zoomed.
+            -->
+            <div class="song-grid" id="songGrid">
+              <canvas
+                id="scrubber"
+                class="scrubber"
+                title="Drag to move the playhead, playing or not"
+              ></canvas>
               <canvas id="lanes" class="lanes"></canvas>
             </div>
           </div>
+          <!--
+            Snap and zoom float over the bottom right corner, out of the way of the
+            scrubber and of the blocks, which is where a map puts its zoom too.
+          -->
+          <div class="song-tools">
+            <label class="tool" title="Blocks snap to this many clicks">
+              <span class="dial-label">snap</span>
+              <input id="snap" class="number small-number" type="text" inputmode="numeric" value="16" />
+            </label>
+            <span class="tool" title="Zoom — or pinch the trackpad">
+              <button id="zoomOut" class="tick" aria-label="Zoom out">&minus;</button>
+              <button class="zoom-read" id="zoomRead" title="Back to life size">1&times;</button>
+              <button id="zoomIn" class="tick" aria-label="Zoom in">+</button>
+            </span>
+          </div>
+
           <div class="hint" id="songHint">
             <p>Click a pattern on the left to open it.</p>
             <p class="small">
-              Then paint it across the bars here. Patterns in the same bar play together.
+              Then draw it across the bars here, and drag its ends to say how long it plays
+              for. Blocks in the same bar play together.
             </p>
           </div>
         </div>
 
         <!-- The pattern editor: the step grid, and the instruments it plays. -->
         <div class="editor hidden" id="editor">
+          <!--
+            The pattern's own titlebar: the way out, the block from the song pulled open —
+            same colour, same name — and how long it is.
+
+            Outside the scrolling area on purpose. Pinned to the far right it could end up
+            under a scrollbar or clipped by the window's corner; inside the grid as a sticky
+            cell it slides away once the pattern is scrolled far enough, which is a thing
+            sticky grid items do. Absolutely placed over the top left of the editor, it
+            cannot go anywhere.
+          -->
+          <div class="head-chip" id="patternChip">
+            <span class="pattern-tab" id="patternTab"></span>
+            <span class="steps" title="How many boxes this pattern has">
+              <button id="fewerSteps" class="tick" aria-label="One box fewer">&minus;</button>
+              <input id="steps" class="number" type="text" inputmode="numeric" value="16" />
+              <button id="moreSteps" class="tick" aria-label="One box more">+</button>
+            </span>
+            <button id="closePattern" class="shut" title="Close this pattern (esc)">
+              &times;
+            </button>
+          </div>
           <div class="editor-scroll" id="editorScroll">
             <div class="editor-grid">
-              <div class="corner">
-                <span class="head-label">steps</span>
-                <span class="steps" title="How many boxes this pattern has">
-                  <button id="fewerSteps" class="tick" aria-label="One box fewer">&minus;</button>
-                  <input id="steps" class="number" type="text" inputmode="numeric" value="16" />
-                  <button id="moreSteps" class="tick" aria-label="One box more">+</button>
-                </span>
-              </div>
+              <!-- Holds the corner of the grid open. What goes in it is over the top. -->
+              <div class="corner"></div>
               <canvas id="ruler" class="ruler"></canvas>
               <!-- The instruments, and under them the way to add another. -->
               <div class="header-col">
@@ -102,10 +158,40 @@
               <canvas id="grid" class="grid"></canvas>
             </div>
           </div>
-          <button id="closePattern" class="close" title="Close this pattern (esc)">&times;</button>
           <div class="empty" id="empty">
             <button id="addBig" class="add-big">Add an instrument</button>
             <p class="small">Or drop a sound on the window. Then tick some boxes and hit space.</p>
+          </div>
+        </div>
+
+        <!--
+          The piano roll: the same pattern, one track, seen as notes instead of boxes. Keys
+          down the left, the notes in the middle, how hard each one is hit underneath.
+        -->
+        <div class="roll hidden" id="roll">
+          <!-- The same chip, over the top left of the roll. -->
+          <div class="head-chip keys-chip" id="rollChip">
+            <!-- The track, in the colour of the pattern it is a part of. -->
+            <span class="pattern-tab" id="rollName"></span>
+            <button id="closeRoll" class="shut" title="Back to the boxes (esc)">&times;</button>
+          </div>
+          <div class="roll-scroll" id="rollScroll">
+            <div class="roll-grid">
+              <div class="corner"></div>
+              <canvas id="rollRuler" class="ruler"></canvas>
+              <canvas id="keys" class="keys" title="Click a key to hear it"></canvas>
+              <canvas id="notes" class="notes"></canvas>
+              <div class="corner vel-corner"><span class="head-label">hit</span></div>
+              <div class="vel-lane"><canvas id="velocity" class="velocity"></canvas></div>
+            </div>
+          </div>
+          <!-- Zoom, in the same corner the song keeps it. Pinching the trackpad does it too. -->
+          <div class="song-tools roll-tools">
+            <span class="tool" title="Zoom — or pinch the trackpad">
+              <button id="rollZoomOut" class="tick" aria-label="Zoom out">&minus;</button>
+              <button class="zoom-read" id="rollZoomRead" title="Back to life size">1&times;</button>
+              <button id="rollZoomIn" class="tick" aria-label="Zoom in">+</button>
+            </span>
           </div>
         </div>
       </section>

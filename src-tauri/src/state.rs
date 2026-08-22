@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rtrb::{Consumer, Producer};
 use weetbeats_engine::command::{TrashBin, COMMAND_CAPACITY, TRASH_CAPACITY};
@@ -30,6 +30,28 @@ const SAVE_EVERY: u64 = 800;
 /// command. Only ever reached when the audio device has stopped answering: while a project
 /// is going across, room appears within a callback.
 const QUEUE_WAIT: Duration = Duration::from_millis(50);
+
+/// How many steps back you can go. A project is a few hundred notes and a list of samples,
+/// so a hundred and twenty eight of them is a megabyte or two at the very worst.
+const HISTORY_DEPTH: usize = 128;
+
+/// Edits of the same kind closer together than this are one step. A drag across sixteen
+/// boxes is one thing you did, and taking it back one box at a time would be maddening.
+const COALESCE: Duration = Duration::from_millis(600);
+
+/// What you can take back, and what you took back.
+///
+/// Whole projects rather than a list of changes. Every edit would otherwise need its own
+/// opposite — and its opposite's opposite for redo — and the one that gets forgotten is the
+/// one that loses your work. A project is small enough to copy, so it is copied.
+#[derive(Default)]
+struct History {
+    past: Vec<Project>,
+    future: Vec<Project>,
+    /// What the last edit was called and when, for deciding whether the next one is part
+    /// of the same gesture.
+    last: Option<(&'static str, Instant)>,
+}
 
 pub struct AppState {
     pub project: Mutex<Project>,
@@ -59,6 +81,8 @@ pub struct AppState {
     /// Where the file picker opened last, so it does not send you back to your home
     /// folder every time.
     last_folder: Mutex<Option<PathBuf>>,
+    /// Undo and redo.
+    history: Mutex<History>,
 }
 
 impl AppState {
@@ -102,6 +126,7 @@ impl AppState {
             shared,
             stream_errors,
             last_folder: Mutex::new(None),
+            history: Mutex::new(History::default()),
         };
         state.remember_where_we_were();
         state.tidy_samples();
@@ -206,6 +231,13 @@ impl AppState {
                 pattern: pattern.id,
                 steps: pattern.steps,
             });
+            for &track in &pattern.pitched {
+                self.send(Command::SetPatternPitched {
+                    pattern: pattern.id,
+                    track,
+                    pitched: true,
+                });
+            }
             for lane in &pattern.lanes {
                 for note in &lane.notes {
                     self.send(Command::SetNote {
@@ -222,13 +254,15 @@ impl AppState {
             }
         }
 
-        self.send(Command::SetSongLen(project.bars() as u16));
-        for index in 0..project.bars() {
-            self.send(Command::SetSongBar {
-                index: index as u16,
-                patterns: project.bar_mask(index),
+        self.send(Command::ClearSong);
+        for placement in &project.song {
+            self.send(Command::PlacePattern {
+                pattern: placement.pattern,
+                step: placement.step,
+                length: placement.length,
             });
         }
+        self.send(Command::SetSongLen(project.song_steps()));
         self.send(Command::SetActivePattern(
             project.patterns.first().map(|p| p.id).unwrap_or(0),
         ));
@@ -256,6 +290,13 @@ impl AppState {
             pattern: id,
             steps: pattern.steps,
         });
+        for &track in &pattern.pitched {
+            self.send(Command::SetPatternPitched {
+                pattern: id,
+                track,
+                pitched: true,
+            });
+        }
         for lane in &pattern.lanes {
             for note in &lane.notes {
                 self.send(Command::SetNote {
@@ -272,29 +313,35 @@ impl AppState {
         }
     }
 
-    /// Tell the audio thread the song again, from the top. Cheap: a song is a few hundred
-    /// bars at most, and it means the front end never has to describe an edit, only the
-    /// result.
+    /// Tell the audio thread the song again, from nothing. Cheap: a song is a few hundred
+    /// placements at most, and it means the front end never has to describe an edit, only
+    /// the result.
     pub fn push_song(&self) {
         let project = self.project.lock().unwrap();
-        self.send(Command::SetSongLen(project.bars() as u16));
-        for index in 0..project.bars() {
-            self.send(Command::SetSongBar {
-                index: index as u16,
-                patterns: project.bar_mask(index),
+        self.send(Command::ClearSong);
+        for placement in &project.song {
+            self.send(Command::PlacePattern {
+                pattern: placement.pattern,
+                step: placement.step,
+                length: placement.length,
             });
         }
+        self.send(Command::SetSongLen(project.song_steps()));
     }
 
-    /// One bar of the song, plus how long the song is now. What painting a bar sends, so a
-    /// drag across the song is two commands a bar rather than the whole song each time.
-    pub fn push_song_bar(&self, index: usize) {
+    /// One block, plus how long the song is now. What painting the song sends, so a drag
+    /// across it is two commands a block rather than the whole song each time.
+    pub fn push_placement(&self, pattern: u16, step: u32, on: bool) {
         let project = self.project.lock().unwrap();
-        self.send(Command::SetSongBar {
-            index: index as u16,
-            patterns: project.bar_mask(index),
+        self.send(match project.placement_at(pattern, step).filter(|_| on) {
+            Some(placed) => Command::PlacePattern {
+                pattern,
+                step: placed.step,
+                length: placed.length,
+            },
+            None => Command::UnplacePattern { pattern, step },
         });
-        self.send(Command::SetSongLen(project.bars() as u16));
+        self.send(Command::SetSongLen(project.song_steps()));
     }
 
     // --- the project folder ------------------------------------------------
@@ -323,6 +370,82 @@ impl AppState {
         let dir = self.dir();
         let project = self.project.lock().unwrap();
         let _ = folder::forget_unused_samples(&dir, &project);
+        // And the stash with it: a window that has just opened this project has nothing to
+        // undo, so nothing in there can ever be wanted again.
+        let _ = folder::clear_stash(&dir);
+    }
+
+    // --- undo and redo -----------------------------------------------------
+
+    /// Keep the project as it is now, before an edit changes it.
+    ///
+    /// Called at the top of everything that edits, *before* the project is locked: the
+    /// history lock is only ever taken on its own, so the two can never wait on each other.
+    /// `what` names the kind of edit, so a run of the same kind in quick succession — a drag
+    /// — is one step rather than one step per box.
+    pub fn remember(&self, what: &'static str) {
+        let mut history = self.history.lock().unwrap();
+        let now = Instant::now();
+        let carrying_on = history
+            .last
+            .is_some_and(|(name, at)| name == what && now.duration_since(at) < COALESCE);
+        history.last = Some((what, now));
+        if carrying_on {
+            return;
+        }
+        // Anything undone is no longer ahead of us: this is a different future now.
+        history.future.clear();
+        let snapshot = self.project.lock().unwrap().clone();
+        history.past.push(snapshot);
+        if history.past.len() > HISTORY_DEPTH {
+            history.past.remove(0);
+        }
+    }
+
+    /// Step back. `false` when there is nowhere to step back to.
+    pub fn undo(&self) -> bool {
+        self.step(true)
+    }
+
+    /// And forward again.
+    pub fn redo(&self) -> bool {
+        self.step(false)
+    }
+
+    fn step(&self, back: bool) -> bool {
+        let mut history = self.history.lock().unwrap();
+        let taken = if back {
+            history.past.pop()
+        } else {
+            history.future.pop()
+        };
+        let Some(taken) = taken else {
+            return false;
+        };
+        let left_behind = std::mem::replace(&mut *self.project.lock().unwrap(), taken);
+        if back {
+            history.future.push(left_behind);
+        } else {
+            history.past.push(left_behind);
+        }
+        // The next edit starts a new step, whatever it is: nothing is being carried on from
+        // before an undo.
+        history.last = None;
+        drop(history);
+        // A sample the undone step deleted comes back out of the stash, and one it added
+        // goes into it, so the folder describes the project we now have.
+        let dir = self.dir();
+        let _ = folder::reconcile_samples(&dir, &self.project.lock().unwrap());
+        true
+    }
+
+    /// Nothing to take back. For opening a different project, where the steps that got the
+    /// last one here would make no sense.
+    pub fn forget_history(&self) {
+        let mut history = self.history.lock().unwrap();
+        history.past.clear();
+        history.future.clear();
+        history.last = None;
     }
 
     /// Mark the project as needing writing. The saver picks it up within a moment.
@@ -379,9 +502,15 @@ impl AppState {
         if let Some(sample) = self.cache.lock().unwrap().get(path) {
             return Ok(Arc::clone(sample));
         }
-        let sample = Arc::new(
-            decode_file(path).map_err(|e| format!("could not read {}: {e}", path.display()))?,
-        );
+        // Named by its file, not its path: the status line has one line, and a project
+        // folder on the Desktop uses most of it up before the reason gets a look in.
+        let sample = Arc::new(decode_file(path).map_err(|e| {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("that sound");
+            format!("{name} could not be read: {e}")
+        })?);
         self.cache
             .lock()
             .unwrap()

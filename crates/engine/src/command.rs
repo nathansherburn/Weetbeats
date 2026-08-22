@@ -56,6 +56,18 @@ pub enum Command {
         track: u16,
         soloed: bool,
     },
+    /// True for a sampler instrument in this pattern, false for a one-shot. An instrument's
+    /// notes are pitched and stop when they end; a one-shot rings out however short the note
+    /// is, and only its notes at the sampler's own pitch sound at all, because a row of boxes
+    /// cannot show any others.
+    ///
+    /// Per pattern: the same sound can hold down a rhythm in one and play a melody in the
+    /// next.
+    SetPatternPitched {
+        pattern: u16,
+        track: u16,
+        pitched: bool,
+    },
     /// How many steps a pattern is. Applies to the clock straight away if that pattern is
     /// the one playing.
     SetPatternSteps {
@@ -88,15 +100,24 @@ pub enum Command {
     /// True to play the song, false to loop the open pattern. The UI ties this to which
     /// view you are looking at.
     SetSongMode(bool),
-    /// How many bars of the song are in use.
-    SetSongLen(u16),
-    /// Which patterns play in a bar of the song, one bit each. They all sound together.
-    SetSongBar {
-        index: u16,
-        patterns: u32,
+    /// How long the song is, in steps.
+    SetSongLen(u32),
+    /// Forget the whole song. Sent before a project's placements go across.
+    ClearSong,
+    /// Play this pattern from this step of the song, for this many steps. A block longer
+    /// than its pattern repeats it; a shorter one cuts it off.
+    PlacePattern {
+        pattern: u16,
+        step: u32,
+        length: u32,
     },
-    /// Jump the song to a bar and start from the top of it.
-    SeekSong(u16),
+    /// And take it out again.
+    UnplacePattern {
+        pattern: u16,
+        step: u32,
+    },
+    /// Jump the song to a step and play from there.
+    SeekSong(u32),
     /// Play a track's sample right now, for clicking a row.
     Audition {
         track: u16,

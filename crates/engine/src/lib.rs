@@ -32,8 +32,9 @@ pub const MAX_NOTES_PER_TRACK: usize = 256;
 /// Voices in the pool. Run out and the oldest gets stolen.
 pub const MAX_VOICES: usize = 64;
 
-/// Longest pattern the engine will play.
-pub const MAX_STEPS: u16 = 64;
+/// Longest pattern the engine will play. Notes are held in a flat list rather than a slot
+/// per step, so this costs nothing but the clock's range.
+pub const MAX_STEPS: u16 = 256;
 
 /// Boxes a new pattern has.
 pub const DEFAULT_STEPS: u32 = 16;
@@ -56,6 +57,12 @@ pub const STEPS_PER_BAR: u32 = 16;
 /// Bars the song can hold.
 pub const MAX_SONG_BARS: usize = 256;
 
+/// Steps the song can hold. The engine keeps a slot per step, so this is a real array.
+pub const MAX_SONG_STEPS: usize = MAX_SONG_BARS * STEPS_PER_BAR as usize;
+
+/// Patterns the song can hold at once, all placements together.
+pub const MAX_PLACEMENTS: usize = 1024;
+
 /// Frames the mixer works on at a time. Longer callbacks get chopped into these.
 pub const MAX_BLOCK: usize = 1024;
 
@@ -70,7 +77,7 @@ pub const PREVIEW_TRACK: u16 = u16::MAX;
 
 pub use command::{Command, EngineNote, Trash};
 pub use engine::Engine;
-pub use model::{Lane, Note, Pattern, Project, SampleRef, Track};
+pub use model::{Lane, Note, Pattern, Placement, Project, SampleRef, Track};
 pub use sample::Sample;
 pub use shared::{Playhead, Shared};
 
