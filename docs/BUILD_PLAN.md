@@ -12,7 +12,7 @@ A tiny, fun, free music maker for macOS. Point it at a folder of samples, tick b
 | Instruments | Sampler first. Host real plugins later |
 | Plugin format | CLAP only. No VST3, no AU |
 | Pattern length | 16 steps by default, adjustable per pattern, one step at a time, up to 64 |
-| Song grid | A pattern is placed in steps of its own length, and placements overlap freely |
+| Song grid | A block is a pattern, a step and a length; blocks of different patterns overlap freely |
 | Steps | Plain on/off boxes |
 | Projects | A folder, with samples copied in as they are added |
 | Export | None yet, playback only |
@@ -126,15 +126,17 @@ MySong.beat/
 
 **Decided**
 
-**A placement is one play-through of one pattern, at a step.** Placements overlap freely: that is what makes a kick pattern, a hat pattern and a snare pattern add up to a beat, which is the whole reason to have patterns rather than one long grid.
+**A block is a pattern, a step, and a length.** Blocks of different patterns overlap freely: that is what makes a kick pattern, a hat pattern and a snare pattern add up to a beat, which is the whole reason to have patterns rather than one long grid. Two blocks of the *same* pattern cannot overlap, because a pattern cannot play over itself, so dropping one on another takes its place.
 
-A placement sits on a multiple of its own pattern's length, so a four step pattern goes into the song four steps at a time and a thirty two step pattern thirty two. Each lane of the song view is divided by its own pattern, which is the only grid that means anything when patterns are different lengths — and it means one click is one pattern, never four of them padding out a bar.
+A new block is one play-through — four steps of a four step pattern, thirty two of a thirty two step one, nothing padded out to fill a bar it did not ask for. After that it is its own length: drag its right hand end out and the pattern repeats to fill it, drag it in and the pattern is cut off part way through.
 
-Bars of 16 steps are still the song's ruler: the numbers along the top, where the loop ends (rounded up), and what right clicking clears. They are just not the unit anything is placed in.
+A block starts wherever the **snap** puts it, which is a bar by default and anything from one step up. It is not tied to its pattern's own grid.
 
-Two earlier passes at this were wrong, and both were wrong in the same direction — trying to make the song a grid of *slots* rather than a line of *time*. One slot per pattern, with the slot as long as whatever was in it, could not stack and could not be dragged across. One slot per bar could do both, but a four step pattern in a sixteen step bar had to either loop four times or be cut off, and neither is what you asked for.
+Bars of 16 steps are still the song's ruler: the numbers along the top, where the loop ends (rounded up), and what right clicking clears.
 
-The engine holds every pattern's notes, and a slot per step of the song saying which patterns *start* there. Each pattern then carries how far through itself it is and how much is left, which is what makes a placement play once and stop. A step's starts are a `u32` of pattern bits, which is what caps patterns at 32.
+Three earlier passes at this were wrong, and all three in the same direction — trying to make the song a grid of *slots* rather than a line of *time*. One slot per pattern, with the slot as long as whatever was in it, could not stack and could not be dragged across. One slot per bar could do both, but a four step pattern in a sixteen step bar had to either loop four times or be cut off. One slot per pattern-length fixed that, and then a pattern whose length changed left blocks on a grid nobody could point at any more: written on one grid, hit tested on another. **A block is hit tested over its own length, wherever it sits, and a pattern's length changing never moves or resizes what is already in the song.**
+
+The engine holds every pattern's notes and owns the song as two grids: a step of it is a `u32` with a bit per pattern saying what *starts* there, and beside it a `u16` per pattern saying how long that block is. Each pattern carries how far into its block it is, which is what makes it play through, come round again when the block is longer than the pattern, and stop part way when it is shorter. A step's starts being a `u32` is what caps patterns at 32.
 
 **Opening and saving are in the menu bar**, not buttons in the window. So is everything else a Mac app keeps up there — and the Edit menu earns its keep even here, because without it copy and paste stop working in the one text field the app has.
 
@@ -158,7 +160,9 @@ It is one flag on a track: an instrument, or a one-shot. A one-shot is a drum �
 
 That last part is the only new thing on the audio thread: a voice carries how many frames of note it has left, and counting to zero is the note off. A one-shot's is infinity, so a drum hit is over when the sample is over and not before.
 
-Opening the piano roll on a track turns the flag on, because a roll full of pitches and lengths that mean nothing would be a lie. The corner of the roll says which it is and turns it back.
+Opening the piano roll on a track turns the flag on, because a roll full of pitches and lengths that mean nothing would be a lie. The **♪** button on the row turns it back.
+
+That one flag also decides what the row looks like in the step grid, because it is the same fact seen twice: an instrument's notes mean a pitch and a length, so its row is a small piano roll of them; a one-shot's notes mean "here", so its row is a line of boxes. There is no third state where the sound and the row disagree.
 
 ## Stage 4 - Piano roll
 
@@ -187,6 +191,10 @@ A box in the step grid and a note in the roll are the same thing in the same lan
 Drawing: press to make a note and keep dragging to set how long it is, and the next one you draw is that long too. Grab a note to move it, grab its right hand end to stretch it, right click to rub it out. Every note you touch plays as you touch it, and so does a key on the keyboard, because you cannot write a melody you cannot hear. How hard each note is hit is a lane under the roll, dragged.
 
 Moving a note is one command rather than a delete and an add, so a dragged note is never briefly nowhere.
+
+The roll draws sixteen steps past the end of the pattern, shaded, and a note put there makes the pattern longer. Drawing off the right hand side is how one bar becomes two, and refusing the note instead would only mean going back to the length field first.
+
+An instrument's row in the step grid is a small version of the same thing, and clicking it opens the roll proper. Both are the same lane of notes, so switching between them cannot lose anything — which is the point of a box being a note in the first place.
 
 ## Stage 5 - Effects
 

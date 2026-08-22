@@ -151,10 +151,15 @@ pub struct Engine {
     /// The song: which patterns start at each step, one bit each. Allocated once, in `new`,
     /// and only ever indexed after that.
     starts: Vec<u32>,
+    /// How long the block starting at each step is, per pattern, in steps. `starts` says a
+    /// block begins; this says how much song it fills. A quarter of a megabyte, allocated
+    /// once in `new` alongside `starts`.
+    lengths: Vec<u16>,
     /// Steps of the song in use.
     song_len: u32,
-    /// How many steps into itself each pattern is, and how many it has left before its
-    /// placement is over. What makes a placement one play-through of the pattern.
+    /// How many steps into its block each pattern is, and how many it has left before the
+    /// block is over. A block longer than its pattern wraps round it; a shorter one stops
+    /// part way through.
     run_step: [u32; MAX_PATTERNS],
     run_left: [u32; MAX_PATTERNS],
     /// What sounded on the last step, one bit per pattern, for the UI.
@@ -202,6 +207,7 @@ impl Engine {
                 .map(|_| PatternState::new(steps))
                 .collect(),
             starts: vec![0; MAX_SONG_STEPS],
+            lengths: vec![0; MAX_SONG_STEPS * MAX_PATTERNS],
             song_len: 0,
             run_step: [0; MAX_PATTERNS],
             run_left: [0; MAX_PATTERNS],
@@ -364,28 +370,44 @@ impl Engine {
         self.clock.set_steps(steps);
     }
 
+    /// Where in the `lengths` grid a step and a pattern meet.
+    fn slot(step: u32, pattern: usize) -> usize {
+        step as usize * MAX_PATTERNS + pattern
+    }
+
     /// Work out where each pattern is up to, given where the playhead is.
     ///
-    /// A placement covers the pattern's length in steps from where it starts, so a pattern
-    /// is mid-placement if one started within that many steps behind us. Looking back is
-    /// only needed when the playhead jumps — a seek, a stop, the top of the song — never
-    /// while it is simply playing on.
+    /// Blocks of one pattern never overlap, so the nearest start behind us is the only one
+    /// that could still be sounding: if its length has run out, no earlier one is any
+    /// better. Walking back looks at all thirty two patterns at once and stops as soon as
+    /// every one has been accounted for. Only needed when the playhead jumps — a seek, a
+    /// stop, the top of the song — never while it is simply playing on.
     fn resync_runs(&mut self) {
-        let now = if self.song_mode { self.clock.step() } else { 0 };
-        for pattern in 0..MAX_PATTERNS {
-            let bit = 1u32 << pattern;
-            let steps = self.patterns[pattern].steps.max(1);
-            self.run_step[pattern] = 0;
-            self.run_left[pattern] = 0;
-            if !self.song_mode {
+        self.run_step = [0; MAX_PATTERNS];
+        self.run_left = [0; MAX_PATTERNS];
+        if !self.song_mode {
+            return;
+        }
+        let now = self.clock.step();
+        let mut looking = u32::MAX;
+        for back in 0..=now {
+            let found = self.starts[(now - back) as usize] & looking;
+            if found == 0 {
                 continue;
             }
-            for back in 0..steps.min(now + 1) {
-                if self.starts[(now - back) as usize] & bit != 0 {
-                    self.run_step[pattern] = back;
-                    self.run_left[pattern] = steps - back;
-                    break;
+            for pattern in 0..MAX_PATTERNS {
+                if found & (1u32 << pattern) == 0 {
+                    continue;
                 }
+                let length = self.lengths[Self::slot(now - back, pattern)] as u32;
+                if back < length {
+                    self.run_step[pattern] = back;
+                    self.run_left[pattern] = length - back;
+                }
+            }
+            looking &= !found;
+            if looking == 0 {
+                break;
             }
         }
     }
@@ -411,15 +433,16 @@ impl Engine {
         self.sounding = 0;
         for pattern in 0..MAX_PATTERNS {
             if starting & (1u32 << pattern) != 0 {
-                // A placement begins here, so the pattern starts from its own first step.
+                // A block begins here, so the pattern starts from its own first step.
                 self.run_step[pattern] = 0;
-                self.run_left[pattern] = self.patterns[pattern].steps.max(1);
+                self.run_left[pattern] = self.lengths[Self::slot(step as u32, pattern)] as u32;
             }
             if self.run_left[pattern] == 0 {
                 continue;
             }
             self.sounding |= 1u32 << pattern;
-            let at = self.run_step[pattern] as u16;
+            // A block longer than its pattern comes round again rather than going quiet.
+            let at = (self.run_step[pattern] % self.patterns[pattern].steps.max(1)) as u16;
             self.trigger_pattern(pattern, at);
             self.run_step[pattern] += 1;
             self.run_left[pattern] -= 1;
@@ -608,28 +631,32 @@ impl Engine {
             }
             Command::ClearSong => {
                 self.starts.fill(0);
+                self.lengths.fill(0);
                 self.song_len = 0;
                 for pattern in 0..MAX_PATTERNS {
                     self.run_left[pattern] = 0;
                 }
                 self.tune_clock();
             }
-            Command::PlacePattern { pattern, step } => {
+            Command::PlacePattern {
+                pattern,
+                step,
+                length,
+            } => {
                 // Editing the song while it plays does not restart anything: whatever is
                 // sounding keeps its place, which is what you want while you paint.
-                if let (Some(slot), true) = (
-                    self.starts.get_mut(step as usize),
-                    (pattern as usize) < MAX_PATTERNS,
-                ) {
-                    *slot |= 1u32 << pattern;
+                let pattern = pattern as usize;
+                if pattern < MAX_PATTERNS && (step as usize) < MAX_SONG_STEPS {
+                    self.starts[step as usize] |= 1u32 << pattern;
+                    self.lengths[Self::slot(step, pattern)] =
+                        length.clamp(1, MAX_SONG_STEPS as u32) as u16;
                 }
             }
             Command::UnplacePattern { pattern, step } => {
-                if let (Some(slot), true) = (
-                    self.starts.get_mut(step as usize),
-                    (pattern as usize) < MAX_PATTERNS,
-                ) {
-                    *slot &= !(1u32 << pattern);
+                let pattern = pattern as usize;
+                if pattern < MAX_PATTERNS && (step as usize) < MAX_SONG_STEPS {
+                    self.starts[step as usize] &= !(1u32 << pattern);
+                    self.lengths[Self::slot(step, pattern)] = 0;
                 }
             }
             Command::SeekSong(step) => {

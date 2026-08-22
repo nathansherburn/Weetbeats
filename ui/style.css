@@ -18,8 +18,10 @@
   /* The patterns panel, and one pattern in it. Must match PATTERNS and LANE in main.js. */
   --patterns: 208px;
   --lane: 34px;
-  /* The strip along the top of every view: the ruler, and the scrubber. */
-  --head: 30px;
+  /* The strip along the top of every view: the ruler, the scrubber, and the panel's own
+     head, which is the Song button. They have to match or the pattern rows on the left
+     stop lining up with the lanes on the right. */
+  --head: 34px;
   /* The piano roll: the keyboard column, one semitone, one step, and the velocity lane.
      Must match KEYS, SEMITONE, ROLL_CELL and VELOCITY in main.js. */
   --keys: 152px;
@@ -64,7 +66,7 @@ button {
   display: flex;
   align-items: center;
   gap: 22px;
-  padding: 10px 16px 10px 88px; /* room for the traffic lights */
+  padding: 10px 14px 10px 88px; /* room for the traffic lights */
   background: var(--panel);
   border-bottom: 1px solid var(--line);
   flex: none;
@@ -81,7 +83,7 @@ button {
 .meta {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 16px;
   min-width: 0;
 }
 
@@ -186,16 +188,6 @@ input[type="range"]:active::-webkit-slider-thumb {
   width: 0;
   background: linear-gradient(90deg, var(--ok), var(--lit) 78%, var(--accent));
   transition: width 0.06s linear;
-}
-
-/* The project is a folder, and this is its name. */
-.project-name {
-  font-size: 11px;
-  color: var(--dim);
-  max-width: 190px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 /* Only ever a warning or a note: nothing lives here the rest of the time. */
@@ -338,37 +330,86 @@ body.drop-target::after {
 .panel-head {
   height: var(--head);
   flex: none;
-  padding: 0 8px 0 10px;
   border-bottom: 1px solid var(--line);
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  align-items: stretch;
 }
 
-/* The heading, and the way back to the song. Lit while the song is what you are looking at. */
+/*
+ * The way back to the song, and where the song's name lives. It fills the head because it
+ * is the thing everything else in this panel sits under: the patterns are windows over the
+ * song, and this is the song.
+ */
 .song-mode {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.09em;
-  color: var(--dim);
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
   background: transparent;
-  border: 1px solid transparent;
-  border-radius: 5px;
-  padding: 2px 8px;
-  transition: color 0.12s, background 0.12s, border-color 0.12s;
+  border: none;
+  border-right: 1px solid transparent;
+  text-align: left;
+  transition: color 0.12s, background 0.12s;
+}
+
+.song-tag {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--dim);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 5px;
+  flex: none;
+}
+
+.song-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--dim);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .song-mode:hover {
+  background: var(--panel-2);
+}
+
+.song-mode:hover .song-name {
   color: var(--text);
-  border-color: var(--line);
 }
 
 .song-mode.on {
-  color: var(--text);
   background: var(--accent-soft);
-  border-color: transparent;
-  box-shadow: inset 2px 0 0 var(--accent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.song-mode.on .song-name {
+  color: var(--text);
+}
+
+.song-mode.on .song-tag {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Renaming the song, in place, the same way a pattern is renamed. */
+.song-mode .rename {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 1px 4px;
+  outline: none;
 }
 
 /*
@@ -429,8 +470,12 @@ body.drop-target::after {
   color: var(--lit);
 }
 
+/*
+ * The name and how long the pattern is, together on the left: the number belongs to the
+ * name, and reading it meant crossing the row to the far edge and back.
+ */
 .prow .pname {
-  flex: 1;
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -454,6 +499,49 @@ body.drop-target::after {
   color: var(--dim);
   font-variant-numeric: tabular-nums;
   flex: none;
+  margin-right: auto;
+}
+
+/* The colour this pattern's blocks are drawn in, and the way to change it. */
+.prow .swatch {
+  width: 13px;
+  height: 13px;
+  border-radius: 4px;
+  border: 1px solid rgba(0, 0, 0, 0.45);
+  flex: none;
+  padding: 0;
+}
+
+.prow .swatch:hover {
+  outline: 1px solid var(--text);
+  outline-offset: 1px;
+}
+
+/* The colours to pick from, over the top of everything. */
+.colours {
+  position: fixed;
+  z-index: 20;
+  display: grid;
+  grid-template-columns: repeat(4, 18px);
+  gap: 6px;
+  padding: 8px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.colours button {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  border: 1px solid rgba(0, 0, 0, 0.45);
+  padding: 0;
+}
+
+.colours button:hover {
+  outline: 1px solid var(--text);
+  outline-offset: 1px;
 }
 
 /* Duplicate and delete stay out of the way until you go looking for them. */
@@ -482,6 +570,44 @@ body.drop-target::after {
   overflow: auto;
 }
 
+/*
+ * Snap and zoom, floating over the bottom right corner of the song. Not in a toolbar
+ * along the top: that row is the scrubber's, and it has to line up with the panel head.
+ */
+.song-tools {
+  position: absolute;
+  right: 14px;
+  bottom: 12px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 5px 9px;
+  background: rgba(27, 24, 35, 0.92);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.song-tools .tool {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+input.number.small-number {
+  width: 34px;
+  font-size: 11px;
+  padding: 1px 0;
+}
+
+.zoom-read {
+  font-size: 10px;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+  min-width: 26px;
+  text-align: center;
+}
+
 /* The scrubber sticks to the top so it is still there when the lanes scroll. */
 .song-grid {
   display: grid;
@@ -504,17 +630,26 @@ body.drop-target::after {
   background-position: 0 var(--head);
 }
 
+/*
+ * Both canvases stick to the left as well as the scrubber sticking to the top: they are
+ * only as wide as the window, and the grid around them is as wide as the song. A canvas
+ * that grew with the song would hit the browser's own size limit a long way before the two
+ * hundred and fifty sixth bar.
+ */
 .scrubber {
   position: sticky;
   top: 0;
+  left: 0;
   z-index: 2;
   display: block;
   background: var(--panel);
   border-bottom: 1px solid var(--line);
-  cursor: pointer;
+  cursor: ew-resize;
 }
 
 .lanes {
+  position: sticky;
+  left: 0;
   display: block;
 }
 
@@ -584,10 +719,6 @@ body.drop-target::after {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.roll #oneShot {
-  margin-left: auto;
 }
 
 .keys {

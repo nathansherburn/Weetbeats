@@ -231,6 +231,7 @@ impl AppState {
             self.send(Command::PlacePattern {
                 pattern: placement.pattern,
                 step: placement.step,
+                length: placement.length,
             });
         }
         self.send(Command::SetSongLen(project.song_steps()));
@@ -287,19 +288,23 @@ impl AppState {
             self.send(Command::PlacePattern {
                 pattern: placement.pattern,
                 step: placement.step,
+                length: placement.length,
             });
         }
         self.send(Command::SetSongLen(project.song_steps()));
     }
 
-    /// One placement, plus how long the song is now. What painting the song sends, so a drag
-    /// across it is two commands a placement rather than the whole song each time.
+    /// One block, plus how long the song is now. What painting the song sends, so a drag
+    /// across it is two commands a block rather than the whole song each time.
     pub fn push_placement(&self, pattern: u16, step: u32, on: bool) {
         let project = self.project.lock().unwrap();
-        self.send(if on {
-            Command::PlacePattern { pattern, step }
-        } else {
-            Command::UnplacePattern { pattern, step }
+        self.send(match project.placement_at(pattern, step).filter(|_| on) {
+            Some(placed) => Command::PlacePattern {
+                pattern,
+                step: placed.step,
+                length: placed.length,
+            },
+            None => Command::UnplacePattern { pattern, step },
         });
         self.send(Command::SetSongLen(project.song_steps()));
     }

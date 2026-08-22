@@ -1,15 +1,15 @@
 /*
  * Stands in for the Rust side so the front end can be driven in a browser.
  * Mirrors what each Tauri command actually does, including what it refuses and the casing
- * it answers in. Where the real thing has a rule — one slot is one pattern, a shortened
- * pattern loses the notes off its end — the rule is here too, so a test that passes here
- * is testing the same behaviour.
+ * it answers in. Where the real thing has a rule — a block is as long as it was drawn, a
+ * shortened pattern loses the notes off its end, a note past the end lengthens the pattern
+ * — the rule is here too, so a test that passes here is testing the same behaviour.
  */
 window.__weetbeats_calls = [];
 
 const MAX_PATTERNS = 32;
 const MAX_TRACKS = 32;
-const MAX_STEPS = 64;
+const MAX_STEPS = 256;
 const MAX_SONG_BARS = 256;
 const MAX_NOTES = 256;
 
@@ -23,7 +23,7 @@ const fake = {
   nextTrackId: 0,
   tracks: new Map(),
   patterns: [{ id: 0, name: "Pattern 1", steps: 16, lanes: [] }],
-  // { step, pattern }: what plays where.
+  // { step, pattern, length }: what plays where, and for how long.
   song: [],
   name: "Untitled",
   folder: "/tmp/Untitled.beat",
@@ -74,6 +74,12 @@ function trim(p) {
 }
 
 const arrangement = () => ({ patterns: fake.patterns, song: fake.song });
+
+/* The block of a pattern that covers a step, which is what the song view hit tests. */
+const covering = (id, step) =>
+  fake.song.find(
+    (one) => one.pattern === id && step >= one.step && step < one.step + Math.max(1, one.length),
+  ) ?? null;
 
 const startup = () => ({
   project: {
@@ -151,7 +157,11 @@ const handlers = {
   // The piano roll's three commands. A note is identified by where it is.
   set_note: ({ pattern: id, track, at, velocity, length }) => {
     const p = pattern(id);
-    if (!p || at.step >= p.steps) return false;
+    if (!p) return { fits: false, steps: 0 };
+    // A note past the end makes the pattern longer rather than being refused.
+    const wanted = at.step + Math.max(1, length);
+    if (wanted > p.steps) p.steps = Math.max(1, Math.min(MAX_STEPS, wanted));
+    if (at.step >= p.steps) return { fits: false, steps: 0 };
     const l = lane(p, track);
     const note = {
       step: at.step,
@@ -161,9 +171,9 @@ const handlers = {
     };
     const was = l.notes.findIndex((n) => n.step === at.step && n.pitch === at.pitch);
     if (was >= 0) l.notes[was] = note;
-    else if (l.notes.length >= MAX_NOTES) return false;
+    else if (l.notes.length >= MAX_NOTES) return { fits: false, steps: p.steps };
     else l.notes.push(note);
-    return true;
+    return { fits: true, steps: p.steps };
   },
   clear_note: ({ pattern: id, track, at }) => {
     const p = pattern(id);
@@ -214,38 +224,71 @@ const handlers = {
     p.name = trimmed ? trimmed.slice(0, 40) : nextName();
     return p.name;
   },
-  // Mirrors Project::set_pattern_steps: the notes off the end go, and the pattern's places
-  // in the song move onto the new grid.
+  set_pattern_colour: ({ id, colour }) => {
+    const p = pattern(id);
+    if (!p) return false;
+    p.colour = colour;
+    return true;
+  },
+  rename_project: ({ name }) => {
+    const wanted = name.trim().slice(0, 60);
+    if (!wanted) throw new Error("a project needs a name");
+    if (wanted.includes("/")) throw new Error(`${wanted} is not a name a folder can have`);
+    fake.name = wanted;
+    fake.folder = `/tmp/${wanted}.beat`;
+    return fake.name;
+  },
+  // Mirrors Project::set_pattern_steps: the notes off the end go, and the song is left
+  // alone — a block in it is as long as it was drawn, whatever its pattern does after.
   set_pattern_steps: ({ id, steps }) => {
     const p = pattern(id);
     if (!p) return [0, arrangement()];
     p.steps = Math.max(1, Math.min(MAX_STEPS, steps));
     trim(p);
-    const seen = new Set();
-    fake.song = fake.song.filter((one) => {
-      if (one.pattern !== id) return true;
-      one.step = Math.floor(one.step / p.steps) * p.steps;
-      if (seen.has(one.step)) return false;
-      seen.add(one.step);
-      return true;
-    });
-    sortSong();
     return [p.steps, arrangement()];
   },
   open_pattern: ({ id }) => { fake.active = id; fake.songMode = false; return null; },
   close_pattern: () => { fake.songMode = true; return null; },
 
-  // Mirrors Project::set_placement: a slot is as long as the pattern in it.
-  place_pattern: ({ pattern: id, slot, on }) => {
+  /*
+   * Mirrors Project::place and Project::unplace. A block starts where it is put, is as long
+   * as it is asked to be — zero meaning one play-through of the pattern — and anything of
+   * the same pattern it lands on makes way for it.
+   */
+  place_pattern: ({ pattern: id, step, length, on }) => {
     const p = pattern(id);
-    if (!p) return false;
-    const step = slot * Math.max(1, p.steps);
-    fake.song = fake.song.filter((one) => !(one.pattern === id && one.step === step));
-    if (!on) return false;
-    if (step + p.steps > MAX_SONG_BARS * 16) return false;
-    fake.song.push({ step, pattern: id });
+    if (!p) return fake.song;
+    if (!on) {
+      fake.song = fake.song.filter((one) => !(one.pattern === id && one.step === step));
+      return fake.song;
+    }
+    const want = length || Math.max(1, p.steps);
+    if (step + want > MAX_SONG_BARS * 16) return fake.song;
+    fake.song = fake.song.filter(
+      (one) => !(one.pattern === id && one.step < step + want && step < one.step + one.length),
+    );
+    fake.song.push({ step, pattern: id, length: want });
     sortSong();
-    return true;
+    return fake.song;
+  },
+  move_placement: ({ pattern: id, from, to }) => {
+    const one = covering(id, from);
+    if (!one) return fake.song;
+    const length = one.length;
+    fake.song = fake.song.filter((other) => other !== one);
+    return handlers.place_pattern({ pattern: id, step: to, length, on: true });
+  },
+  resize_placement: ({ pattern: id, step, length }) => {
+    const one = covering(id, step);
+    if (!one) return fake.song;
+    const at = one.step;
+    fake.song = fake.song.filter((other) => other !== one);
+    return handlers.place_pattern({
+      pattern: id,
+      step: at,
+      length: Math.max(1, length),
+      on: true,
+    });
   },
   clear_song_bar: ({ bar }) => {
     const from = bar * 16;
@@ -268,10 +311,7 @@ const handlers = {
     // One bit per pattern: everything covering this step sounds at once.
     patterns: fake.songMode
       ? fake.song
-          .filter((one) => {
-            const p = pattern(one.pattern);
-            return p && fake.step >= one.step && fake.step < one.step + p.steps;
-          })
+          .filter((one) => fake.step >= one.step && fake.step < one.step + Math.max(1, one.length))
           .reduce((mask, one) => mask | (1 << one.pattern), 0)
       : 1 << fake.active,
     voices: fake.playing ? 3 : 0,

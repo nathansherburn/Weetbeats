@@ -32,8 +32,9 @@ pub const MAX_NOTES_PER_TRACK: usize = 256;
 /// Voices in the pool. Run out and the oldest gets stolen.
 pub const MAX_VOICES: usize = 64;
 
-/// Longest pattern the engine will play.
-pub const MAX_STEPS: u16 = 64;
+/// Longest pattern the engine will play. Notes are held in a flat list rather than a slot
+/// per step, so this costs nothing but the clock's range.
+pub const MAX_STEPS: u16 = 256;
 
 /// Boxes a new pattern has.
 pub const DEFAULT_STEPS: u32 = 16;

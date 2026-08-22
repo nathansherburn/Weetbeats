@@ -98,10 +98,12 @@ pub enum Command {
     SetSongLen(u32),
     /// Forget the whole song. Sent before a project's placements go across.
     ClearSong,
-    /// Play this pattern from this step of the song, once through.
+    /// Play this pattern from this step of the song, for this many steps. A block longer
+    /// than its pattern repeats it; a shorter one cuts it off.
     PlacePattern {
         pattern: u16,
         step: u32,
+        length: u32,
     },
     /// And take it out again.
     UnplacePattern {

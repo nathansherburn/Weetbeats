@@ -1,13 +1,17 @@
 /*
  * Weetbeats front end.
  *
- * Two views, one workspace. The song sits underneath: bars across the top, patterns down
- * the left, and placements that overlap freely so a kick pattern, a hat pattern and a snare
- * pattern add up to a beat. Each lane is divided by its own pattern's length, so one click
- * is one play-through of it: a four step pattern goes in four steps at a time. A pattern
- * opens on top of the song like a window, with its step grid and a close button; click the
- * pattern again, or hit escape, and you are back at the song. The patterns panel never goes
- * away, because it is how you get from one pattern to the next.
+ * Three views, one workspace. The song sits underneath: bars across the top, patterns down
+ * the left, and blocks that overlap freely so a kick pattern, a hat pattern and a snare
+ * pattern add up to a beat. A block starts wherever the snap puts it and is as long as you
+ * drag it out to be; longer than its pattern, it repeats. A pattern opens on top of the
+ * song like a window, with its step grid and a close button; click the pattern again, or hit
+ * escape, and you are back at the song. The patterns panel never goes away, because it is
+ * how you get from one pattern to the next.
+ *
+ * An instrument's row in a pattern is a small piano roll rather than a line of boxes, and
+ * clicking it opens the roll proper. Both are the same lane of notes seen two ways, so the
+ * ♪ button switches between them without anything being lost.
  *
  * It holds a copy of the project so a click can light a box up straight away, but Rust owns
  * it: every change goes there too, and the audio thread hears about it from Rust.
@@ -30,10 +34,10 @@ const GAP = 4; // gap between steps
 const ROW = 46; // must match --row in the stylesheet
 const HEADERS = 296; // the instrument column: must match --headers
 const LANE = 34; // one pattern's row, in the panel and in the song: must match --lane
-const HEAD = 30; // the strip along the top of both views: must match --head
+const HEAD = 34; // the strip along the top of every view: must match --head
 const STEPS_PER_BEAT = 4; // sixteenth notes
 const STEPS_PER_BAR = 16; // a bar of the song, and the length of a new pattern
-const MAX_STEPS = 64; // as far as the engine will play
+const MAX_STEPS = 256; // as far as the engine will play
 
 // The piano roll. Must match --keys, --semitone and --velocity in the stylesheet.
 const KEYS = 152;
@@ -41,15 +45,36 @@ const SEMITONE = 15;
 const VELOCITY = 54;
 const ROLL_CELL = 30; // one step, narrower than a box: melodies are longer than beats
 const DEFAULT_PITCH = 60; // middle C, and the sampler's unity pitch
-const LOW_PITCH = 36; // two octaves below unity
-const HIGH_PITCH = 96; // and three above
+// The whole of MIDI. A sampler stretched five octaves down is a different instrument, and
+// people do that on purpose, so the roll goes as far as the note numbers do.
+const LOW_PITCH = 0;
+const HIGH_PITCH = 127;
 const PITCHES = HIGH_PITCH - LOW_PITCH + 1;
+// How many steps past the end of the pattern the roll draws. Notes go there, and putting
+// one there makes the pattern longer: that is how a bar becomes two.
+const ROLL_SPARE = 16;
 const BLACK_KEYS = [1, 3, 6, 8, 10]; // semitones from C that are black
 
-// The song is drawn in real time, so a bar is always the same width and a pattern painted
-// across two bars is twice as wide as one painted across one.
+/*
+ * The song is drawn in real time: a block twice as long is twice as wide. `SONG_STEP` is
+ * one step at 1x, and the zoom multiplies it — pinch the trackpad or use the buttons.
+ */
 const SONG_STEP = 4;
-const BAR_PX = STEPS_PER_BAR * SONG_STEP;
+const MIN_ZOOM = 0.25;
+const MAX_ZOOM = 8;
+const ZOOM_STEP = 1.3; // one press of a zoom button
+const MAX_SNAP = 64; // the coarsest the song grid goes
+const EDGE = 6; // how close to a block's edge counts as grabbing the edge
+
+/*
+ * A colour per pattern in the song, so a glance tells you what is where. Patterns get one
+ * by their place in the list until somebody picks; the picked one is saved with the project.
+ * All light enough to read dark text on, because the block's name is written across it.
+ */
+const BLOCK_COLOURS = [
+  "#ff4d87", "#ff9d4d", "#ffd75e", "#9be34d",
+  "#4de3a8", "#4dc9ff", "#8f8bff", "#f07bff",
+];
 
 // Pixels of drag per step of a number field.
 const DRAG_PIXELS = 3;
@@ -58,10 +83,12 @@ const state = {
   bpm: 120,
   tracks: [], // { id, name, gain, muted, soloed, peaks }
   patterns: [], // { id, name, steps, notes: Map<trackId, Set<step>> }
-  song: [], // { pattern, step }, sorted: what plays where
+  song: [], // { pattern, step, length }, sorted: what plays where
   open: null, // the pattern the editor has, or null for the song view
   roll: null, // the track the piano roll has, or null for the boxes
   drawLength: 1, // how long the last note drawn was, so the next one matches
+  snap: STEPS_PER_BAR, // what blocks in the song snap to, in steps
+  zoom: 1, // how wide a step of the song is drawn, as a multiple of SONG_STEP
   playing: false,
   step: 0,
   progress: 0,
@@ -71,12 +98,13 @@ const state = {
 
 const el = {};
 for (const id of [
-  "play", "bpm", "meterFill", "status", "projectName", "songMode", "addPattern",
-  "patternList", "song",
-  "songScroll", "scrubber", "lanes", "songHint", "editor", "editorScroll", "closePattern",
+  "play", "bpm", "meterFill", "status", "songMode", "songName", "addPattern",
+  "patternList", "song", "snap", "zoomIn", "zoomOut", "zoomRead",
+  "songScroll", "songGrid", "scrubber", "lanes", "songHint", "editor", "editorScroll",
+  "closePattern",
   "add", "addBig", "steps", "fewerSteps", "moreSteps", "trackHeaders", "grid", "ruler",
   "empty", "roll", "rollScroll", "rollName", "rollRuler", "keys", "notes", "velocity",
-  "oneShot", "closeRoll",
+  "closeRoll",
 ]) {
   el[id] = document.getElementById(id);
 }
@@ -132,10 +160,11 @@ function applyStartup(startup) {
   state.song = project.song.map((one) => ({ ...one }));
 
   el.bpm.value = String(Math.round(state.bpm));
-  el.projectName.textContent = startup.name;
-  el.projectName.title = startup.folder;
+  el.songName.textContent = startup.name;
+  el.songMode.title = `${startup.folder} — click for the song, double click to rename it`;
 
   state.roll = null;
+  closeColours();
   // Land on the song when there is one, and in the first pattern when there is not: a new
   // project has nothing to arrange yet, so the grid is the only place worth being.
   if (state.song.length) {
@@ -161,7 +190,13 @@ function readPattern(pattern) {
       lane.notes.map((note) => ({ ...note })),
     );
   }
-  return { id: pattern.id, name: pattern.name, steps: pattern.steps, notes };
+  return {
+    id: pattern.id,
+    name: pattern.name,
+    steps: pattern.steps,
+    colour: pattern.colour ?? null,
+    notes,
+  };
 }
 
 function patternById(id) {
@@ -239,8 +274,50 @@ function togglePattern(id) {
 el.closePattern.addEventListener("click", closePattern);
 
 /* The panel's heading is the way back to the song, from wherever you are. */
-el.songMode.addEventListener("click", () => {
+el.songMode.addEventListener("click", (e) => {
+  // The second click of a double click is the start of a rename, not a second trip home.
+  if (e.detail > 1) return;
   if (state.open !== null) closePattern();
+});
+
+/*
+ * Double click the song's name to change it, the same as a pattern's. The folder is the
+ * project, so this renames the folder: Rust writes it out first, so nothing is in flight
+ * while it moves.
+ */
+el.songMode.addEventListener("dblclick", () => {
+  if (el.songMode.querySelector(".rename")) return;
+  const shown = el.songName;
+  const input = document.createElement("input");
+  input.className = "rename";
+  input.type = "text";
+  input.value = shown.textContent;
+  input.maxLength = 60;
+  shown.replaceWith(input);
+  input.focus();
+  input.select();
+
+  let done = false;
+  const finish = async (keep) => {
+    if (done) return;
+    done = true;
+    input.replaceWith(shown);
+    if (!keep || input.value.trim() === shown.textContent) return;
+    try {
+      shown.textContent = await invoke("rename_project", { name: input.value });
+    } catch (e) {
+      showError(e);
+    }
+  };
+  input.addEventListener("click", (e) => e.stopPropagation());
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") finish(true);
+    if (e.key === "Escape") {
+      e.stopPropagation();
+      finish(false);
+    }
+  });
+  input.addEventListener("blur", () => finish(true));
 });
 
 // --- the patterns panel ---------------------------------------------------
@@ -251,6 +328,17 @@ function drawPatternPanel() {
       const row = document.createElement("div");
       row.className = "prow";
       row.dataset.id = String(pattern.id);
+
+      // The colour its blocks are drawn in, and the way to change it.
+      const swatch = document.createElement("button");
+      swatch.className = "swatch";
+      swatch.style.background = blockColour(pattern, state.patterns.indexOf(pattern));
+      swatch.title = "The colour this pattern is in the song";
+      swatch.addEventListener("click", (e) => {
+        e.stopPropagation();
+        pickColour(swatch, pattern);
+      });
+      row.append(swatch);
 
       const name = document.createElement("span");
       name.className = "pname";
@@ -324,6 +412,53 @@ function isSounding(id) {
   return ((state.sounding >>> id) & 1) === 1;
 }
 
+/*
+ * The colours to pick from. A set rather than a colour wheel: eight that are all light
+ * enough to read a pattern's name on, which a free choice would not be.
+ */
+let openColours = null;
+let closeColoursOn = null;
+
+function pickColour(near, pattern) {
+  closeColours();
+  const box = document.createElement("div");
+  box.className = "colours";
+  const spot = near.getBoundingClientRect();
+  box.style.left = `${Math.round(spot.left)}px`;
+  box.style.top = `${Math.round(spot.bottom + 6)}px`;
+
+  BLOCK_COLOURS.forEach((colour, index) => {
+    const pick = document.createElement("button");
+    pick.style.background = colour;
+    pick.title = `Colour ${index + 1}`;
+    pick.addEventListener("click", async () => {
+      closeColours();
+      pattern.colour = index;
+      state.needsDraw = true;
+      drawPatternPanel();
+      await invoke("set_pattern_colour", { id: pattern.id, colour: index });
+    });
+    box.append(pick);
+  });
+
+  document.body.append(box);
+  openColours = box;
+  // Anything else you do puts it away, which is what a popover is for — but pressing
+  // inside it is picking a colour, and taking it away before the click landed would mean
+  // nothing in here could ever be clicked.
+  closeColoursOn = (e) => {
+    if (!box.contains(e.target)) closeColours();
+  };
+  setTimeout(() => window.addEventListener("pointerdown", closeColoursOn, true));
+}
+
+function closeColours() {
+  if (closeColoursOn) window.removeEventListener("pointerdown", closeColoursOn, true);
+  closeColoursOn = null;
+  if (openColours) openColours.remove();
+  openColours = null;
+}
+
 /* Double click a name to change it. Enter or clicking away keeps it, escape drops it. */
 function startRename(row, pattern) {
   const name = row.querySelector(".pname");
@@ -395,7 +530,11 @@ function syncScroll(from, to) {
 }
 
 el.patternList.addEventListener("scroll", () => syncScroll(el.patternList, el.songScroll));
-el.songScroll.addEventListener("scroll", () => syncScroll(el.songScroll, el.patternList));
+el.songScroll.addEventListener("scroll", () => {
+  syncScroll(el.songScroll, el.patternList);
+  // The song canvases only draw what is in the window, so scrolling sideways is a redraw.
+  state.needsDraw = true;
+});
 
 // --- numbers you can drag, scroll or type ---------------------------------
 
@@ -482,8 +621,9 @@ async function setSteps(steps) {
   if (!open) return;
   const asked = Math.max(1, Math.min(MAX_STEPS, Math.round(steps) || 1));
   if (asked === open.steps) return;
-  // A slot in the song is as long as the pattern, so changing the length moves the pattern's
-  // places in the song. Rust works that out and hands back the lot.
+  // Rust hands back the length it settled on and the whole arrangement: notes that no
+  // longer fit are shortened or dropped, and there is no telling which from here. The song
+  // is left alone — a block in it is as long as it was drawn, whatever its pattern does.
   const [actual, after] = await invoke("set_pattern_steps", { id: open.id, steps: asked });
   state.patterns = after.patterns.map(readPattern);
   state.song = after.song.map((one) => ({ ...one }));
@@ -580,13 +720,15 @@ function drawTrackHeaders() {
         invoke("set_track_gain", { id: track.id, gain: track.gain });
       });
 
-      // The way into the piano roll, and a light showing which tracks are instruments
-      // rather than one-shots.
+      // Turns the row into a piano roll and back. Nothing is thrown away either way: the
+      // boxes and the roll are two views of one lane of notes.
       const roll = document.createElement("button");
       roll.className = `tick keys-on${track.pitched ? " on" : ""}`;
       roll.textContent = "♪";
-      roll.title = "Piano roll: play this one pitched";
-      roll.addEventListener("click", () => openRoll(track.id));
+      roll.title = track.pitched
+        ? "Back to the boxes, and back to a one-shot"
+        : "Piano roll: play this one pitched, and show its notes";
+      roll.addEventListener("click", () => setPitched(track.id, !track.pitched));
 
       const kill = document.createElement("button");
       kill.className = "tick kill";
@@ -692,24 +834,36 @@ function gridHeight() {
 }
 
 /*
- * Bars to draw: the song, one spare on the end, and enough to fill the window either way.
- * Empty bars are as good a place to put a pattern as any, so they are all drawn and all
- * clickable.
+ * Bars the song is long: what is in it, one spare on the end, and enough to fill the window.
+ * Empty bars are as good a place to put a pattern as any, so they are all there to click.
  */
 function songBars() {
-  const room = Math.ceil(el.songScroll.clientWidth / BAR_PX);
+  const room = Math.ceil(el.songScroll.clientWidth / Math.max(1, barPx()));
   return Math.max(songSteps() / STEPS_PER_BAR + 1, room);
+}
+
+/* How wide the song is in total: the scroll, not the canvas. */
+function songWidth() {
+  return Math.round(songBars() * barPx());
+}
+
+/* The roll draws past the end of the pattern, because you can put a note there. */
+function rollSteps() {
+  return stepsOf(state.open) + ROLL_SPARE;
 }
 
 function resize() {
   size(el.grid, gridWidth(), gridHeight());
   size(el.ruler, gridWidth(), HEAD - 1);
-  size(el.notes, stepsOf(state.open) * ROLL_CELL, PITCHES * SEMITONE);
-  size(el.rollRuler, stepsOf(state.open) * ROLL_CELL, HEAD - 1);
+  size(el.notes, rollSteps() * ROLL_CELL, PITCHES * SEMITONE);
+  size(el.rollRuler, rollSteps() * ROLL_CELL, HEAD - 1);
   size(el.keys, KEYS, PITCHES * SEMITONE);
-  size(el.velocity, stepsOf(state.open) * ROLL_CELL, VELOCITY);
-  size(el.lanes, songBars() * BAR_PX, Math.max(LANE, state.patterns.length * LANE));
-  size(el.scrubber, songBars() * BAR_PX, HEAD - 1);
+  size(el.velocity, rollSteps() * ROLL_CELL, VELOCITY);
+  // Only as wide as the window: the grid around them carries the song's real width.
+  const window_ = Math.max(1, el.songScroll.clientWidth);
+  el.songGrid.style.width = `${songWidth()}px`;
+  size(el.lanes, window_, Math.max(LANE, state.patterns.length * LANE));
+  size(el.scrubber, window_, HEAD - 1);
   el.songHint.classList.toggle("hidden", state.song.length > 0);
   state.needsDraw = true;
   drawRuler();
@@ -717,7 +871,7 @@ function resize() {
 
 /* The song got longer or shorter, so only resize when it actually changed shape. */
 function songChanged() {
-  if (drawnWidth(el.lanes) !== songBars() * BAR_PX) {
+  if (el.songGrid.style.width !== `${songWidth()}px`) {
     resize();
   } else {
     el.songHint.classList.toggle("hidden", state.song.length > 0);
@@ -762,13 +916,19 @@ function drawGrid() {
 
   for (let row = 0; row < state.tracks.length; row++) {
     const track = state.tracks[row];
+    const y = row * ROW;
+    // An instrument's row is its notes rather than a line of boxes: boxes cannot say what
+    // pitch or how long, which is the whole point of turning it into one.
+    if (track.pitched) {
+      drawMiniRoll(ctx, pattern, track, y);
+      continue;
+    }
     // Only the notes a box can mean: the sampler's own pitch. Anything drawn in the piano
     // roll lives in the same lane and is left to the roll to show.
     const ticked = new Set();
     for (const note of pattern.notes.get(track.id) ?? []) {
       if (note.pitch === DEFAULT_PITCH) ticked.add(note.step);
     }
-    const y = row * ROW;
 
     for (let step = 0; step < pattern.steps; step++) {
       const x = step * CELL + GAP;
@@ -787,6 +947,66 @@ function drawGrid() {
       ctx.fill();
     }
   }
+}
+
+/*
+ * One instrument's notes, in the room a row of boxes would have taken. Click it to open the
+ * roll proper; the ♪ button in the header puts the boxes back, and neither throws anything
+ * away — the boxes and the roll have always been the same lane of notes.
+ *
+ * The pitches are scaled to what is actually in there, never less than an octave, so a bass
+ * line that stays inside a fifth still uses the height rather than hugging the middle.
+ */
+function drawMiniRoll(ctx, pattern, track, y) {
+  const notes = pattern.notes.get(track.id) ?? [];
+  const width = pattern.steps * CELL;
+  const top = y + GAP;
+  const height = ROW - GAP * 2 - 1;
+
+  ctx.fillStyle = "#1b1724";
+  roundRect(ctx, GAP, top, Math.max(4, width - GAP * 2), height, 5);
+  ctx.fill();
+  ctx.save();
+  roundRect(ctx, GAP, top, Math.max(4, width - GAP * 2), height, 5);
+  ctx.clip();
+
+  for (let step = 0; step < pattern.steps; step++) {
+    if (step % STEPS_PER_BEAT !== 0) continue;
+    ctx.fillStyle = step % STEPS_PER_BAR === 0 ? "rgba(0,0,0,0.5)" : "rgba(0,0,0,0.25)";
+    ctx.fillRect(step * CELL, top, 1, height);
+  }
+
+  if (!notes.length) {
+    ctx.fillStyle = PALETTE.dim;
+    ctx.font = "11px ui-sans-serif, system-ui, sans-serif";
+    ctx.textBaseline = "middle";
+    ctx.fillText("piano roll — click to open", GAP + 10, top + height / 2);
+    ctx.restore();
+    return;
+  }
+
+  let low = 127;
+  let high = 0;
+  for (const note of notes) {
+    low = Math.min(low, note.pitch);
+    high = Math.max(high, note.pitch);
+  }
+  const span = Math.max(11, high - low);
+  const middle = (low + high) / 2;
+  const bottom = middle - span / 2;
+  const bar = 3;
+  for (const note of notes) {
+    const x = note.step * CELL + 1;
+    const w = Math.max(3, Math.max(1, note.length) * CELL - 2);
+    const up = ((note.pitch - bottom) / span) * (height - bar - 4);
+    const live =
+      state.playing &&
+      state.step >= note.step &&
+      state.step < note.step + Math.max(1, note.length);
+    ctx.fillStyle = live ? PALETTE.lit : PALETTE.accent;
+    ctx.fillRect(x, top + height - 2 - bar - up, w, bar);
+  }
+  ctx.restore();
 }
 
 function roundRect(ctx, x, y, w, h, r) {
@@ -852,6 +1072,11 @@ function erasing(event) {
 el.grid.addEventListener("pointerdown", (e) => {
   const cell = cellAt(e);
   if (!cell) return;
+  // An instrument's row is a piano roll, and a piano roll opens rather than being ticked.
+  if (trackById(cell.track)?.pitched) {
+    openRoll(cell.track);
+    return;
+  }
   // Drag across boxes to paint, like FL Studio: what the first box becomes is what the
   // rest become, so a drag never toggles boxes back and forth under your finger. The right
   // button always rubs out, which saves aiming at the box you meant to remove.
@@ -863,7 +1088,12 @@ el.grid.addEventListener("pointerdown", (e) => {
 });
 
 el.grid.addEventListener("pointermove", (e) => {
-  if (painting === null) return;
+  if (painting === null) {
+    const cell = cellAt(e);
+    const cursor = !cell ? "default" : trackById(cell.track)?.pitched ? "pointer" : "cell";
+    if (el.grid.style.cursor !== cursor) el.grid.style.cursor = cursor;
+    return;
+  }
   paint(cellAt(e), painting);
 });
 
@@ -912,29 +1142,27 @@ function rollNotes() {
   return notesFor(pattern, state.roll);
 }
 
+/*
+ * One flag does two things, because they are the same thing: an instrument's notes mean a
+ * pitch and a length, so it is played pitched and its row shows the notes. A one-shot's
+ * notes mean "here", so it rings out and its row is a line of boxes.
+ */
 function setPitched(track, pitched) {
   const instrument = trackById(track);
   if (!instrument) return;
   instrument.pitched = pitched;
   invoke("set_track_pitched", { id: track, pitched });
+  if (!pitched && state.roll === track) closeRoll();
   drawTrackHeaders();
   showPitched();
+  state.needsDraw = true;
 }
 
 function showPitched() {
   const instrument = state.roll === null ? null : trackById(state.roll);
   if (!instrument) return;
   el.rollName.textContent = instrument.name;
-  el.oneShot.textContent = instrument.pitched ? "held" : "rings out";
-  el.oneShot.title = instrument.pitched
-    ? "Notes stop when they end. Click to let them ring out instead."
-    : "Notes ring out, however short they are. Click to hold them instead.";
 }
-
-el.oneShot.addEventListener("click", () => {
-  const instrument = state.roll === null ? null : trackById(state.roll);
-  if (instrument) setPitched(instrument.id, !instrument.pitched);
-});
 
 const isBlack = (pitch) => BLACK_KEYS.includes(((pitch % 12) + 12) % 12);
 const pitchName = (pitch) =>
@@ -982,12 +1210,15 @@ function drawKeys() {
 
 function drawRollRuler() {
   const ctx = el.rollRuler.getContext("2d");
-  const steps = stepsOf(state.open);
+  const steps = rollSteps();
+  const inPattern = stepsOf(state.open);
   ctx.clearRect(0, 0, drawnWidth(el.rollRuler), HEAD);
   ctx.font = "10px ui-sans-serif, system-ui, sans-serif";
   ctx.textBaseline = "middle";
   for (let step = 0; step < steps; step++) {
     const onBeat = step % STEPS_PER_BEAT === 0;
+    const past = step >= inPattern;
+    ctx.globalAlpha = past ? 0.4 : 1;
     ctx.fillStyle = onBeat ? PALETTE.dim : PALETTE.line;
     if (onBeat) {
       ctx.fillText(String(step / STEPS_PER_BEAT + 1), step * ROLL_CELL + 3, 15);
@@ -995,11 +1226,13 @@ function drawRollRuler() {
       ctx.fillRect(step * ROLL_CELL, 14, 2, 1);
     }
   }
+  ctx.globalAlpha = 1;
 }
 
 function drawNotes() {
   const ctx = el.notes.getContext("2d");
-  const steps = stepsOf(state.open);
+  const steps = rollSteps();
+  const inPattern = stepsOf(state.open);
   const width = steps * ROLL_CELL;
   const height = PITCHES * SEMITONE;
   ctx.clearRect(0, 0, width, height);
@@ -1015,12 +1248,22 @@ function drawNotes() {
     }
   }
 
+  // Past the end of the pattern, where a note can still go: it makes the pattern longer.
+  // Shaded rather than fenced off, because drawing off the end is how a bar becomes two.
+  const endX = inPattern * ROLL_CELL;
+  ctx.fillStyle = "rgba(0,0,0,0.4)";
+  ctx.fillRect(endX, 0, width - endX, height);
+
   // Beats and bars over the top.
   for (let step = 0; step <= steps; step++) {
     if (step % STEPS_PER_BEAT !== 0) continue;
     ctx.fillStyle = step % STEPS_PER_BAR === 0 ? "rgba(0,0,0,0.5)" : "rgba(0,0,0,0.25)";
     ctx.fillRect(step * ROLL_CELL, 0, 1, height);
   }
+
+  // And where the pattern ends, so you can see what you are about to lengthen.
+  ctx.fillStyle = PALETTE.dim;
+  ctx.fillRect(endX - 1, 0, 2, height);
 
   if (state.playing) {
     ctx.fillStyle = "rgba(255,215,94,0.10)";
@@ -1044,8 +1287,11 @@ function drawNotes() {
 
 function drawVelocity() {
   const ctx = el.velocity.getContext("2d");
-  const width = stepsOf(state.open) * ROLL_CELL;
+  const width = rollSteps() * ROLL_CELL;
   ctx.clearRect(0, 0, width, VELOCITY);
+  const endX = stepsOf(state.open) * ROLL_CELL;
+  ctx.fillStyle = "rgba(0,0,0,0.35)";
+  ctx.fillRect(endX, 0, width - endX, VELOCITY);
   for (const note of rollNotes()) {
     const x = note.step * ROLL_CELL;
     const h = Math.max(2, (note.velocity / 127) * (VELOCITY - 8));
@@ -1062,7 +1308,8 @@ function rollAt(event) {
   const x = event.clientX - rect.left;
   const step = Math.floor(x / ROLL_CELL);
   const row = Math.floor((event.clientY - rect.top) / SEMITONE);
-  if (step < 0 || step >= stepsOf(state.open)) return null;
+  // Past the end of the pattern still counts: putting a note there lengthens the pattern.
+  if (step < 0 || step >= rollSteps()) return null;
   if (row < 0 || row >= PITCHES) return null;
   return { step, pitch: rowPitch(row), x };
 }
@@ -1116,7 +1363,7 @@ el.notes.addEventListener("pointerdown", (e) => {
     step: at.step,
     pitch: at.pitch,
     velocity: 100,
-    length: Math.min(state.drawLength, stepsOf(state.open) - at.step),
+    length: Math.max(1, Math.min(state.drawLength, MAX_STEPS - at.step)),
   };
   notesFor(pattern, state.roll).push(note);
   state.needsDraw = true;
@@ -1126,13 +1373,20 @@ el.notes.addEventListener("pointerdown", (e) => {
 });
 
 el.notes.addEventListener("pointermove", (e) => {
-  if (!dragging) return;
+  if (!dragging) {
+    // The same cursors as the song: the end of a note is a handle, the middle picks it up.
+    const at = rollAt(e);
+    const under = at && noteUnder(at);
+    const cursor = !under ? "cell" : under.edge ? "ew-resize" : "grab";
+    if (el.notes.style.cursor !== cursor) el.notes.style.cursor = cursor;
+    return;
+  }
   const at = rollAt(e);
   if (!at) return;
   const note = dragging.note;
 
   if (dragging.mode === "length") {
-    const length = Math.max(1, Math.min(at.step - note.step + 1, stepsOf(state.open) - note.step));
+    const length = Math.max(1, Math.min(at.step - note.step + 1, MAX_STEPS - note.step));
     if (length !== note.length) {
       note.length = length;
       state.needsDraw = true;
@@ -1140,10 +1394,7 @@ el.notes.addEventListener("pointermove", (e) => {
     return;
   }
 
-  const step = Math.max(
-    0,
-    Math.min(at.step - dragging.grab.step, stepsOf(state.open) - note.length),
-  );
+  const step = Math.max(0, Math.min(at.step - dragging.grab.step, MAX_STEPS - note.length));
   const pitch = Math.max(LOW_PITCH, Math.min(HIGH_PITCH, at.pitch - dragging.grab.pitch));
   if (step === note.step && pitch === note.pitch) return;
   if (pitch !== note.pitch) invoke("audition", { id: state.roll, pitch });
@@ -1177,19 +1428,33 @@ const dropNote = () => {
 };
 el.notes.addEventListener("pointerup", dropNote);
 el.notes.addEventListener("pointercancel", dropNote);
+el.notes.addEventListener("pointerleave", () => {
+  el.notes.style.cursor = "default";
+});
 
 /* Put a note where Rust can see it. Adding and changing one are the same thing. */
 function send(note) {
+  const pattern = state.open;
   invoke("set_note", {
-    pattern: state.open,
+    pattern,
     track: state.roll,
     at: { step: note.step, pitch: note.pitch },
     velocity: note.velocity,
     length: note.length,
-  }).then((fits) => {
-    if (!fits) {
+  }).then((put) => {
+    if (!put.fits) {
       remove(note, true);
       showError("that track is as full of notes as the engine will hold");
+      return;
+    }
+    // A note past the end made the pattern longer, so everything that is drawn from its
+    // length has to be drawn again: the roll, the boxes, and the count in the panel.
+    const grew = patternById(pattern);
+    if (grew && grew.steps !== put.steps) {
+      grew.steps = put.steps;
+      if (state.open === pattern) el.steps.value = String(put.steps);
+      drawPatternPanel();
+      resize();
     }
   });
 }
@@ -1253,40 +1518,77 @@ el.keys.addEventListener("pointerdown", (e) => {
 // --- the song -------------------------------------------------------------
 
 /*
- * A lane is divided by its own pattern's length: slot 3 of a four step pattern starts at step
- * 12, slot 3 of a sixteen step one at step 48. One slot is one play-through, which is what
- * lets a four step pattern take four steps of the song rather than a whole bar of it.
+ * A block is a pattern put somewhere in the song, for as long as you drag it out to be. It
+ * starts wherever the snap puts it — not on a grid worked out from the pattern's length, so
+ * a thirty two step pattern can start on a half bar — and a block longer than its pattern
+ * repeats it. Drag the middle to move it, either end to change where that end is.
+ *
+ * That is also the fix for blocks that could not be clicked: a block is hit tested where it
+ * actually is, over its whole length, rather than by working out which slot of a grid a
+ * click landed in.
  */
-function slotWidth(pattern) {
-  return Math.max(1, pattern.steps) * SONG_STEP;
+
+/* One step of the song, in pixels, at the zoom it is drawn at. */
+function songStep() {
+  return SONG_STEP * state.zoom;
 }
 
-function placedAt(pattern, step) {
-  return state.song.some((one) => one.pattern === pattern && one.step === step);
+function barPx() {
+  return STEPS_PER_BAR * songStep();
 }
 
-/* Put a pattern in the song, or take it out, the same way Rust does. */
-function place(pattern, step, on) {
-  state.song = state.song.filter((one) => !(one.pattern === pattern && one.step === step));
-  if (on) {
-    state.song.push({ pattern, step });
-    state.song.sort((a, b) => a.step - b.step || a.pattern - b.pattern);
-  }
+/*
+ * Two ways of landing on the snap. Drawing a block means "in this bar", so it goes to the
+ * start of the one you clicked in. Dragging an edge means "up to that line", so it goes to
+ * the nearest — otherwise the far edge of a bar would be four pixels wide to aim at.
+ */
+function snapFloor(step) {
+  const snap = Math.max(1, state.snap);
+  return Math.max(0, Math.floor(step / snap) * snap);
+}
+
+function snapNear(step) {
+  const snap = Math.max(1, state.snap);
+  return Math.max(0, Math.round(step / snap) * snap);
+}
+
+/* The colour a pattern's blocks are drawn in: the one it was given, or one from its place. */
+function blockColour(pattern, row) {
+  const pick = pattern.colour ?? row;
+  return BLOCK_COLOURS[((pick % BLOCK_COLOURS.length) + BLOCK_COLOURS.length) % BLOCK_COLOURS.length];
+}
+
+/* The same colour, lifted towards white. What a block that is sounding right now looks like. */
+function lighten(hex, amount) {
+  const n = parseInt(hex.slice(1), 16);
+  const mix = (channel) => Math.round(channel + (255 - channel) * amount);
+  return `rgb(${mix((n >> 16) & 255)},${mix((n >> 8) & 255)},${mix(n & 255)})`;
+}
+
+/* The block of a pattern covering a step, if there is one. */
+function placementAt(pattern, step) {
+  return (
+    state.song.find(
+      (one) => one.pattern === pattern && step >= one.step && step < one.step + Math.max(1, one.length),
+    ) ?? null
+  );
 }
 
 /* Where the song ends, rounded up to a bar so it loops somewhere musical. */
 function songSteps() {
   let end = 0;
   for (const one of state.song) {
-    const pattern = patternById(one.pattern);
-    if (pattern) end = Math.max(end, one.step + pattern.steps);
+    end = Math.max(end, one.step + Math.max(1, one.length));
   }
   return Math.ceil(end / STEPS_PER_BAR) * STEPS_PER_BAR;
 }
 
-/* Where the playhead is across the song, in pixels. */
+/*
+ * Where the playhead is across the song, in pixels. Part way through a step only while it
+ * is playing: stopped, it sits on the step it is on, which is where you dragged it to.
+ */
 function songPlayheadX() {
-  return (state.step + state.progress) * SONG_STEP;
+  return (state.step + (state.playing ? state.progress : 0)) * songStep();
 }
 
 function drawSong() {
@@ -1294,85 +1596,107 @@ function drawSong() {
   drawLanes();
 }
 
+/*
+ * The canvases are only as wide as the window, so everything is drawn relative to how far
+ * the song has been scrolled. Off screen bars and blocks cost nothing.
+ */
+function songLeft() {
+  return el.songScroll.scrollLeft;
+}
+
 function drawScrubber() {
   const ctx = el.scrubber.getContext("2d");
   const width = drawnWidth(el.scrubber);
   const height = HEAD - 1;
+  const left = songLeft();
   ctx.clearRect(0, 0, width, height);
   ctx.font = "10px ui-sans-serif, system-ui, sans-serif";
   ctx.textBaseline = "middle";
 
   const bars = songBars();
+  const bar = barPx();
   const playingBar = Math.floor(state.step / STEPS_PER_BAR);
-  for (let bar = 0; bar < bars; bar++) {
-    // Every fourth bar gets a brighter mark: that is where a phrase usually turns over.
-    const phrase = bar % 4 === 0;
+  // Zoomed a long way out there is no room to number every bar, so number the phrases.
+  const every = bar < 26 ? 4 : 1;
+  const first = Math.max(0, Math.floor(left / bar));
+  const last = Math.min(bars, Math.ceil((left + width) / bar) + 1);
+  for (let n = first; n < last; n++) {
+    const x = n * bar - left;
+    const phrase = n % 4 === 0;
     ctx.fillStyle = PALETTE.line;
-    ctx.fillRect(bar * BAR_PX, phrase ? 6 : 10, 1, height - 6);
-    ctx.fillStyle = state.playing && bar === playingBar ? PALETTE.lit : PALETTE.dim;
-    if (phrase || bars < 40) {
-      ctx.fillText(String(bar + 1), bar * BAR_PX + 5, 15);
-    }
+    ctx.fillRect(x, phrase ? 8 : 13, 1, height - 8);
+    if (n % every !== 0) continue;
+    ctx.fillStyle = n === playingBar ? PALETTE.lit : PALETTE.dim;
+    ctx.fillText(String(n + 1), x + 4, 15);
   }
 
-  if (state.playing) {
-    const x = songPlayheadX();
-    ctx.fillStyle = PALETTE.lit;
-    ctx.beginPath();
-    ctx.moveTo(x - 4, 2);
-    ctx.lineTo(x + 4, 2);
-    ctx.lineTo(x, 9);
-    ctx.closePath();
-    ctx.fill();
-  }
+  // The playhead, drawn whether or not anything is playing: it is a handle as well as a
+  // read-out, and a handle you cannot see is not one.
+  const x = songPlayheadX() - left;
+  ctx.fillStyle = state.playing ? PALETTE.lit : PALETTE.dim;
+  ctx.beginPath();
+  ctx.moveTo(x - 5, 1);
+  ctx.lineTo(x + 5, 1);
+  ctx.lineTo(x, 10);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillRect(x, 1, 1, height - 1);
 }
 
 function drawLanes() {
   const ctx = el.lanes.getContext("2d");
   const width = drawnWidth(el.lanes);
   const height = Math.max(LANE, state.patterns.length * LANE);
+  const step = songStep();
+  const bar = barPx();
+  const left = songLeft();
   ctx.clearRect(0, 0, width, height);
   ctx.font = "11px ui-sans-serif, system-ui, sans-serif";
   ctx.textBaseline = "middle";
 
-  for (let row = 0; row < state.patterns.length; row++) {
-    const pattern = state.patterns[row];
+  // The grid every lane shares: the snap you are working at, with the bars over the top.
+  const snapPx = Math.max(3, Math.max(1, state.snap) * step);
+  const firstSnap = Math.floor(left / snapPx);
+  const firstBar = Math.floor(left / bar);
+  for (let row = 0; row < Math.max(1, state.patterns.length); row++) {
     const y = row * LANE;
-    const slot = slotWidth(pattern);
-
-    // The lane's own grid first, so you can see how long the pattern is before you put it
-    // anywhere, and where the next one along would go.
-    for (let x = 0; x < width; x += slot) {
-      ctx.fillStyle = (x / slot) % 2 === 0 ? "#221e2c" : "#1e1a27";
-      roundRect(ctx, x + 1, y + 3, Math.min(slot, width - x) - 2, LANE - 7, 4);
-      ctx.fill();
+    for (let n = firstSnap; n * snapPx - left < width; n++) {
+      ctx.fillStyle = n % 2 === 0 ? "#221e2c" : "#1e1a27";
+      ctx.fillRect(n * snapPx - left, y + 3, snapPx - 1, LANE - 7);
     }
-
-    // Then the bar lines over it, so the song's own grid is still readable.
     ctx.fillStyle = "rgba(0,0,0,0.35)";
-    for (let x = BAR_PX; x < width; x += BAR_PX) {
-      ctx.fillRect(x, y, 1, LANE - 1);
+    for (let n = firstBar; n * bar - left < width; n++) {
+      ctx.fillRect(n * bar - left, y, 1, LANE - 1);
     }
   }
 
-  // And the placements on top. Every one is exactly as wide as its pattern is long.
+  // And the blocks on top, each as wide as it is long.
   for (const one of state.song) {
     const row = state.patterns.findIndex((pattern) => pattern.id === one.pattern);
     if (row < 0) continue;
     const pattern = state.patterns[row];
     const y = row * LANE;
-    const x = one.step * SONG_STEP;
-    const w = slotWidth(pattern) - 2;
+    const x = one.step * step - left;
+    const w = Math.max(3, Math.max(1, one.length) * step - 2);
+    if (x + w < 0 || x > width) continue;
     const h = LANE - 7;
     const live =
       state.playing &&
       isSounding(pattern.id) &&
       state.step >= one.step &&
-      state.step < one.step + pattern.steps;
+      state.step < one.step + Math.max(1, one.length);
 
-    ctx.fillStyle = live ? PALETTE.lit : PALETTE.accent;
+    const base = blockColour(pattern, row);
+    ctx.fillStyle = live ? lighten(base, 0.5) : base;
     roundRect(ctx, x + 1, y + 3, w, h, 4);
     ctx.fill();
+
+    // The right hand edge is the handle for how long it is, so it is marked, the same way
+    // a note in the piano roll is.
+    if (w > 10) {
+      ctx.fillStyle = "rgba(0,0,0,0.22)";
+      ctx.fillRect(x + w - 2, y + 4, 3, h - 2);
+    }
     if (w > 26) {
       ctx.save();
       roundRect(ctx, x + 1, y + 3, w, h, 4);
@@ -1381,78 +1705,293 @@ function drawLanes() {
       ctx.fillText(pattern.name, x + 6, y + LANE / 2 - 1);
       ctx.restore();
     }
+    // Where the pattern comes round again inside a longer block, so a block that repeats
+    // four times looks like four.
+    const repeat = Math.max(1, pattern.steps) * step;
+    if (repeat >= 6) {
+      ctx.fillStyle = "rgba(0,0,0,0.28)";
+      for (let at = repeat; at < w; at += repeat) {
+        ctx.fillRect(x + at, y + 5, 1, h - 4);
+      }
+    }
   }
 
-  if (state.playing) {
-    ctx.fillStyle = PALETTE.lit;
-    ctx.fillRect(songPlayheadX(), 0, 1, height);
-  }
+  ctx.fillStyle = state.playing ? PALETTE.lit : "rgba(139,131,153,0.6)";
+  ctx.fillRect(songPlayheadX() - left, 0, 1, height);
 }
 
-/* Paint patterns into the song the same way you paint boxes into a pattern. */
-let paintingSong = null;
+// --- putting blocks in the song -------------------------------------------
 
-function songCellAt(event) {
+/*
+ * Where a pointer is in the song: which pattern's lane, which step, and what it is over.
+ * `zone` is what a press there would do — grab an edge, pick the block up, or draw a new one.
+ */
+function songAt(event) {
   const rect = el.lanes.getBoundingClientRect();
   const row = Math.floor((event.clientY - rect.top) / LANE);
   if (row < 0 || row >= state.patterns.length) return null;
   const pattern = state.patterns[row];
-  const slot = Math.floor((event.clientX - rect.left) / slotWidth(pattern));
-  if (slot < 0) return null;
-  return { pattern: pattern.id, slot, step: slot * Math.max(1, pattern.steps) };
+  const x = event.clientX - rect.left + songLeft();
+  if (x < 0) return null;
+  const step = Math.floor(x / songStep());
+  const block = placementAt(pattern.id, step);
+  let zone = "empty";
+  if (block) {
+    const from = block.step * songStep();
+    const to = (block.step + Math.max(1, block.length)) * songStep();
+    // On a very short block the edges would leave nothing to pick it up by, so the left
+    // hand two thirds moves it and only the far end resizes.
+    const grab = Math.min(EDGE, (to - from) / 3);
+    if (x >= to - grab) zone = "end";
+    else if (x <= from + grab) zone = "start";
+    else zone = "body";
+  }
+  return { row, pattern: pattern.id, step, x, block, zone };
 }
 
-function paintSong(cell, on) {
-  if (!cell) return;
-  if (placedAt(cell.pattern, cell.step) === on) return;
-  place(cell.pattern, cell.step, on);
+/* Rust owns the song, so what it hands back is what gets drawn. */
+async function songCommand(command, args) {
+  try {
+    state.song = (await invoke(command, args)).map((one) => ({ ...one }));
+  } catch (e) {
+    showError(e);
+  }
   songChanged();
-  invoke("place_pattern", { pattern: cell.pattern, slot: cell.slot, on }).then((actual) => {
-    if (actual !== on) {
-      place(cell.pattern, cell.step, actual);
-      songChanged();
-    }
-  });
 }
+
+let songDrag = null;
 
 el.lanes.addEventListener("pointerdown", (e) => {
-  const cell = songCellAt(e);
-  if (!cell) return;
-  paintingSong = erasing(e) ? false : !placedAt(cell.pattern, cell.step);
+  const at = songAt(e);
+  if (!at) return;
   el.lanes.setPointerCapture(e.pointerId);
-  paintSong(cell, paintingSong);
+
+  // The right button rubs out, all the way along a drag, the same as it does in a pattern.
+  if (erasing(e)) {
+    songDrag = { mode: "erase" };
+    if (at.block) rubOut(at.block);
+    return;
+  }
+
+  if (at.block && at.zone === "end") {
+    songDrag = { mode: "end", block: at.block, was: { ...at.block } };
+    return;
+  }
+  if (at.block && at.zone === "start") {
+    songDrag = { mode: "start", block: at.block, was: { ...at.block } };
+    return;
+  }
+  if (at.block) {
+    songDrag = { mode: "move", block: at.block, was: { ...at.block }, grab: at.step - at.block.step };
+    return;
+  }
+
+  // Nothing there: draw one, as long as its pattern, and keep painting along the drag. The
+  // drag stays in the lane it started in, so a diagonal sweep does not scribble in every
+  // pattern it passes.
+  songDrag = { mode: "paint", pattern: at.pattern };
+  put(at.pattern, snapFloor(at.step));
 });
 
 el.lanes.addEventListener("pointermove", (e) => {
-  if (paintingSong === null) return;
-  paintSong(songCellAt(e), paintingSong);
+  if (!songDrag) {
+    showSongCursor(songAt(e));
+    return;
+  }
+  const at = songAt(e);
+  if (!at) return;
+
+  if (songDrag.mode === "erase") {
+    if (at.block) rubOut(at.block);
+    return;
+  }
+  if (songDrag.mode === "paint") {
+    // Only where there is room: with a snap shorter than the pattern, every step of the
+    // drag would otherwise land on top of the block the last one made.
+    const pattern = songDrag.pattern;
+    const step = snapFloor(at.step);
+    if (roomFor(pattern, step, stepsOf(pattern))) put(pattern, step);
+    return;
+  }
+
+  const block = songDrag.block;
+  if (songDrag.mode === "end") {
+    // The end lands on the snap, and a block is never shorter than one step.
+    const end = Math.max(block.step + 1, snapNear(at.step + 1));
+    const length = end - block.step;
+    if (length !== block.length) {
+      block.length = length;
+      songChanged();
+    }
+    return;
+  }
+  if (songDrag.mode === "start") {
+    // Dragging the left hand edge moves where it starts and leaves where it ends alone.
+    const end = songDrag.was.step + Math.max(1, songDrag.was.length);
+    const start = Math.min(end - 1, snapNear(at.step));
+    if (start !== block.step) {
+      block.step = start;
+      block.length = end - start;
+      songChanged();
+    }
+    return;
+  }
+  // Moving: the block keeps its length and follows wherever you grabbed it.
+  const start = Math.max(0, snapNear(at.step - songDrag.grab));
+  if (start !== block.step) {
+    block.step = start;
+    songChanged();
+  }
 });
 
-const stopPaintingSong = () => {
-  paintingSong = null;
+/* True when a block of this pattern would sit here without landing on another of its own. */
+function roomFor(pattern, step, length) {
+  const end = step + Math.max(1, length);
+  return !state.song.some(
+    (one) =>
+      one.pattern === pattern && one.step < end && step < one.step + Math.max(1, one.length),
+  );
+}
+
+/* Draw a new block, as long as its pattern, and tell Rust. Anything of the same pattern it
+ * lands on makes way for it, which is what dropping a thing on a thing does everywhere. */
+function put(pattern, step) {
+  const steps = stepsOf(pattern);
+  state.song = state.song.filter(
+    (one) =>
+      !(
+        one.pattern === pattern &&
+        one.step < step + steps &&
+        step < one.step + Math.max(1, one.length)
+      ),
+  );
+  state.song.push({ pattern, step, length: steps });
+  state.song.sort((a, b) => a.step - b.step || a.pattern - b.pattern);
+  songChanged();
+  songCommand("place_pattern", { pattern, step, length: steps, on: true });
+}
+
+function rubOut(block) {
+  state.song = state.song.filter((one) => one !== block);
+  songChanged();
+  songCommand("place_pattern", {
+    pattern: block.pattern,
+    step: block.step,
+    length: 0,
+    on: false,
+  });
+}
+
+/* A drag is over, so tell Rust where things ended up. */
+const dropBlock = () => {
+  const drag = songDrag;
+  songDrag = null;
+  if (!drag || !drag.block) return;
+  const { block, was } = drag;
+  if (block.step === was.step && block.length === was.length) return;
+  if (block.step === was.step) {
+    songCommand("resize_placement", {
+      pattern: block.pattern,
+      step: block.step,
+      length: block.length,
+    });
+    return;
+  }
+  // The start moved, which is a move and possibly a resize: send it as one so the block is
+  // never briefly nowhere, then the new length after it.
+  const step = block.step;
+  const length = block.length;
+  songCommand("move_placement", { pattern: block.pattern, from: was.step, to: step }).then(
+    () => {
+      const now = placementAt(block.pattern, step);
+      if (now && now.length !== length) {
+        songCommand("resize_placement", { pattern: block.pattern, step, length });
+      }
+    },
+  );
 };
-el.lanes.addEventListener("pointerup", stopPaintingSong);
-el.lanes.addEventListener("pointercancel", stopPaintingSong);
+el.lanes.addEventListener("pointerup", dropBlock);
+el.lanes.addEventListener("pointercancel", dropBlock);
+
+/* The pointer says what a press would do before you press it. */
+function showSongCursor(at) {
+  const cursor =
+    at === null
+      ? "default"
+      : at.zone === "end" || at.zone === "start"
+        ? "ew-resize"
+        : at.zone === "body"
+          ? "grab"
+          : "cell";
+  if (el.lanes.style.cursor !== cursor) el.lanes.style.cursor = cursor;
+}
+
+el.lanes.addEventListener("pointerleave", () => {
+  el.lanes.style.cursor = "default";
+});
+
+// --- snap and zoom --------------------------------------------------------
+
+numberField(el.snap, {
+  min: 1,
+  max: MAX_SNAP,
+  onChange: (snap) => {
+    state.snap = snap;
+    state.needsDraw = true;
+  },
+});
+
+/*
+ * Zoom about a point, so whatever is under the cursor stays under it. Without that,
+ * zooming in on bar sixty puts you back at bar one.
+ */
+function setZoom(zoom, anchorX) {
+  const was = state.zoom;
+  const next = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom));
+  if (next === was) return;
+  const at = anchorX ?? el.songScroll.clientWidth / 2;
+  const step = (el.songScroll.scrollLeft + at) / (SONG_STEP * was);
+  state.zoom = next;
+  el.zoomRead.textContent = `${Math.round(next * 100) / 100}×`;
+  resize();
+  el.songScroll.scrollLeft = Math.max(0, step * SONG_STEP * next - at);
+}
+
+el.zoomIn.addEventListener("click", () => setZoom(state.zoom * ZOOM_STEP));
+el.zoomOut.addEventListener("click", () => setZoom(state.zoom / ZOOM_STEP));
+
+/*
+ * A trackpad pinch arrives as a wheel event with ctrlKey set — that is what the webview
+ * turns the gesture into — so the same handler does pinch and ctrl-scroll. A plain wheel is
+ * left alone: that is scrolling.
+ */
+el.songScroll.addEventListener(
+  "wheel",
+  (e) => {
+    if (!e.ctrlKey && !e.metaKey) return;
+    e.preventDefault();
+    const rect = el.songScroll.getBoundingClientRect();
+    setZoom(state.zoom * Math.exp(-e.deltaY / 180), e.clientX - rect.left);
+  },
+  { passive: false },
+);
 
 // --- the scrubber ---------------------------------------------------------
 
-function barAt(event, canvas) {
-  const rect = canvas.getBoundingClientRect();
-  const bar = Math.floor((event.clientX - rect.left) / BAR_PX);
-  return bar >= 0 && bar < songBars() ? bar : null;
-}
-
-/* Drag along the scrubber to play from a bar. */
+/*
+ * Drag along the top to move the playhead, playing or not. Snap decides where it lands, so
+ * at the default it moves a bar at a time and at one it goes anywhere.
+ */
 function scrub(event, force) {
-  const bars = songSteps() / STEPS_PER_BAR;
-  if (!bars) return;
-  const bar = barAt(event, el.scrubber);
-  if (bar === null) return;
-  const wanted = Math.min(bar, bars - 1) * STEPS_PER_BAR;
-  // Dragging over the bar it is already in is not worth a seek; pressing on it is, because
-  // that means "play this from the top".
+  const rect = el.scrubber.getBoundingClientRect();
+  const under = Math.floor((event.clientX - rect.left + songLeft()) / songStep());
+  if (under < 0) return;
+  // Nowhere to be but the top of an empty song, and never past the end of a real one.
+  const last = Math.max(0, songSteps() - 1);
+  const wanted = Math.min(snapNear(under), last);
   if (wanted === state.step && !force) return;
   state.step = wanted;
+  state.progress = 0;
   state.needsDraw = true;
   invoke("seek_song", { step: wanted });
 }
@@ -1463,14 +2002,10 @@ el.scrubber.addEventListener("pointerdown", async (e) => {
   // The right button empties the bar: everything that starts in it, gone. Patterns are all
   // different lengths, so shuffling the rest of the song up would only break their grids.
   if (erasing(e)) {
-    const bar = barAt(e, el.scrubber);
-    if (bar === null) return;
-    try {
-      state.song = (await invoke("clear_song_bar", { bar })).map((one) => ({ ...one }));
-      songChanged();
-    } catch (err) {
-      showError(err);
-    }
+    const rect = el.scrubber.getBoundingClientRect();
+    const bar = Math.floor((e.clientX - rect.left + songLeft()) / barPx());
+    if (bar < 0) return;
+    await songCommand("clear_song_bar", { bar });
     return;
   }
   scrubbing = true;
@@ -1545,6 +2080,21 @@ window.addEventListener("keydown", (e) => {
  * into an atomic and this reads it whenever the browser is about to paint.
  */
 let lastPoll = 0;
+let deafPolls = 0;
+
+/*
+ * How far up the meter a peak goes. Decibels, not the raw number: a linear meter spends
+ * nearly all of its travel in the top six decibels, so a mix sitting at a sensible level
+ * barely moves it while a raw one-shot played on its own slams it. That is what made the
+ * meter look like it only worked on the audition button.
+ */
+const METER_FLOOR_DB = -48;
+
+function meterWidth(peak) {
+  if (!(peak > 0)) return 0;
+  const db = 20 * Math.log10(peak);
+  return Math.max(0, Math.min(100, ((db - METER_FLOOR_DB) / -METER_FLOOR_DB) * 100));
+}
 
 async function tick(now) {
   requestAnimationFrame(tick);
@@ -1555,6 +2105,10 @@ async function tick(now) {
     lastPoll = now;
     try {
       const p = await invoke("playhead");
+      deafPolls = 0;
+      // The meter first: it is the one thing here that has to be right every frame, and
+      // anything below it that threw used to take the meter down with it, silently.
+      el.meterFill.style.width = `${meterWidth(p.peak)}%`;
       const wasSounding = state.sounding;
       state.step = p.step;
       state.progress = p.progress;
@@ -1569,11 +2123,13 @@ async function tick(now) {
       }
       // While it plays the playhead moves every frame, so there is always something to draw.
       if (state.playing) state.needsDraw = true;
-      el.meterFill.style.width = `${Math.min(100, p.peak * 100)}%`;
       if (p.saveError) showError(`could not save: ${p.saveError}`);
       else if (p.streamErrors > 0) showWarning(`${p.streamErrors} audio dropouts`);
-    } catch {
-      // A failed poll is not worth a dialog; the next one will do.
+    } catch (e) {
+      // One failed poll is not worth a dialog; the next one will do. A hundred of them in
+      // a row is, because it means the playhead has stopped and nobody said so.
+      deafPolls += 1;
+      if (deafPolls === 100) showError(`lost touch with the audio thread: ${e}`);
     }
   }
 

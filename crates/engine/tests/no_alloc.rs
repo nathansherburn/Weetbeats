@@ -128,6 +128,7 @@ fn render_does_not_allocate() {
             tx.push(Command::PlacePattern {
                 pattern,
                 step: bar * 8,
+                length: 8,
             })
             .unwrap();
         }
@@ -170,6 +171,7 @@ fn render_does_not_allocate() {
             let _ = tx.push(Command::PlacePattern {
                 pattern: (block % 4) as u16,
                 step: (block % 32) as u32,
+                length: 8 + (block % 40) as u32,
             });
             let _ = tx.push(Command::UnplacePattern {
                 pattern: ((block + 1) % 4) as u16,

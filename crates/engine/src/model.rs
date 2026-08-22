@@ -204,6 +204,10 @@ pub struct Pattern {
     pub name: String,
     /// How many boxes a row has. Patterns in one song need not agree.
     pub steps: u32,
+    /// Which of the song view's colours its blocks are. `None` means nobody chose, and the
+    /// front end picks from the pattern's id so a new pattern looks different from the last.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colour: Option<u8>,
     pub lanes: Vec<Lane>,
 }
 
@@ -213,6 +217,7 @@ impl Pattern {
             id,
             name,
             steps: DEFAULT_STEPS,
+            colour: None,
             lanes: Vec::new(),
         }
     }
@@ -278,15 +283,38 @@ impl Pattern {
     }
 }
 
-/// One pattern in the song: which pattern, and the step it starts at.
+/// One pattern in the song: which pattern, where it starts, and how long it fills.
 ///
-/// `step` is always a multiple of that pattern's own length, so two placements of the same
-/// pattern can never overlap each other and a placement is always exactly one play-through.
+/// A placement starts wherever it was put — the song view snaps to whatever resolution you
+/// set, and nothing here cares what that was. `length` starts out as the pattern's own
+/// length and can be dragged: longer and the pattern comes round again inside it, shorter and
+/// it is cut off. Two placements of the same pattern never overlap, because putting one down
+/// takes out whatever it lands on.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "camelCase")]
 pub struct Placement {
     pub step: u32,
     pub pattern: u16,
+    /// Steps of song it fills. Zero means "as long as the pattern", which is what a project
+    /// written before placements could be dragged has, and what [`Project::repair`] fills in.
+    #[serde(default)]
+    pub length: u32,
+}
+
+impl Placement {
+    /// One past the last step it covers.
+    pub fn end(&self) -> u32 {
+        self.step + self.length.max(1)
+    }
+
+    pub fn covers(&self, step: u32) -> bool {
+        step >= self.step && step < self.end()
+    }
+
+    /// True if the two would sound over the top of each other.
+    pub fn overlaps(&self, other: &Placement) -> bool {
+        self.step < other.end() && other.step < self.end()
+    }
 }
 
 /// Everything the app knows about the song.
@@ -410,42 +438,79 @@ impl Project {
         true
     }
 
-    /// True if this pattern plays at this step of the song.
+    /// The placement of a pattern that covers a step, if any. What the song view hit tests
+    /// against: the block itself, wherever it was put, rather than a grid worked out from
+    /// the pattern's length.
+    pub fn placement_at(&self, pattern: u16, step: u32) -> Option<Placement> {
+        self.song
+            .iter()
+            .find(|one| one.pattern == pattern && one.covers(step))
+            .copied()
+    }
+
+    /// True if this pattern starts exactly here.
     pub fn placed(&self, pattern: u16, step: u32) -> bool {
         self.song
             .iter()
-            .any(|p| p.pattern == pattern && p.step == step)
+            .any(|one| one.pattern == pattern && one.step == step)
     }
 
-    /// Where a pattern's `slot`th place in the song would start. Slots are as long as the
-    /// pattern, so slot 3 of a four step pattern starts at step 12 and slot 3 of a sixteen
-    /// step pattern starts at step 48.
-    pub fn slot_step(&self, pattern: u16, slot: u32) -> Option<u32> {
-        let steps = self.pattern(pattern)?.steps.max(1);
-        Some(slot.saturating_mul(steps))
-    }
-
-    /// Put a pattern in the song, or take it out. `slot` counts in the pattern's own
-    /// lengths, so one slot is one play-through of it.
+    /// Put a pattern in the song. `length` of zero means "as long as the pattern is".
     ///
-    /// Returns whether it is in there now, which is false if the pattern does not exist, the
-    /// song is full, or it would run off the end of the longest song we hold.
-    pub fn set_placement(&mut self, pattern: u16, slot: u32, on: bool) -> bool {
-        let Some(step) = self.slot_step(pattern, slot) else {
+    /// Anything of the same pattern it lands on top of makes way for it, the way dropping a
+    /// thing on a thing works everywhere else.
+    pub fn place(&mut self, pattern: u16, step: u32, length: u32) -> bool {
+        let Some(steps) = self.pattern(pattern).map(|p| p.steps.max(1)) else {
             return false;
         };
-        let steps = self.pattern(pattern).map(|p| p.steps).unwrap_or(0);
-        if !on {
-            self.song
-                .retain(|p| !(p.pattern == pattern && p.step == step));
+        let length = if length == 0 { steps } else { length };
+        let placed = Placement {
+            step,
+            pattern,
+            length: length.min(MAX_SONG_STEPS as u32),
+        };
+        if placed.end() > MAX_SONG_STEPS as u32 || self.song.len() >= MAX_PLACEMENTS {
             return false;
         }
-        if step + steps > MAX_SONG_STEPS as u32 || self.song.len() >= MAX_PLACEMENTS {
+        self.song
+            .retain(|one| one.pattern != pattern || !one.overlaps(&placed));
+        self.song.push(placed);
+        self.song.sort_unstable();
+        true
+    }
+
+    /// Take out the placement of a pattern that starts here.
+    pub fn unplace(&mut self, pattern: u16, step: u32) -> bool {
+        let before = self.song.len();
+        self.song
+            .retain(|one| !(one.pattern == pattern && one.step == step));
+        before != self.song.len()
+    }
+
+    /// Slide a placement along. Keeps how long it is, and takes out anything of the same
+    /// pattern it lands on.
+    pub fn move_placement(&mut self, pattern: u16, from: u32, to: u32) -> bool {
+        let Some(one) = self.placement_at(pattern, from) else {
+            return false;
+        };
+        self.unplace(pattern, one.step);
+        if !self.place(pattern, to, one.length) {
+            // Would not fit, so put it back where it was rather than losing it.
+            self.place(pattern, one.step, one.length);
             return false;
         }
-        if !self.placed(pattern, step) {
-            self.song.push(Placement { step, pattern });
-            self.song.sort_unstable();
+        true
+    }
+
+    /// Change how much song a placement fills. One step is the least it can be.
+    pub fn resize_placement(&mut self, pattern: u16, step: u32, length: u32) -> bool {
+        let Some(one) = self.placement_at(pattern, step) else {
+            return false;
+        };
+        self.unplace(pattern, one.step);
+        if !self.place(pattern, one.step, length.max(1)) {
+            self.place(pattern, one.step, one.length);
+            return false;
         }
         true
     }
@@ -462,17 +527,22 @@ impl Project {
 
     /// Where the song ends, rounded up to a whole bar so it loops somewhere musical.
     pub fn song_steps(&self) -> u32 {
-        let end = self
-            .song
-            .iter()
-            .map(|p| p.step + self.pattern(p.pattern).map(|one| one.steps).unwrap_or(0))
-            .max()
-            .unwrap_or(0);
+        let end = self.song.iter().map(|one| one.end()).max().unwrap_or(0);
         end.div_ceil(STEPS_PER_BAR) * STEPS_PER_BAR
     }
 
     pub fn song_bars(&self) -> u32 {
         self.song_steps() / STEPS_PER_BAR
+    }
+
+    /// Change a pattern's length. Its places in the song stay where they are and stay as long
+    /// as they are: a block is its own length once it is down, and dragging its edge is how
+    /// that changes.
+    pub fn set_pattern_steps(&mut self, id: u16, steps: u32) -> u32 {
+        match self.pattern_mut(id) {
+            Some(pattern) => pattern.set_steps(steps),
+            None => 0,
+        }
     }
 
     /// Put right anything in a project that this version of the app could not have written.
@@ -493,6 +563,15 @@ impl Project {
         // A placement of a pattern that is not there any more can only confuse things.
         self.song
             .retain(|placement| lengths.iter().any(|(id, _)| *id == placement.pattern));
+        // A placement from before blocks had a length of their own is as long as its pattern,
+        // which is what it sounded like when it was written.
+        for placement in &mut self.song {
+            if placement.length == 0 {
+                if let Some((_, steps)) = lengths.iter().find(|(id, _)| *id == placement.pattern) {
+                    placement.length = *steps;
+                }
+            }
+        }
         self.song.sort_unstable();
         self.song.dedup();
         // Notes that run past the end of a shortened pattern.
@@ -504,26 +583,6 @@ impl Project {
             pattern.lanes.retain(|lane| !lane.notes.is_empty());
         }
         before - self.song.len()
-    }
-
-    /// Change a pattern's length, and move its places in the song onto the new grid.
-    ///
-    /// A pattern that was four steps and is now sixteen cannot keep four placements a bar
-    /// apart: they would sit on top of each other. So they are snapped to the new length and
-    /// the ones that land on the same step become one.
-    pub fn set_pattern_steps(&mut self, id: u16, steps: u32) -> u32 {
-        let Some(pattern) = self.pattern_mut(id) else {
-            return 0;
-        };
-        let steps = pattern.set_steps(steps);
-        for placement in &mut self.song {
-            if placement.pattern == id {
-                placement.step = (placement.step / steps) * steps;
-            }
-        }
-        self.song.sort_unstable();
-        self.song.dedup();
-        steps
     }
 }
 
@@ -733,15 +792,15 @@ mod tests {
         let snare = project.add_pattern().unwrap();
 
         // A kick, a hat and a snare pattern, all starting at the top of the song.
-        assert!(project.set_placement(0, 0, true));
-        assert!(project.set_placement(hats, 0, true));
-        assert!(project.set_placement(snare, 0, true));
+        assert!(project.place(0, 0, 0));
+        assert!(project.place(hats, 0, 0));
+        assert!(project.place(snare, 0, 0));
         assert_eq!(project.song.len(), 3);
         assert!(project.placed(hats, 0));
         assert_eq!(project.song_steps(), STEPS_PER_BAR);
 
         // Taking one out leaves the others where they are.
-        assert!(!project.set_placement(hats, 0, false));
+        assert!(project.unplace(hats, 0));
         assert!(!project.placed(hats, 0));
         assert!(project.placed(snare, 0));
     }
@@ -749,21 +808,18 @@ mod tests {
     /// The point of placing by the pattern's own length: a four step pattern takes four steps
     /// of the song, not a whole bar of it.
     #[test]
-    fn a_slot_is_as_long_as_the_pattern_in_it() {
+    fn a_block_is_as_long_as_the_pattern_in_it_until_you_say_otherwise() {
         let mut project = Project::default();
         let short = project.add_pattern().unwrap();
         project.set_pattern_steps(short, 4);
 
-        assert_eq!(project.slot_step(short, 0), Some(0));
-        assert_eq!(project.slot_step(short, 1), Some(4));
-        assert_eq!(project.slot_step(0, 1), Some(16));
-
-        // One four step pattern in the first slot: four steps of music, one bar of song.
-        project.set_placement(short, 0, true);
-        assert!(project.placed(short, 0));
+        // One four step pattern at the top: four steps of music, one bar of song.
+        assert!(project.place(short, 0, 0));
+        assert_eq!(project.placement_at(short, 0).unwrap().length, 4);
+        assert!(project.placement_at(short, 3).is_some());
         assert!(
-            !project.placed(short, 4),
-            "one slot is one play through, not a bar of them"
+            project.placement_at(short, 4).is_none(),
+            "one block is one play through, not a bar of them"
         );
         assert_eq!(
             project.song_steps(),
@@ -771,10 +827,32 @@ mod tests {
             "the song still loops on the bar"
         );
 
-        // And the next slot along starts where the first one ended.
-        project.set_placement(short, 1, true);
-        assert!(project.placed(short, 4));
+        // And another one right where the first ended.
+        assert!(project.place(short, 4, 0));
         assert_eq!(project.song.len(), 2);
+
+        // Dragging its right edge out makes it repeat rather than making a second block.
+        assert!(project.resize_placement(short, 0, 4 * 4));
+        assert_eq!(
+            project.song.len(),
+            1,
+            "growing over the next block of the same pattern swallows it"
+        );
+        assert_eq!(project.placement_at(short, 15).unwrap().step, 0);
+    }
+
+    /// The bug behind blocks nobody could click: a block is hit tested where it actually is,
+    /// not on a grid worked out from the pattern's length.
+    #[test]
+    fn a_block_off_the_patterns_grid_can_still_be_pointed_at() {
+        let mut project = Project::default();
+        project.set_pattern_steps(0, 32);
+        // Step 48 is a bar boundary but not a multiple of 32 — where the old grid lost blocks.
+        assert!(project.place(0, 48, 0));
+        assert!(project.placement_at(0, 48).is_some());
+        assert!(project.placement_at(0, 60).is_some());
+        assert!(project.unplace(0, 48));
+        assert!(project.song.is_empty());
     }
 
     #[test]
@@ -783,19 +861,47 @@ mod tests {
         let long = project.add_pattern().unwrap();
         project.set_pattern_steps(long, 32);
 
-        project.set_placement(0, 2, true); // sixteen steps, at step 32
+        project.place(0, 32, 0); // sixteen steps, at step 32
         assert_eq!(project.song_steps(), 48);
-        project.set_placement(long, 2, true); // thirty two steps, at step 64
+        project.place(long, 64, 0); // thirty two steps, at step 64
         assert_eq!(project.song_steps(), 96);
         assert_eq!(project.song_bars(), 6);
     }
 
     #[test]
-    fn a_pattern_cannot_be_placed_twice_in_the_same_slot() {
+    fn a_pattern_cannot_sound_over_the_top_of_itself() {
         let mut project = Project::default();
-        assert!(project.set_placement(0, 3, true));
-        assert!(project.set_placement(0, 3, true));
+        assert!(project.place(0, 48, 0));
+        assert!(project.place(0, 48, 0));
         assert_eq!(project.song.len(), 1);
+        // Landing halfway across it takes the place of it rather than doubling it up.
+        assert!(project.place(0, 56, 0));
+        assert_eq!(project.song.len(), 1);
+        assert_eq!(project.song[0].step, 56);
+    }
+
+    #[test]
+    fn a_block_can_be_dragged_along_the_song() {
+        let mut project = Project::default();
+        project.place(0, 0, 0);
+        assert!(project.move_placement(0, 0, 5));
+        assert_eq!(project.placement_at(0, 5).unwrap().length, 16);
+        assert!(project.placement_at(0, 0).is_none());
+        // Grabbing it anywhere along its length moves the whole block.
+        assert!(project.move_placement(0, 12, 0));
+        assert!(project.placed(0, 0));
+        // Dragging past the end of the song we hold leaves it where it was.
+        assert!(!project.move_placement(0, 0, MAX_SONG_STEPS as u32 - 4));
+        assert!(project.placed(0, 0));
+    }
+
+    #[test]
+    fn a_block_is_at_least_one_step_long() {
+        let mut project = Project::default();
+        project.place(0, 0, 0);
+        assert!(project.resize_placement(0, 0, 0));
+        assert_eq!(project.placement_at(0, 0).unwrap().length, 1);
+        assert!(project.placement_at(0, 1).is_none());
     }
 
     #[test]
@@ -804,10 +910,10 @@ mod tests {
         let short = project.add_pattern().unwrap();
         project.set_pattern_steps(short, 4);
         // Four short placements across the first bar, and one in the second.
-        for slot in 0..5 {
-            project.set_placement(short, slot, true);
+        for step in [0, 4, 8, 12, 16] {
+            project.place(short, step, 0);
         }
-        project.set_placement(0, 0, true);
+        project.place(0, 0, 0);
 
         assert_eq!(project.clear_bar(0), 5, "four short ones and the long one");
         assert_eq!(project.song.len(), 1);
@@ -815,32 +921,36 @@ mod tests {
     }
 
     #[test]
-    fn changing_a_length_moves_the_places_it_was_put() {
+    fn changing_a_length_leaves_the_song_alone() {
         let mut project = Project::default();
         project.set_pattern_steps(0, 4);
-        for slot in 0..4 {
-            project.set_placement(0, slot, true);
+        for step in [0, 4, 8, 12] {
+            project.place(0, step, 0);
         }
         assert_eq!(project.song.len(), 4);
 
-        // Four steps to sixteen: all four placements were inside one bar, so they become one.
+        // Four steps to sixteen. The blocks are the length they were put down at, so nothing
+        // piles up and nothing moves — the music the file describes does not change.
         assert_eq!(project.set_pattern_steps(0, 16), 16);
-        assert_eq!(project.song.len(), 1);
-        assert!(project.placed(0, 0));
+        assert_eq!(project.song.len(), 4);
+        assert!(project.placed(0, 12));
+        assert_eq!(project.placement_at(0, 12).unwrap().length, 4);
     }
 
     #[test]
     fn the_song_will_not_hold_a_pattern_that_does_not_exist() {
         let mut project = Project::default();
-        assert!(!project.set_placement(7, 0, true));
+        assert!(!project.place(7, 0, 0));
         assert!(project.song.is_empty());
     }
 
     #[test]
     fn the_song_has_an_end_to_it() {
         let mut project = Project::default();
-        // A slot way past the longest song we hold is refused rather than wrapped.
-        assert!(!project.set_placement(0, 100_000, true));
+        // A step way past the longest song we hold is refused rather than wrapped.
+        assert!(!project.place(0, 100_000, 0));
+        // And so is a block that would run off the end.
+        assert!(!project.place(0, MAX_SONG_STEPS as u32 - 4, 16));
         assert!(project.song.is_empty());
     }
 
@@ -848,9 +958,9 @@ mod tests {
     fn deleting_a_pattern_takes_it_out_of_the_song() {
         let mut project = Project::default();
         let second = project.add_pattern().unwrap();
-        project.set_placement(0, 0, true);
-        project.set_placement(second, 0, true);
-        project.set_placement(second, 1, true);
+        project.place(0, 0, 0);
+        project.place(second, 0, 0);
+        project.place(second, 16, 0);
 
         assert!(project.remove_pattern(second));
         assert_eq!(project.song.len(), 1);
@@ -899,9 +1009,9 @@ mod tests {
         project.set_pattern_steps(second, 32);
         project.pattern_mut(0).unwrap().set_step(0, 0, true);
         project.pattern_mut(second).unwrap().set_step(0, 8, true);
-        project.set_placement(0, 0, true);
-        project.set_placement(second, 0, true);
-        project.set_placement(second, 1, true);
+        project.place(0, 0, 0);
+        project.place(second, 0, 0);
+        project.place(second, 32, 0);
 
         let json = serde_json::to_string(&project).unwrap();
         let back: Project = serde_json::from_str(&json).unwrap();
@@ -916,9 +1026,10 @@ mod tests {
         assert_eq!(back.pattern(second).unwrap().steps, 32);
         assert!(back.pattern(second).unwrap().has_step(0, 8));
         assert_eq!(back.song.len(), 3);
-        assert!(
-            back.placed(second, 32),
-            "a thirty two step pattern in its second slot"
+        assert_eq!(
+            back.placement_at(second, 40).unwrap().length,
+            32,
+            "a thirty two step pattern, and the block knows it is that long"
         );
     }
 }

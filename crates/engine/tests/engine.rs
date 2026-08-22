@@ -433,13 +433,14 @@ fn note_in(rig: &mut Rig, pattern: u16, track: u16, step: u16) {
     });
 }
 
-/// Hand the engine a song: how long it is in steps, and what starts where.
-fn song(rig: &mut Rig, steps: u32, places: &[(u16, u32)]) {
+/// Hand the engine a song: how long it is in steps, and what starts where and for how long.
+fn song(rig: &mut Rig, steps: u32, places: &[(u16, u32, u32)]) {
     rig.send(Command::ClearSong);
-    for (pattern, step) in places {
+    for (pattern, step, length) in places {
         rig.send(Command::PlacePattern {
             pattern: *pattern,
             step: *step,
+            length: *length,
         });
     }
     rig.send(Command::SetSongLen(steps));
@@ -482,7 +483,7 @@ fn patterns_put_in_the_same_place_sound_together() {
     note_in(&mut rig, 0, 0, 0);
     note_in(&mut rig, 1, 0, 4);
     note_in(&mut rig, 2, 0, 12);
-    song(&mut rig, 16, &[(0, 0), (1, 0), (2, 0)]);
+    song(&mut rig, 16, &[(0, 0, 16), (1, 0, 16), (2, 0, 16)]);
     rig.send(Command::SetPlaying(true));
 
     let out = rig.render_chunked(BAR, 373);
@@ -500,7 +501,7 @@ fn a_placement_plays_the_whole_pattern_once() {
     });
     note_in(&mut rig, 0, 0, 0);
     note_in(&mut rig, 0, 0, 20);
-    song(&mut rig, 32, &[(0, 0)]);
+    song(&mut rig, 32, &[(0, 0, 32)]);
     rig.send(Command::SetPlaying(true));
 
     let out = rig.render_chunked(STEP * 32, 373);
@@ -519,14 +520,14 @@ fn a_short_pattern_plays_once_where_it_is_put() {
     });
     note_in(&mut rig, 0, 0, 0);
     // One placement at the top of a one bar song: one hit, then twelve steps of quiet.
-    song(&mut rig, 16, &[(0, 0)]);
+    song(&mut rig, 16, &[(0, 0, 4)]);
     rig.send(Command::SetPlaying(true));
 
     let out = rig.render_chunked(BAR, 373);
     assert_eq!(onsets(&out), vec![0]);
 
     // Two of them side by side is two hits, four steps apart.
-    song(&mut rig, 16, &[(0, 0), (0, 4)]);
+    song(&mut rig, 16, &[(0, 0, 4), (0, 4, 4)]);
     rig.send(Command::SeekSong(0));
     let out = rig.render_chunked(BAR, 373);
     assert_eq!(onsets(&out), vec![0, 4 * STEP]);
@@ -547,7 +548,7 @@ fn placements_of_different_lengths_sit_side_by_side() {
     });
     note_in(&mut rig, 0, 0, 0);
     note_in(&mut rig, 1, 0, 2);
-    song(&mut rig, 16, &[(0, 0), (1, 4)]);
+    song(&mut rig, 16, &[(0, 0, 4), (1, 4, 12)]);
     rig.send(Command::SetPlaying(true));
 
     let out = rig.render_chunked(BAR, 373);
@@ -556,13 +557,79 @@ fn placements_of_different_lengths_sit_side_by_side() {
     assert_eq!(onsets(&out), vec![0, 6 * STEP]);
 }
 
+/// Dragging a block's edge out past the end of its pattern makes it repeat, which is what a
+/// block twice as long as its pattern looks like it should do.
+#[test]
+fn a_block_longer_than_its_pattern_comes_round_again() {
+    let mut rig = Rig::new(120.0, 16);
+    track_with(&mut rig, 0, dc_sample(400));
+    rig.send(Command::SetPatternSteps {
+        pattern: 0,
+        steps: 4,
+    });
+    note_in(&mut rig, 0, 0, 0);
+    note_in(&mut rig, 0, 0, 2);
+    // A four step pattern stretched across the bar: four times through.
+    song(&mut rig, 16, &[(0, 0, 16)]);
+    rig.send(Command::SetPlaying(true));
+
+    let out = rig.render_chunked(BAR, 373);
+    assert_eq!(
+        onsets(&out),
+        vec![
+            0,
+            2 * STEP,
+            4 * STEP,
+            6 * STEP,
+            8 * STEP,
+            10 * STEP,
+            12 * STEP,
+            14 * STEP
+        ]
+    );
+}
+
+/// And pulling it in cuts the pattern off part way through rather than squashing it.
+#[test]
+fn a_block_shorter_than_its_pattern_stops_part_way() {
+    let mut rig = Rig::new(120.0, 16);
+    track_with(&mut rig, 0, dc_sample(400));
+    note_in(&mut rig, 0, 0, 0);
+    note_in(&mut rig, 0, 0, 10);
+    song(&mut rig, 16, &[(0, 0, 6)]);
+    rig.send(Command::SetPlaying(true));
+
+    let out = rig.render_chunked(BAR, 373);
+    assert_eq!(onsets(&out), vec![0], "the block was over before step ten");
+}
+
+/// Seeking into a long block picks the pattern up at the right point of its repeat.
+#[test]
+fn seeking_into_a_repeat_lands_in_the_right_place() {
+    let mut rig = Rig::new(120.0, 16);
+    track_with(&mut rig, 0, dc_sample(400));
+    rig.send(Command::SetPatternSteps {
+        pattern: 0,
+        steps: 4,
+    });
+    note_in(&mut rig, 0, 0, 1);
+    song(&mut rig, 16, &[(0, 0, 16)]);
+    rig.send(Command::SeekSong(6));
+    rig.send(Command::SetPlaying(true));
+
+    // Step six of the song is step two of the pattern's second time round, so its hit at
+    // step one is three steps away.
+    let out = rig.render_chunked(STEP * 4, 373);
+    assert_eq!(onsets(&out), vec![3 * STEP]);
+}
+
 /// A pattern starts from its own beginning wherever it is put, not from wherever the song is.
 #[test]
 fn a_pattern_starts_from_the_top_of_itself() {
     let mut rig = Rig::new(120.0, 16);
     track_with(&mut rig, 0, dc_sample(400));
     note_in(&mut rig, 0, 0, 0);
-    song(&mut rig, 32, &[(0, 16)]);
+    song(&mut rig, 32, &[(0, 16, 16)]);
     rig.send(Command::SetPlaying(true));
 
     let out = rig.render_chunked(BAR * 2, 373);
@@ -574,7 +641,7 @@ fn a_gap_in_the_song_is_silence() {
     let mut rig = Rig::new(120.0, 16);
     track_with(&mut rig, 0, dc_sample(4000));
     note_in(&mut rig, 0, 0, 0);
-    song(&mut rig, 48, &[(0, 0), (0, 32)]);
+    song(&mut rig, 48, &[(0, 0, 16), (0, 32, 16)]);
     rig.send(Command::SetPlaying(true));
 
     let out = rig.render_chunked(BAR * 3, 512);
@@ -586,7 +653,7 @@ fn the_song_comes_round_again_at_its_end() {
     let mut rig = Rig::new(120.0, 16);
     track_with(&mut rig, 0, dc_sample(400));
     note_in(&mut rig, 0, 0, 0);
-    song(&mut rig, 32, &[(0, 0)]);
+    song(&mut rig, 32, &[(0, 0, 16)]);
     rig.send(Command::SetPlaying(true));
 
     // Two bars of song, so the hit at the top comes round every two bars.
@@ -598,7 +665,7 @@ fn the_song_comes_round_again_at_its_end() {
 fn the_playhead_says_where_in_the_song_it_is() {
     let mut rig = Rig::new(120.0, 16);
     track_with(&mut rig, 0, dc_sample(400));
-    song(&mut rig, 32, &[(0, 0), (2, 0), (1, 16)]);
+    song(&mut rig, 32, &[(0, 0, 16), (2, 0, 16), (1, 16, 16)]);
     rig.send(Command::SetPlaying(true));
 
     rig.render_chunked(STEP * 2, 512);
@@ -621,7 +688,7 @@ fn seeking_starts_the_song_from_that_step() {
     let mut rig = Rig::new(120.0, 16);
     track_with(&mut rig, 0, dc_sample(400));
     note_in(&mut rig, 1, 0, 0);
-    song(&mut rig, 32, &[(0, 0), (1, 16)]);
+    song(&mut rig, 32, &[(0, 0, 16), (1, 16, 16)]);
     rig.send(Command::SeekSong(16));
     rig.send(Command::SetPlaying(true));
 
@@ -642,7 +709,7 @@ fn seeking_into_a_placement_keeps_the_pattern_in_step() {
         steps: 32,
     });
     note_in(&mut rig, 0, 0, 20);
-    song(&mut rig, 32, &[(0, 0)]);
+    song(&mut rig, 32, &[(0, 0, 32)]);
     rig.send(Command::SeekSong(16));
     rig.send(Command::SetPlaying(true));
 
@@ -655,7 +722,7 @@ fn seeking_into_a_placement_keeps_the_pattern_in_step() {
 fn stopping_goes_back_to_the_top_of_the_song() {
     let mut rig = Rig::new(120.0, 16);
     track_with(&mut rig, 0, dc_sample(100));
-    song(&mut rig, 48, &[(0, 0), (1, 16), (0, 32)]);
+    song(&mut rig, 48, &[(0, 0, 16), (1, 16, 16), (0, 32, 16)]);
     rig.send(Command::SetPlaying(true));
     rig.render_chunked(BAR + STEP * 4, 512);
     assert_eq!(rig.shared.playhead().step, 20);
@@ -686,8 +753,8 @@ fn clearing_the_song_clears_all_of_it() {
     let mut rig = Rig::new(120.0, 16);
     track_with(&mut rig, 0, dc_sample(400));
     note_in(&mut rig, 0, 0, 0);
-    song(&mut rig, 48, &[(0, 0), (0, 16), (0, 32)]);
-    song(&mut rig, 48, &[(0, 0)]);
+    song(&mut rig, 48, &[(0, 0, 16), (0, 16, 16), (0, 32, 16)]);
+    song(&mut rig, 48, &[(0, 0, 16)]);
     rig.send(Command::SetPlaying(true));
 
     let out = rig.render_chunked(BAR * 3, 512);
@@ -726,8 +793,8 @@ fn a_pattern_will_not_be_longer_than_the_engine_holds() {
     rig.send(Command::SetPlaying(true));
 
     // Clamped to MAX_STEPS, so the loop comes round there rather than never.
-    let out = rig.render_chunked(STEP * 130, 512);
-    assert_eq!(onsets(&out), vec![0, 64 * STEP, 128 * STEP]);
+    let out = rig.render_chunked(STEP * 520, 512);
+    assert_eq!(onsets(&out), vec![0, 256 * STEP, 512 * STEP]);
 }
 
 #[test]
@@ -755,7 +822,7 @@ fn deleting_a_pattern_silences_it_everywhere() {
     let mut rig = Rig::new(120.0, 16);
     track_with(&mut rig, 0, dc_sample(400));
     note_in(&mut rig, 3, 0, 0);
-    song(&mut rig, 16, &[(3, 0)]);
+    song(&mut rig, 16, &[(3, 0, 16)]);
     rig.send(Command::SetPlaying(true));
     assert_eq!(onsets(&rig.render_chunked(BAR, 512)), vec![0]);
 
@@ -772,7 +839,11 @@ fn a_placement_past_the_end_of_what_we_hold_is_ignored() {
     let mut rig = Rig::new(120.0, 16);
     track_with(&mut rig, 0, dc_sample(400));
     note_in(&mut rig, 0, 0, 0);
-    song(&mut rig, 16, &[(0, 0), (0, 900_000), (9_999, 0)]);
+    song(
+        &mut rig,
+        16,
+        &[(0, 0, 16), (0, 900_000, 16), (9_999, 0, 16)],
+    );
     rig.send(Command::SetPlaying(true));
 
     let out = rig.render_chunked(BAR, 512);

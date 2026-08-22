@@ -54,6 +54,33 @@ pub fn name_of(dir: &Path) -> String {
         .to_string()
 }
 
+/// Rename the project folder, keeping it where it is. Returns where it ended up.
+///
+/// The name is the project's, so this is what typing a new one on the Song button does.
+/// A name with a slash in it, or one already taken next door, is refused rather than
+/// quietly written somewhere else.
+pub fn rename(dir: &Path, name: &str) -> Result<PathBuf, String> {
+    let wanted: String = name.trim().chars().take(60).collect();
+    if wanted.is_empty() {
+        return Err("a project needs a name".into());
+    }
+    if wanted.contains(['/', '\\']) || wanted.starts_with('.') {
+        return Err(format!("{wanted} is not a name a folder can have"));
+    }
+    let parent = dir
+        .parent()
+        .ok_or_else(|| "there is nowhere to put it".to_string())?;
+    let to = parent.join(format!("{wanted}.beat"));
+    if to == dir {
+        return Ok(to);
+    }
+    if to.exists() {
+        return Err(format!("there is already a {wanted} next to this one"));
+    }
+    fs::rename(dir, &to).map_err(|e| whined(dir, "rename", e))?;
+    Ok(to)
+}
+
 /// Turn a path out of `project.json` into a real one, refusing anything that points
 /// outside the project folder. A hand-edited file is not a reason to write elsewhere.
 pub fn resolve(dir: &Path, relative: &str) -> Result<PathBuf, String> {
@@ -303,7 +330,7 @@ mod tests {
         };
         let second = project.add_pattern().unwrap();
         project.set_pattern_steps(second, 32);
-        project.set_placement(second, 0, true);
+        project.place(second, 0, 0);
 
         save(&dir, &project).unwrap();
         assert!(is_project(&dir));
@@ -335,13 +362,35 @@ mod tests {
 
         let mut project = Project::default();
         project.set_pattern_steps(0, 32);
-        project.set_placement(0, 0, true);
+        project.place(0, 0, 0);
         // Where a length change under an older version would have left it: on the half bar.
         project.song[0].step = 48;
         save(&dir, &project).unwrap();
 
         let back = load(&dir).unwrap();
         assert!(back.placed(0, 48), "it moved the music");
+    }
+
+    #[test]
+    fn renaming_moves_the_folder_and_keeps_the_music() {
+        let temp = Temp::new("rename");
+        let dir = temp.path().join("Untitled.beat");
+        let mut project = Project::default();
+        project.pattern_mut(0).unwrap().set_step(0, 3, true);
+        save(&dir, &project).unwrap();
+
+        let to = rename(&dir, "  Bangers  ").unwrap();
+        assert_eq!(to, temp.path().join("Bangers.beat"));
+        assert!(!dir.exists(), "the old folder is still there");
+        assert!(load(&to).unwrap().pattern(0).unwrap().has_step(0, 3));
+        assert_eq!(name_of(&to), "Bangers");
+
+        // A name that would land on top of something else, and one no folder could have.
+        save(&dir, &project).unwrap();
+        assert!(rename(&dir, "Bangers").is_err());
+        assert!(rename(&dir, "../oops").is_err());
+        assert!(rename(&dir, "   ").is_err());
+        assert!(dir.exists(), "a refused rename moved it anyway");
     }
 
     /// A placement of a pattern that is not there is the one thing worth throwing away.
@@ -351,10 +400,11 @@ mod tests {
         let dir = temp.path().join("Orphan.beat");
 
         let mut project = Project::default();
-        project.set_placement(0, 0, true);
+        project.place(0, 0, 0);
         project.song.push(crate::model::Placement {
             step: 32,
             pattern: 9,
+            length: 16,
         });
         save(&dir, &project).unwrap();
 

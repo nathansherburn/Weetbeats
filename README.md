@@ -19,10 +19,12 @@ with.
 - Click or drag across the boxes to paint a beat; right click rubs one out
 - Set how many boxes a pattern has, one step at a time
 - Patterns down the left: click to open one, click it again to go back to the song
-- Song view: paint a pattern across the bars, and stack patterns to build a beat up
+- Song view: draw a pattern anywhere, drag it about, drag its ends to say how long it plays
+- Snap, zoom (buttons or a trackpad pinch), and a colour per pattern
 - Any track can be a pitched instrument instead of a drum, with a piano roll to write in
+- An instrument's row in a pattern shows its notes instead of boxes; click it for the roll
 - Click a track's name to hear it, or a key in the roll to hear that note
-- Play, stop, tempo
+- Play, stop, tempo, and a playhead you can drag whether or not it is playing
 - Per track: volume, mute, solo, delete
 
 Effects are stage 5, hosting CLAP plugins stage 6.
@@ -33,34 +35,51 @@ A pattern is a grid of boxes and a length. An instrument belongs to the project 
 to one pattern, so every pattern plays the same kit and a new pattern is an empty grid over
 sounds you already have.
 
-In the song, **one click is one play-through of one pattern**. Every lane is divided by its
-own pattern's length, so a four step pattern goes in four steps at a time and a thirty two
-step pattern takes thirty two — nothing is padded out to fill a bar it did not ask for.
+In the song a pattern goes down as a **block**. A new block is one play-through — four steps
+of a four step pattern, thirty two of a thirty two step one, nothing padded out to fill a bar
+it did not ask for — and then it is its own length: drag its right hand end out and the
+pattern **repeats** to fill it, drag it in and the pattern is **cut off** part way through.
+Drag the middle to slide it along, drag the left hand end to change where it comes in.
 
-Placements **overlap freely**, so a kick pattern, a hat pattern and a snare pattern play
-together and add up to a beat. That is the whole reason to have patterns rather than one long
-grid: build the parts separately, then bring them in one at a time across the song.
+A block starts wherever the **snap** puts it, which is a bar by default and anything from one
+step up. It is not tied to its pattern's own grid, so a thirty two step pattern can start on
+a half bar, and changing a pattern's length never moves or resizes what is already in the
+song.
 
-The song is painted, not ticked: press and drag along a lane to fill it in, and right click to
-rub a placement out. Bars of sixteen steps are the ruler along the top — drag along them to
-play from anywhere, and right click one to empty it.
+Blocks **overlap freely** between patterns, so a kick pattern, a hat pattern and a snare
+pattern play together and add up to a beat. That is the whole reason to have patterns rather
+than one long grid: build the parts separately, then bring them in one at a time across the
+song. Two blocks of the *same* pattern cannot overlap — one pattern cannot play over itself
+— so dropping one on another takes its place.
+
+The song is drawn, not ticked: press and drag along a lane to fill it in, and right click to
+rub a block out. Each pattern gets its own colour, lighter while it is sounding; the swatch
+on its row in the panel changes it. Bars of sixteen steps are the ruler along the top — drag
+along it to move the playhead, playing or not, and right click a bar to empty it. Zoom with
+the buttons in the corner or by pinching the trackpad.
 
 Patterns are windows over the song. Click one in the panel to open it, click it again — or
-press escape, or the × in the corner, or **song** at the top of the panel — to put it away.
+press escape, or the × in the corner, or the **song** button at the top of the panel — to put
+it away. That button carries the project's name; double click it to rename the project, which
+renames its folder.
 
 ### Instruments and the piano roll
 
 A track is a drum until you say otherwise: hit it and the whole sample plays, however short
 the note is. Press **♪** on a track and it becomes an instrument instead — the sample is
 pitched across the keyboard, faster for higher notes and slower for lower ones, and a note
-**stops when it ends**. The button in the corner of the roll says which it is and changes it
-back.
+**stops when it ends**. Press it again and it is a drum again.
 
-The piano roll is a second view of the same pattern, one track at a time. Press to draw a
-note and keep dragging to set how long it is; the next one you draw comes out that long.
-Grab a note to move it, grab its right hand end to stretch it, right click to rub it out.
-Everything you touch plays as you touch it. How hard each note is hit is the lane
-underneath — drag it.
+That one switch also changes what its row looks like. An instrument's row is a **small piano
+roll** of its own notes rather than a line of boxes, because boxes cannot say which pitch or
+how long. Click the small one to open the roll proper, and press **♪** to go back to boxes.
+Nothing is lost either way: they are two views of one lane of notes.
+
+In the roll, press to draw a note and keep dragging to set how long it is; the next one you
+draw comes out that long. Grab a note to move it, grab its right hand end to stretch it,
+right click to rub it out. Everything you touch plays as you touch it. How hard each note is
+hit is the lane underneath — drag it. Drawing **past the end** of the pattern makes the
+pattern longer, which is how one bar becomes two.
 
 A box in the step grid *is* a note in the roll: middle C, one step long. There is no
 converting between them and nothing to keep in step.
@@ -152,14 +171,40 @@ into the same lane the boxes do, at any pitch and any length.
 
 ### Every pattern lives on the audio thread
 
-The engine holds the notes of every pattern, not just the ones playing. At the bar line the
-song moves on *on the boundary frame*, and there is no time to ask the app thread for what
-comes next — so a bar of the song is a `u32` with a bit per pattern, and moving on is reading
-the next one. Each pattern also carries how far into its run of bars it is, which is what
-makes it play through them rather than starting again at every bar.
+The engine holds the notes of every pattern, not just the ones playing. A block starts *on
+the boundary frame*, and there is no time to ask the app thread what comes next — so the song
+is two grids the engine owns outright: a step of it is a `u32` with a bit per pattern saying
+what starts there, and beside it a `u16` per pattern saying how long that block is. Starting
+a block is reading two numbers. Each pattern also carries how far into its block it is, which
+is what makes it play through, come round again when the block is longer than the pattern, and
+stop part way when it is shorter.
+
+Seeking is the only place that has to look backwards, and blocks of one pattern never overlap,
+so the nearest start behind the playhead is the only one that can still be sounding: if its
+length has run out, no earlier one is any better.
 
 Which patterns play depends on the mode: the open pattern loops while you are editing it, and
 the song plays when you are looking at the song.
+
+### A block is its own length
+
+A pattern's length and a block's length are different things, and the second one does not
+follow the first. Change a four step pattern to sixteen and its blocks stay four steps long
+where they are — the file describes the same music afterwards as before.
+
+The alternative, snapping blocks onto the new grid, is what an earlier version did, and it is
+how a project ended up with blocks nobody could click: they were written on one grid and hit
+tested on another. Both halves of that are fixed. Blocks are hit tested over their own length,
+wherever they sit, and opening a project never moves anything — the only thing it throws away
+is a block whose pattern is gone.
+
+### The meter is in decibels
+
+A linear meter spends nearly all of its travel in the top six decibels, so a mix at a sensible
+level barely moves it while a raw one-shot on its own slams it — which reads as a meter that
+does not work. The engine holds the peak and lets it fall at 1.6 per second so a hit between
+two of the front end's polls is still seen; the front end draws that peak on a scale from
+&minus;48 dB up.
 
 ### No master volume
 
