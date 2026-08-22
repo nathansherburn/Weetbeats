@@ -45,6 +45,17 @@ const SEMITONE = 15;
 const HIGH_PITCH = 96;
 const MIDDLE_C = 60;
 
+// The front end and Rust agree about the commands before a single one is called: a stub that
+// answers differently from the real thing would make every check below meaningless.
+try {
+  require("child_process").execFileSync(process.execPath, [path.join(__dirname, "contract.js")], {
+    stdio: "inherit",
+  });
+  check("the front end and Rust agree about the commands", true);
+} catch {
+  check("the front end and Rust agree about the commands", false, "see the mismatches above");
+}
+
 (async () => {
   await new Promise((r) => server.listen(0, r));
   const url = `http://127.0.0.1:${server.address().port}/`;
@@ -260,12 +271,17 @@ const MIDDLE_C = 60;
   check("fewer steps takes one away", (await canvasSize("grid")).w === 16 * CELL);
 
   // --- and you can type it, or drag it
+  // A clean status line first: what matters is that this change does not add to it.
+  await page.evaluate(() => { document.getElementById("status").innerHTML = ""; });
   await page.locator("#steps").click();
   await page.locator("#steps").fill("24");
   await page.locator("#steps").press("Enter");
   await page.waitForFunction(() => document.getElementById("steps").value === "24");
   check("typing a length works", (await canvasSize("grid")).w === 24 * CELL);
   check("and the panel says so", (await rows.first().locator(".plen").textContent()) === "24");
+  check("and nothing failed quietly on the way",
+    (await page.locator("#status").textContent()) === "",
+    await page.locator("#status").textContent());
 
   const stepsBox = await page.locator("#steps").boundingBox();
   await page.mouse.move(stepsBox.x + stepsBox.width / 2, stepsBox.y + stepsBox.height / 2);

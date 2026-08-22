@@ -82,7 +82,7 @@ pub fn save(dir: &Path, project: &Project) -> Result<(), String> {
 pub fn load(dir: &Path) -> Result<Project, String> {
     let path = project_file(dir);
     let text = fs::read_to_string(&path).map_err(|e| whined(&path, "read", e))?;
-    let project: Project = serde_json::from_str(&text)
+    let mut project: Project = serde_json::from_str(&text)
         .map_err(|e| format!("{} is not a Weetbeats project: {e}", path.display()))?;
     if project.version > PROJECT_VERSION {
         return Err(format!(
@@ -94,6 +94,9 @@ pub fn load(dir: &Path) -> Result<Project, String> {
     if project.patterns.is_empty() {
         return Err(format!("{} has no patterns in it", name_of(dir)));
     }
+    // Every project gets looked over on the way in, so a file written by an older version
+    // cannot leave the app holding something it has no way to edit.
+    project.repair();
     Ok(project)
 }
 
@@ -320,6 +323,44 @@ mod tests {
         // The temporary file is renamed into place, not left lying around.
         assert!(!dir.join("project.json.writing").exists());
         assert!(load(&dir).is_ok());
+    }
+
+    /// Opening a project leaves the music where it is. An older version could write a
+    /// placement that no click could land on, and the answer to that is hit testing the
+    /// block rather than shoving it onto a grid it was never on.
+    #[test]
+    fn opening_a_project_does_not_move_anything() {
+        let temp = Temp::new("repair");
+        let dir = temp.path().join("Wonky.beat");
+
+        let mut project = Project::default();
+        project.set_pattern_steps(0, 32);
+        project.set_placement(0, 0, true);
+        // Where a length change under an older version would have left it: on the half bar.
+        project.song[0].step = 48;
+        save(&dir, &project).unwrap();
+
+        let back = load(&dir).unwrap();
+        assert!(back.placed(0, 48), "it moved the music");
+    }
+
+    /// A placement of a pattern that is not there is the one thing worth throwing away.
+    #[test]
+    fn a_placement_of_a_pattern_that_is_gone_is_dropped() {
+        let temp = Temp::new("orphan");
+        let dir = temp.path().join("Orphan.beat");
+
+        let mut project = Project::default();
+        project.set_placement(0, 0, true);
+        project.song.push(crate::model::Placement {
+            step: 32,
+            pattern: 9,
+        });
+        save(&dir, &project).unwrap();
+
+        let back = load(&dir).unwrap();
+        assert_eq!(back.song.len(), 1);
+        assert!(back.placed(0, 0));
     }
 
     #[test]

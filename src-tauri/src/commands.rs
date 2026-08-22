@@ -578,9 +578,18 @@ pub fn duplicate_pattern(id: u16, state: State<'_, Arc<AppState>>) -> Result<Arr
 
 #[tauri::command]
 pub fn remove_pattern(id: u16, state: State<'_, Arc<AppState>>) -> Result<Arrangement, String> {
-    let removed = state.project.lock().unwrap().remove_pattern(id);
-    if !removed {
-        return Err("a song needs at least one pattern".into());
+    {
+        let mut project = state.project.lock().unwrap();
+        if project.pattern(id).is_none() {
+            // Nothing to delete means the front end is looking at something we threw away.
+            // Say so rather than blaming the number of patterns.
+            return Err(format!(
+                "there is no pattern {id} to delete — reopen the project"
+            ));
+        }
+        if !project.remove_pattern(id) {
+            return Err("a song needs at least one pattern".into());
+        }
     }
     state.send(Command::ClearPattern { pattern: id });
     state.push_song();
@@ -611,19 +620,20 @@ pub fn rename_pattern(id: u16, name: String, state: State<'_, Arc<AppState>>) ->
 /// Change how many boxes a pattern has. Returns the length it ended up with, and drops any
 /// notes that no longer fit.
 #[tauri::command]
-pub fn set_pattern_steps(id: u16, steps: u32, state: State<'_, Arc<AppState>>) -> u32 {
-    let mut project = state.project.lock().unwrap();
-    let Some(pattern) = project.pattern_mut(id) else {
-        return 0;
-    };
-    let steps = pattern.set_steps(steps);
+pub fn set_pattern_steps(
+    id: u16,
+    steps: u32,
+    state: State<'_, Arc<AppState>>,
+) -> (u32, Arrangement) {
+    let steps = state.project.lock().unwrap().set_pattern_steps(id, steps);
     state.send(Command::SetPatternSteps { pattern: id, steps });
-    drop(project);
     // The trimmed notes have to go from the engine too, and there is no telling which ones
-    // they were, so the pattern goes across again.
+    // they were, so the pattern goes across again — and the song with it, because a
+    // placement is as long as its pattern and they have all just moved.
     state.push_pattern(id);
+    state.push_song();
     state.touch();
-    steps
+    (steps, arrangement(&state))
 }
 
 /// Open a pattern in the editor: it is what plays, on a loop, until it is closed.

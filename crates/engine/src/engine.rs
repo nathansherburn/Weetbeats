@@ -39,6 +39,14 @@ use crate::{
 /// to have no zipper noise and fast enough that a slider feels connected.
 const GAIN_SMOOTHING_FRAMES: f32 = 480.0;
 
+/// How fast the level meter falls, in full scale per second.
+///
+/// Without this the meter would be whatever the last callback happened to peak at, and the
+/// front end reads it about sixty times a second while callbacks come three times as often:
+/// two out of three peaks would never be seen, so a drum hit mostly would not register. It
+/// holds instead, and slides down.
+const METER_FALL_PER_SECOND: f32 = 1.6;
+
 /// One track's worth of audio thread state. Fixed size: no `Vec`, nothing to grow.
 ///
 /// Notes are not in here. A track is a sound and how loud it is, which is the project's
@@ -170,6 +178,10 @@ pub struct Engine {
     trash: TrashBin,
     shared: Arc<Shared>,
     gain_inc: f32,
+    /// The level the meter is showing, which falls rather than dropping to whatever the
+    /// last callback did.
+    peak_held: f32,
+    meter_fall: f32,
 }
 
 impl Engine {
@@ -209,6 +221,8 @@ impl Engine {
             trash,
             shared,
             gain_inc: 1.0 / GAIN_SMOOTHING_FRAMES,
+            peak_held: 0.0,
+            meter_fall: METER_FALL_PER_SECOND / sample_rate.max(1) as f32,
         })
     }
 
@@ -258,7 +272,11 @@ impl Engine {
         self.shared.set_playing(self.playing);
         self.shared
             .set_position(self.clock.step(), self.clock.progress(), self.sounding);
-        self.shared.set_meters(self.voices.active(), peak);
+        // Hold the loudest thing that happened and let it slide down, so a hit that lands
+        // between two of the front end's polls is still seen.
+        self.peak_held = (self.peak_held - self.meter_fall * total_frames as f32).max(peak);
+        self.shared
+            .set_meters(self.voices.active(), self.peak_held.max(0.0));
         self.shared.add_frames(total_frames as u64);
     }
 

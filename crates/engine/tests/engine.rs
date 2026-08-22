@@ -932,3 +932,33 @@ fn notes_at_different_pitches_play_together() {
         "three notes on one step should be three voices"
     );
 }
+
+/// The level meter has to be readable by something polling it sixty times a second while
+/// callbacks come three times as often, so it holds the peak and slides down.
+#[test]
+fn the_meter_holds_a_hit_long_enough_to_be_seen() {
+    let mut rig = Rig::new(120.0, 16);
+    track_with(&mut rig, 0, dc_sample(200));
+    note_in(&mut rig, 0, 0, 0);
+    rig.send(Command::SetPlaying(true));
+
+    // The hit is over in 200 frames. Render past it in small callbacks and the meter should
+    // still be showing something a good few callbacks later.
+    rig.render(256);
+    let struck = rig.shared.playhead().peak;
+    assert!(struck > 0.3, "the hit did not register at all: {struck}");
+
+    rig.render_chunked(2_000, 256);
+    let after = rig.shared.playhead().peak;
+    assert!(
+        after > 0.2,
+        "the meter fell away in 40ms ({after}), so a poll would miss it"
+    );
+
+    // And it does come down eventually, rather than sticking at the top.
+    rig.render_chunked(48_000, 256);
+    assert!(
+        rig.shared.playhead().peak < 0.05,
+        "the meter never came back down"
+    );
+}

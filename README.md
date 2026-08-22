@@ -174,7 +174,12 @@ pinned, pulling the tracks down is the better answer anyway. `masterGain` is sti
 ```sh
 cargo test                 # the engine: clock, voices, mixer, decoding, no allocations
 node ui/test/run.js        # the front end in a real browser, with Rust stubbed out
+node ui/test/contract.js   # the front end and Rust agree about the commands
 ```
+
+The contract check is there because the front end talks to Rust through strings: it reads
+both sides and compares the command names and their arguments. `run.js` runs it first, since
+a stub that answers differently from the real thing makes every check after it meaningless.
 
 The front end tests need Playwright, which is not otherwise required:
 

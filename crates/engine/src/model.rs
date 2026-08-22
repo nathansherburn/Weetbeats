@@ -475,6 +475,37 @@ impl Project {
         self.song_steps() / STEPS_PER_BAR
     }
 
+    /// Put right anything in a project that this version of the app could not have written.
+    ///
+    /// Deliberately *not* a tidy-up: it never moves anything that is where somebody put it.
+    /// An older version let a pattern's length change without touching its places in the
+    /// song, which left blocks the song view could not point at — those are made clickable
+    /// by hit testing the block rather than the grid, not by shoving the music about.
+    ///
+    /// Returns how many placements it had to throw away.
+    pub fn repair(&mut self) -> usize {
+        let lengths: Vec<(u16, u32)> = self
+            .patterns
+            .iter()
+            .map(|pattern| (pattern.id, pattern.steps.max(1)))
+            .collect();
+        let before = self.song.len();
+        // A placement of a pattern that is not there any more can only confuse things.
+        self.song
+            .retain(|placement| lengths.iter().any(|(id, _)| *id == placement.pattern));
+        self.song.sort_unstable();
+        self.song.dedup();
+        // Notes that run past the end of a shortened pattern.
+        for pattern in &mut self.patterns {
+            let steps = pattern.steps;
+            for lane in &mut pattern.lanes {
+                lane.trim_to(steps);
+            }
+            pattern.lanes.retain(|lane| !lane.notes.is_empty());
+        }
+        before - self.song.len()
+    }
+
     /// Change a pattern's length, and move its places in the song onto the new grid.
     ///
     /// A pattern that was four steps and is now sixteen cannot keep four placements a bar

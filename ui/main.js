@@ -98,6 +98,17 @@ const PALETTE = {
  */
 window.addEventListener("contextmenu", (e) => e.preventDefault());
 
+/*
+ * Nothing here is allowed to fail quietly. A command that comes back in a shape this code
+ * did not expect used to leave the window looking like it had ignored you — the change had
+ * gone to the audio thread, so you could hear it, but nothing on screen moved. Now it says
+ * so, which is the difference between a bug you can report and one you have to guess at.
+ */
+window.addEventListener("unhandledrejection", (e) => {
+  showError(e.reason?.message ?? e.reason ?? "something went wrong");
+});
+window.addEventListener("error", (e) => showError(e.message));
+
 // --- start up -------------------------------------------------------------
 
 async function boot() {
