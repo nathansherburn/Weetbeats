@@ -76,8 +76,12 @@
         <button id="addPattern" class="add-row" title="New pattern">+ pattern</button>
       </aside>
 
-      <!-- The song sits underneath; a pattern opens on top of it, like a window. -->
-      <section class="workspace">
+      <!--
+        The song sits underneath; a pattern opens on top of it, like a window. The open
+        pattern's colour is set on here as --pattern, so the editor and the roll can carry
+        the colour of the block you came in through.
+      -->
+      <section class="workspace" id="workspace">
         <div class="song" id="song">
           <div class="song-scroll" id="songScroll">
             <!--
@@ -124,7 +128,8 @@
           <div class="editor-scroll" id="editorScroll">
             <div class="editor-grid">
               <div class="corner">
-                <span class="head-label">steps</span>
+                <!-- The block from the song, pulled open: same colour, same name. -->
+                <span class="pattern-tab" id="patternTab"></span>
                 <span class="steps" title="How many boxes this pattern has">
                   <button id="fewerSteps" class="tick" aria-label="One box fewer">&minus;</button>
                   <input id="steps" class="number" type="text" inputmode="numeric" value="16" />
@@ -155,6 +160,7 @@
           <div class="roll-scroll" id="rollScroll">
             <div class="roll-grid">
               <div class="corner">
+                <span class="pattern-tab" id="rollTab"></span>
                 <span class="roll-name" id="rollName"></span>
               </div>
               <canvas id="rollRuler" class="ruler"></canvas>

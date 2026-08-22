@@ -8,6 +8,7 @@
 //!   samples/
 //!     kick.wav
 //!     clap.wav
+//!     .undo/        # samples a deleted track might still be undone back into
 //! ```
 //!
 //! Sample paths in `project.json` are relative to the folder. A sample is copied in the
@@ -291,21 +292,32 @@ pub fn copy_folder(from: &Path, to: &Path) -> Result<(), String> {
         return Ok(());
     }
     fs::create_dir_all(to).map_err(|e| whined(to, "make", e))?;
-    let samples = samples_dir(from);
-    if samples.is_dir() {
-        let into = samples_dir(to);
-        fs::create_dir_all(&into).map_err(|e| whined(&into, "make", e))?;
-        for entry in fs::read_dir(&samples).map_err(|e| whined(&samples, "read", e))? {
-            let entry = entry.map_err(|e| whined(&samples, "read", e))?;
-            if entry.path().is_file() {
-                let target = into.join(entry.file_name());
-                fs::copy(entry.path(), &target).map_err(|e| whined(&target, "copy into", e))?;
-            }
-        }
-    }
+    copy_files(&samples_dir(from), &samples_dir(to))?;
+    // The stash goes too. It looks like clutter in a copy, but the window's undo history
+    // still points at it and the copy is where the project now lives: leave it behind and
+    // taking back a deleted track would put the track back with no sound in it. Opening the
+    // copy throws it away, so it does not linger.
+    copy_files(&stash_dir(from), &stash_dir(to))?;
     let project = project_file(from);
     if project.is_file() {
         fs::copy(&project, project_file(to)).map_err(|e| whined(to, "copy into", e))?;
+    }
+    Ok(())
+}
+
+/// Every file in one folder into another, making the destination if it is not there. Files
+/// only: a folder inside is somebody else's business.
+fn copy_files(from: &Path, to: &Path) -> Result<(), String> {
+    if !from.is_dir() {
+        return Ok(());
+    }
+    fs::create_dir_all(to).map_err(|e| whined(to, "make", e))?;
+    for entry in fs::read_dir(from).map_err(|e| whined(from, "read", e))? {
+        let entry = entry.map_err(|e| whined(from, "read", e))?;
+        if entry.path().is_file() {
+            let target = to.join(entry.file_name());
+            fs::copy(entry.path(), &target).map_err(|e| whined(&target, "copy into", e))?;
+        }
     }
     Ok(())
 }
@@ -531,6 +543,42 @@ mod tests {
             !file.is_file(),
             "it came back from a stash that was cleared"
         );
+    }
+
+    /// Saving somewhere else takes the stash with it, or an undo in the copy would put a
+    /// track back with nothing to play.
+    #[test]
+    fn save_as_takes_what_undo_might_still_want() {
+        let temp = Temp::new("stash-copy");
+        let from = temp.path().join("Here.beat");
+        let to = temp.path().join("There.beat");
+        let source = temp.path().join("snare.wav");
+        fs::write(&source, b"RIFFsnare").unwrap();
+
+        let brought = import_sample(&from, &source).unwrap();
+        let mut project = Project::default();
+        project.tracks.push(Track::new(
+            0,
+            "snare".into(),
+            Some(SampleRef {
+                path: brought.path.clone(),
+                name: "snare".into(),
+            }),
+        ));
+        save(&from, &project).unwrap();
+
+        // The track is deleted, so its sample is moved aside, and then the project is saved
+        // somewhere else.
+        let without = Project::default();
+        save(&from, &without).unwrap();
+        stash_sample(&from, &brought.path).unwrap();
+        copy_folder(&from, &to).unwrap();
+
+        // Undo, in the copy: the track comes back and so does its sample.
+        reconcile_samples(&to, &project).unwrap();
+        let file = resolve(&to, &brought.path).unwrap();
+        assert!(file.is_file(), "undo in the copy lost the sample");
+        assert_eq!(fs::read(&file).unwrap(), b"RIFFsnare");
     }
 
     /// A sample two tracks share is not moved aside when one of them goes.

@@ -236,6 +236,28 @@ main {
   display: flex;
   min-width: 0;
   position: relative;
+  /* The open pattern's colour, set from main.js. Falls back to the app's own accent. */
+  --pattern: var(--accent);
+}
+
+/*
+ * The open pattern's name, in its own colour, sitting in the corner above the instruments
+ * where it is always in view however far the grid is scrolled. It is drawn to look like the
+ * block in the song that it is: same colour, same dark ink, same rounded corners — so
+ * opening a pattern reads as pulling that block open rather than going somewhere else.
+ */
+.pattern-tab {
+  background: var(--pattern);
+  color: #1a0b12;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 4px;
+  padding: 3px 8px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: none;
 }
 
 body.drop-target::after {
@@ -470,10 +492,13 @@ body.drop-target::after {
   background: var(--panel-2);
 }
 
-/* The pattern the editor has open. Escape, the ×, or the song button puts it away. */
+/*
+ * The pattern the editor has open, in its own colour — the same one its blocks are drawn in
+ * and the same one the editor is wearing. Escape, the ×, or the song button puts it away.
+ */
 .prow.open {
-  background: var(--accent-soft);
-  box-shadow: inset 2px 0 0 var(--accent);
+  background: var(--pattern-soft, var(--accent-soft));
+  box-shadow: inset 3px 0 0 var(--pattern, var(--accent));
 }
 
 /*
@@ -487,6 +512,10 @@ body.drop-target::after {
 
 .prow.playing .pname {
   color: var(--lit);
+}
+
+.prow.open .pname {
+  font-weight: 600;
 }
 
 /*
@@ -941,7 +970,11 @@ input.number.small-number {
   display: block;
 }
 
-/* The pattern is a window over the song, and this shuts it. */
+/*
+ * The pattern is a window over the song, and this shuts it. In the pattern's own colour, at
+ * the far end of the same strip the name tab starts: the two of them bracket the ruler, so
+ * the top of the editor reads as the block it belongs to.
+ */
 .close {
   position: absolute;
   top: 0;
@@ -949,21 +982,20 @@ input.number.small-number {
   width: 30px;
   height: var(--head);
   border: none;
-  border-left: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
-  background: var(--panel);
-  color: var(--dim);
+  background: var(--pattern);
+  color: #1a0b12;
   font-size: 17px;
   line-height: 1;
   z-index: 4;
   display: grid;
   place-items: center;
   padding: 0;
+  transition: filter 0.12s;
 }
 
 .close:hover {
-  background: var(--accent);
-  color: #1a0b12;
+  filter: brightness(1.25);
 }
 
 .empty {

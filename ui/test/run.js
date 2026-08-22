@@ -735,21 +735,48 @@ try {
   check("clicking it goes back to the song", await page.locator("#song").isVisible());
   check("and then it is lit",
     await page.locator("#songMode").evaluate((n) => n.classList.contains("on")));
-  // --- a click in the panel picks a pattern out; it does not open one
+  // --- clicking a pattern in the panel opens it, and clicking it again closes it
   await clearCalls();
   await rows.first().click();
-  await page.waitForTimeout(120);
-  check("clicking a pattern in the panel does not open it",
-    await page.locator("#song").isVisible());
-  check("it picks it out instead",
-    await rows.first().evaluate((n) => n.classList.contains("picked")));
-  check("and Rust is not told to open anything", (await calls("open_pattern")).length === 0);
-
-  // --- a double click on a block in the song is the way in
-  await openViaSong(0);
-  check("double clicking a block opens its pattern", await page.locator("#editor").isVisible());
+  await page.waitForSelector("#editor:visible");
+  check("clicking a pattern opens it", await page.locator("#editor").isVisible());
   check("Rust was told which one", (await lastCall("open_pattern")).args.id === 0,
     JSON.stringify((await lastCall("open_pattern")).args));
+  await rows.first().click();
+  await page.waitForSelector("#song:visible");
+  check("clicking the open one closes it", await page.locator("#song").isVisible());
+  check("and the pattern it was stays picked out in the song",
+    await rows.first().evaluate((n) => n.classList.contains("picked")));
+
+  // --- a double click on a block in the song opens it too
+  await openViaSong(0);
+  check("double clicking a block opens its pattern", await page.locator("#editor").isVisible());
+
+  // --- the pattern carries the colour of the block it was opened from
+  const cssColour = (id, property) =>
+    page.evaluate(
+      ([id, property]) => getComputedStyle(document.getElementById(id))[property],
+      [id, property],
+    );
+  const rgb = (colour) => (colour.match(/\d+/g) ?? []).slice(0, 3).join(",");
+  check("the corner names the pattern",
+    (await page.locator("#patternTab").textContent()) === "Pattern 1",
+    await page.locator("#patternTab").textContent());
+  check("in the colour its blocks are drawn in",
+    rgb(await cssColour("patternTab", "backgroundColor")) === blockColour(0),
+    await cssColour("patternTab", "backgroundColor"));
+  check("and so is the button that closes it",
+    rgb(await cssColour("closePattern", "backgroundColor")) === blockColour(0),
+    await cssColour("closePattern", "backgroundColor"));
+  check("the ruler is underlined in it", await page.evaluate(
+    ([head]) => {
+      const dpr = window.devicePixelRatio || 1;
+      const ctx = document.getElementById("ruler").getContext("2d");
+      const [r, g, b] = ctx.getImageData(20 * dpr, Math.round((head - 3) * dpr), 1, 1).data;
+      return `${r},${g},${b}`;
+    },
+    [34],
+  ) === blockColour(0));
 
   // --- closing a pattern: the X, and escape
   await page.locator("#closePattern").click();
@@ -1189,6 +1216,13 @@ try {
   // --- undo and redo
   const steps = () => page.evaluate(() => window.__weetbeats_history());
   await openViaSong(0);
+  // The colour picked for this pattern back in the song view followed it in here.
+  check("the editor follows a colour picked in the panel",
+    (await page.evaluate(() =>
+      getComputedStyle(document.getElementById("patternTab")).backgroundColor))
+      .match(/\d+/g).slice(0, 3).join(",") === blockColour(3),
+    await page.evaluate(() =>
+      getComputedStyle(document.getElementById("patternTab")).backgroundColor));
   await clearCalls();
   const boxAt = async (step, row) => {
     const box = await page.locator("#grid").boundingBox();

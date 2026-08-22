@@ -146,8 +146,9 @@ step so a drag comes back in one go.
 
 The one thing a copy of `project.json` cannot put back is a file, so deleting the last track
 using a sample moves it to `samples/.undo/` rather than unlinking it, and undo brings it out
-again. Opening a project throws that folder away. Renaming the project stays outside the
-history: the name is the folder's, not the file's.
+again. Opening a project throws that folder away; "save as" takes it with it, because the
+window's history still points at those files and the copy is where the project now lives.
+Renaming the project stays outside the history: the name is the folder's, not the file's.
 
 **Double clicking a block in the song is the way into a pattern.** A click in the patterns
 panel picks a pattern out and does nothing else, so nothing in that list can move you off the

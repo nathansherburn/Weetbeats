@@ -224,7 +224,13 @@ The one thing a copy of `project.json` cannot put back is a file. Deleting the l
 using a sample used to delete the sample, which would make an undo a liar — the track would
 come back pointing at nothing. So it is moved to `samples/.undo/` inside the project instead,
 and undo brings it out again. Opening a project throws that folder away, because a window
-that has just opened has nothing to undo, and "save as" never copies it.
+that has just opened has nothing to undo.
+
+"Save as" takes the stash with it, which looks like clutter in a copy and is not: the window's
+history still points at those files and the copy is where the project now lives, so leaving
+them behind would mean taking back a deleted track and getting the track without its sound.
+The copy is cleaned the first time anyone opens it. If a sample ever does go missing anyway,
+the step back says so rather than leaving you with a silent track.
 
 Renaming the project is the one edit outside the history: the name is the folder's, not
 `project.json`'s, and a step back that left the folder where it was would be a step back in

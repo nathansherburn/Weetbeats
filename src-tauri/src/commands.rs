@@ -835,7 +835,12 @@ fn stepped(state: &AppState, moved: bool) -> Option<Startup> {
     }
     state.push_project();
     state.touch();
-    Some(startup_payload(state, None))
+    // A sample that could not be found is the one thing a step back can get wrong — the
+    // stash it would have come from is thrown away when a project is opened — so if the
+    // engine had anything to complain about, it is said out loud rather than left as a
+    // silent track.
+    let message = state.complaint.lock().unwrap().take();
+    Some(startup_payload(state, message))
 }
 
 // --- transport --------------------------------------------------------------

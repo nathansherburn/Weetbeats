@@ -1,10 +1,6 @@
 /*
  * Weetbeats front end.
  *
- * The patterns panel picks a pattern out; it does not open one. Opening a pattern to edit
- * is a double click on one of its blocks in the song, so nothing in that list can take you
- * off the song you are looking at by accident.
- *
  * Three views, one workspace. The song sits underneath: bars across the top, patterns down
  * the left, and blocks that overlap freely so a kick pattern, a hat pattern and a snare
  * pattern add up to a beat. A block starts wherever the snap puts it and is as long as you
@@ -118,7 +114,8 @@ for (const id of [
   "closePattern",
   "add", "addBig", "steps", "fewerSteps", "moreSteps", "trackHeaders", "grid", "ruler",
   "empty", "roll", "rollScroll", "rollName", "rollRuler", "keys", "notes", "velocity",
-  "closeRoll", "rollZoomIn", "rollZoomOut", "rollZoomRead",
+  "closeRoll", "rollZoomIn", "rollZoomOut", "rollZoomRead", "workspace",
+  "patternTab", "rollTab",
 ]) {
   el[id] = document.getElementById(id);
 }
@@ -279,12 +276,29 @@ function showView() {
   el.roll.classList.toggle("hidden", !inRoll);
 }
 
+/*
+ * Which pattern the editor and the roll belong to, said in colour. The tab in the corner,
+ * the close button, the line under the ruler and every note drawn inside all come from
+ * here, so a pattern looks like the block in the song it was opened from.
+ */
+function showPatternColour() {
+  const open = openPatternNow();
+  const colour = open === null ? PALETTE.accent : colourOf(open.id);
+  el.workspace.style.setProperty("--pattern", colour);
+  const name = open === null ? "" : open.name;
+  el.patternTab.textContent = name;
+  el.patternTab.title = name;
+  el.rollTab.textContent = name;
+  el.rollTab.title = name;
+}
+
 function openPattern(id) {
   if (patternById(id) === null) return;
   state.open = id;
   state.selected = id;
   state.roll = null;
   el.steps.value = String(stepsOf(id));
+  showPatternColour();
   showView();
   invoke("open_pattern", { id });
   drawPatternPanel();
@@ -292,6 +306,8 @@ function openPattern(id) {
 }
 
 function closePattern() {
+  // The pattern you were in stays picked out, so the song shows you where it plays.
+  if (state.open !== null) state.selected = state.open;
   state.open = null;
   state.roll = null;
   showView();
@@ -301,16 +317,16 @@ function closePattern() {
 }
 
 /*
- * Clicking a pattern in the panel picks it out — in the list and in the song, where its lane
- * is lifted out of the others — and does nothing else. Opening one to edit is a double click
- * on one of its blocks in the song, so a click in this list can never move you off the song
- * you are looking at.
+ * Clicking a pattern in the panel opens it, and clicking the open one closes it again. It
+ * also picks that pattern out in the song, where its lane is lifted above the others, so
+ * closing leaves you looking at where the pattern you were just in actually plays.
  */
-function selectPattern(id) {
-  if (patternById(id) === null) return;
-  state.selected = id;
-  markPatternRows();
-  state.needsDraw = true;
+function togglePattern(id) {
+  if (state.open === id) {
+    closePattern();
+    return;
+  }
+  openPattern(id);
 }
 
 el.closePattern.addEventListener("click", closePattern);
@@ -371,10 +387,15 @@ function drawPatternPanel() {
       row.className = "prow";
       row.dataset.id = String(pattern.id);
 
-      // The colour its blocks are drawn in, and the way to change it.
+      // The colour its blocks are drawn in, and the way to change it. The row is tinted
+      // with it too when the pattern is open, so the panel, the song and the editor are all
+      // saying the same thing.
+      const colour = blockColour(pattern, state.patterns.indexOf(pattern));
+      row.style.setProperty("--pattern", colour);
+      row.style.setProperty("--pattern-soft", tint(colour, 0.2));
       const swatch = document.createElement("button");
       swatch.className = "swatch";
-      swatch.style.background = blockColour(pattern, state.patterns.indexOf(pattern));
+      swatch.style.background = colour;
       swatch.title = "The colour this pattern is in the song";
       swatch.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -421,15 +442,18 @@ function drawPatternPanel() {
       row.append(kill);
 
       row.addEventListener("click", (e) => {
-        // The second click of a double click is the start of a rename, not a second select.
+        // The second click of a double click is the start of a rename, not another toggle.
+        // Renaming a pattern you just opened is a fine place to end up; toggling the view
+        // twice under someone's cursor is not.
         if (e.detail > 1) return;
-        selectPattern(pattern.id);
+        togglePattern(pattern.id);
       });
       row.addEventListener("dblclick", () => startRename(row, pattern));
       return row;
     }),
   );
   markPatternRows();
+  showPatternColour();
   syncScroll(el.patternList, el.songScroll);
 }
 
@@ -968,23 +992,31 @@ window.addEventListener("resize", resize);
 function drawRuler() {
   const ctx = el.ruler.getContext("2d");
   const steps = stepsOf(state.open);
-  ctx.clearRect(0, 0, drawnWidth(el.ruler), HEAD);
+  const width = drawnWidth(el.ruler);
+  ctx.clearRect(0, 0, width, HEAD);
   ctx.font = "10px ui-sans-serif, system-ui, sans-serif";
   ctx.textBaseline = "middle";
   for (let step = 0; step < steps; step++) {
     const onBeat = step % STEPS_PER_BEAT === 0;
     ctx.fillStyle = onBeat ? PALETTE.dim : PALETTE.line;
     if (onBeat) {
-      ctx.fillText(String(step / STEPS_PER_BEAT + 1), step * CELL + GAP + 2, 15);
+      ctx.fillText(String(step / STEPS_PER_BEAT + 1), step * CELL + GAP + 2, 14);
     } else {
-      ctx.fillRect(step * CELL + GAP, 14, 3, 1);
+      ctx.fillRect(step * CELL + GAP, 13, 3, 1);
     }
   }
+  // The pattern's colour along the bottom of the strip, running the whole way across:
+  // the name tab at one end, the close button at the other, and this joining them.
+  ctx.fillStyle = colourOf(state.open);
+  ctx.fillRect(0, HEAD - 4, width, 3);
 }
 
 function drawGrid() {
   const pattern = openPatternNow();
   if (!pattern) return;
+  // Everything drawn in here is the colour of the block this pattern is in the song, so a
+  // pattern and its blocks are plainly the same thing seen two ways.
+  const ink = colourOf(pattern.id);
   const ctx = el.grid.getContext("2d");
   const width = drawnWidth(el.grid);
   const height = gridHeight();
@@ -1021,7 +1053,7 @@ function drawGrid() {
 
       if (on) {
         const live = state.playing && state.step === step;
-        ctx.fillStyle = live ? PALETTE.lit : PALETTE.accent;
+        ctx.fillStyle = live ? PALETTE.lit : ink;
       } else {
         ctx.fillStyle = onBeat ? "#272132" : "#201c29";
       }
@@ -1041,6 +1073,7 @@ function drawGrid() {
  */
 function drawMiniRoll(ctx, pattern, track, y) {
   const notes = pattern.notes.get(track.id) ?? [];
+  const ink = colourOf(pattern.id);
   const width = pattern.steps * CELL;
   const top = y + GAP;
   const height = ROW - GAP * 2 - 1;
@@ -1085,7 +1118,7 @@ function drawMiniRoll(ctx, pattern, track, y) {
       state.playing &&
       state.step >= note.step &&
       state.step < note.step + Math.max(1, note.length);
-    ctx.fillStyle = live ? PALETTE.lit : PALETTE.accent;
+    ctx.fillStyle = live ? PALETTE.lit : ink;
     ctx.fillRect(x, top + height - 2 - bar - up, w, bar);
   }
   ctx.restore();
@@ -1303,7 +1336,8 @@ function drawRollRuler() {
   const ctx = el.rollRuler.getContext("2d");
   const steps = rollSteps();
   const inPattern = stepsOf(state.open);
-  ctx.clearRect(0, 0, drawnWidth(el.rollRuler), HEAD);
+  const width = drawnWidth(el.rollRuler);
+  ctx.clearRect(0, 0, width, HEAD);
   ctx.font = "10px ui-sans-serif, system-ui, sans-serif";
   ctx.textBaseline = "middle";
   for (let step = 0; step < steps; step++) {
@@ -1312,12 +1346,14 @@ function drawRollRuler() {
     ctx.globalAlpha = past ? 0.4 : 1;
     ctx.fillStyle = onBeat ? PALETTE.dim : PALETTE.line;
     if (onBeat) {
-      ctx.fillText(String(step / STEPS_PER_BEAT + 1), step * rollCell() + 3, 15);
+      ctx.fillText(String(step / STEPS_PER_BEAT + 1), step * rollCell() + 3, 14);
     } else {
-      ctx.fillRect(step * rollCell(), 14, 2, 1);
+      ctx.fillRect(step * rollCell(), 13, 2, 1);
     }
   }
   ctx.globalAlpha = 1;
+  ctx.fillStyle = colourOf(state.open);
+  ctx.fillRect(0, HEAD - 4, width, 3);
 }
 
 function drawNotes() {
@@ -1361,13 +1397,14 @@ function drawNotes() {
     ctx.fillRect(state.step * rollCell(), 0, rollCell(), height);
   }
 
+  const ink = colourOf(state.open);
   for (const note of rollNotes()) {
     if (note.pitch < LOW_PITCH || note.pitch > HIGH_PITCH) continue;
     const x = note.step * rollCell();
     const y = pitchRow(note.pitch) * semitone();
     const w = Math.max(4, note.length * rollCell() - 2);
     const live = state.playing && state.step >= note.step && state.step < note.step + note.length;
-    ctx.fillStyle = live ? PALETTE.lit : PALETTE.accent;
+    ctx.fillStyle = live ? PALETTE.lit : ink;
     roundRect(ctx, x + 1, y + 1, w, semitone() - 3, 3);
     ctx.fill();
     // The right hand edge is the handle for how long it is, so it says so.
@@ -1383,10 +1420,11 @@ function drawVelocity() {
   const endX = stepsOf(state.open) * rollCell();
   ctx.fillStyle = "rgba(0,0,0,0.35)";
   ctx.fillRect(endX, 0, width - endX, VELOCITY);
+  const ink = colourOf(state.open);
   for (const note of rollNotes()) {
     const x = note.step * rollCell();
     const h = Math.max(2, (note.velocity / 127) * (VELOCITY - 8));
-    ctx.fillStyle = PALETTE.accent;
+    ctx.fillStyle = ink;
     ctx.fillRect(x + 1, VELOCITY - h - 3, Math.max(3, rollCell() - 3), h);
   }
 }
@@ -1649,11 +1687,26 @@ function blockColour(pattern, row) {
   return BLOCK_COLOURS[((pick % BLOCK_COLOURS.length) + BLOCK_COLOURS.length) % BLOCK_COLOURS.length];
 }
 
+/*
+ * The same colour, looked up by the pattern alone. What the editor and the roll draw in, so
+ * the notes inside a block are the colour of the block they are in.
+ */
+function colourOf(id) {
+  const at = state.patterns.findIndex((pattern) => pattern.id === id);
+  return at < 0 ? PALETTE.accent : blockColour(state.patterns[at], at);
+}
+
 /* The same colour, lifted towards white. What a block that is sounding right now looks like. */
 function lighten(hex, amount) {
   const n = parseInt(hex.slice(1), 16);
   const mix = (channel) => Math.round(channel + (255 - channel) * amount);
   return `rgb(${mix((n >> 16) & 255)},${mix((n >> 8) & 255)},${mix(n & 255)})`;
+}
+
+/* And barely there, for the row of a pattern that is open. */
+function tint(hex, alpha) {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
 }
 
 /* The block of a pattern covering a step, if there is one. */
@@ -2284,6 +2337,8 @@ function stepped(now) {
   applyProject(now);
   if (state.open !== null) invoke("open_pattern", { id: state.open });
   else invoke("close_pattern");
+  // A sample a step back could not find, most likely. Never nothing.
+  if (now.message) showError(now.message);
 }
 
 // --- the playhead ---------------------------------------------------------
