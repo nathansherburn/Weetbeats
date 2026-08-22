@@ -97,6 +97,33 @@ try {
       return { w: parseInt(c.style.width), h: parseInt(c.style.height) };
     }, id);
   const song = () => page.evaluate(() => window.__weetbeats_state.song);
+
+  /* Where in the song a lane and a step meet, in the window. */
+  const lanePoint = async (row, step) => {
+    const box = await page.locator("#lanes").boundingBox();
+    return { x: box.x + step * SONG_STEP + 2, y: box.y + row * LANE + LANE / 2 };
+  };
+
+  /*
+   * Opening a pattern to edit is a double click on one of its blocks in the song — the only
+   * way in, now that a click in the panel only picks a pattern out. Draws a block first if
+   * that lane has nothing at the top of it.
+   */
+  const openViaSong = async (row) => {
+    if (!(await page.locator("#song").isVisible())) {
+      await page.locator("#songMode").click();
+      await page.waitForSelector("#song:visible");
+    }
+    const at = await lanePoint(row, 0);
+    await page.mouse.click(at.x, at.y);
+    await page.mouse.dblclick(at.x, at.y);
+    await page.waitForSelector("#editor:visible");
+  };
+
+  const rubOutBlock = async (row, step) => {
+    const at = await lanePoint(row, step);
+    await page.mouse.click(at.x, at.y, { button: "right" });
+  };
   const menu = (what) => page.evaluate((w) => window.__weetbeats_menu(w), what);
 
   /*
@@ -575,6 +602,67 @@ try {
     await page.screenshot({ path: process.env.WEETBEATS_SCREENSHOT.replace(/\.png$/, "-roll.png") });
   }
 
+  // --- the roll zooms, by button and by pinch, and the notes follow
+  const rollSize = async () => await canvasSize("notes");
+  const before = await rollSize();
+  await page.locator("#rollZoomIn").click();
+  await page.waitForFunction(() => document.getElementById("rollZoomRead").textContent !== "1×");
+  const after = await rollSize();
+  check("zooming the roll in makes a step wider", after.w > before.w,
+    `${after.w} vs ${before.w}`);
+  check("and a semitone taller", after.h > before.h, `${after.h} vs ${before.h}`);
+  check("the stylesheet's semitone follows, so its lines still line up",
+    (await page.evaluate(() =>
+      getComputedStyle(document.documentElement).getPropertyValue("--semitone").trim()))
+      !== "15px");
+
+  // A pinch on the trackpad, which arrives as a run of wheel events with ctrl held. They
+  // are added up and applied once a frame, so a burst of them is one zoom, not twelve.
+  // Counting how many times the canvas is laid out again is how "smooth" is measured: six
+  // wheel events inside one frame have to come out as one resize, not six.
+  await page.evaluate(() => {
+    window.__resizes = 0;
+    new MutationObserver((records) => {
+      window.__resizes += records.length;
+    }).observe(document.getElementById("notes"), {
+      attributes: true,
+      attributeFilter: ["style"],
+    });
+  });
+  // A real pinch sends wheel events faster than the screen refreshes, so they are all
+  // dispatched inside one task here. Driving them through the mouse one await at a time
+  // would give each its own frame and prove nothing.
+  await page.evaluate(() => {
+    const roll = document.getElementById("rollScroll");
+    for (let n = 0; n < 6; n++) {
+      roll.dispatchEvent(
+        new WheelEvent("wheel", {
+          deltaY: 20,
+          ctrlKey: true,
+          clientX: 400,
+          clientY: 300,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    }
+  });
+  await page.waitForFunction((was) =>
+    parseInt(document.getElementById("notes").style.width) < was, after.w);
+  check("pinching the roll zooms it out again",
+    (await rollSize()).w < after.w, `${(await rollSize()).w} vs ${after.w}`);
+  // Two style writes per resize: the width and the height.
+  check("and a burst of pinch events is one zoom, not one each",
+    (await page.evaluate(() => window.__resizes)) <= 4,
+    `${await page.evaluate(() => window.__resizes)} style writes`);
+
+  // Clicking the read-out is the way back to life size, which is where the checks below
+  // expect the roll to be.
+  await page.locator("#rollZoomRead").click();
+  await page.waitForFunction(() => document.getElementById("rollZoomRead").textContent === "1×");
+  check("clicking the read-out goes back to life size", (await rollSize()).w === before.w,
+    `${(await rollSize()).w} vs ${before.w}`);
+
   // --- a note past the end of the pattern makes the pattern longer
   await clearCalls();
   // A new note is as long as the last one drawn, which by now is three steps.
@@ -647,29 +735,40 @@ try {
   check("clicking it goes back to the song", await page.locator("#song").isVisible());
   check("and then it is lit",
     await page.locator("#songMode").evaluate((n) => n.classList.contains("on")));
+  // --- a click in the panel picks a pattern out; it does not open one
+  await clearCalls();
   await rows.first().click();
-  await page.waitForSelector("#editor:visible");
+  await page.waitForTimeout(120);
+  check("clicking a pattern in the panel does not open it",
+    await page.locator("#song").isVisible());
+  check("it picks it out instead",
+    await rows.first().evaluate((n) => n.classList.contains("picked")));
+  check("and Rust is not told to open anything", (await calls("open_pattern")).length === 0);
 
-  // --- closing a pattern: the X, clicking it again, and escape
+  // --- a double click on a block in the song is the way in
+  await openViaSong(0);
+  check("double clicking a block opens its pattern", await page.locator("#editor").isVisible());
+  check("Rust was told which one", (await lastCall("open_pattern")).args.id === 0,
+    JSON.stringify((await lastCall("open_pattern")).args));
+
+  // --- closing a pattern: the X, and escape
   await page.locator("#closePattern").click();
   await page.waitForSelector("#song:visible");
   check("the close button shuts the pattern", await page.locator("#song").isVisible());
   check("and the editor goes away", !(await page.locator("#editor").isVisible()));
   check("the panel is still there in the song view", await page.locator("#patternList").isVisible());
   check("Rust was told the pattern closed", (await calls("close_pattern")).length > 0);
-  check("the song view says what to do", await page.locator("#songHint").isVisible());
 
-  await rows.first().click();
-  await page.waitForSelector("#editor:visible");
-  check("clicking a pattern opens it", await page.locator("#editor").isVisible());
-  await rows.first().click();
-  await page.waitForSelector("#song:visible");
-  check("clicking the open one closes it", await page.locator("#song").isVisible());
-  await rows.first().click();
-  await page.waitForSelector("#editor:visible");
+  await openViaSong(0);
   await page.keyboard.press("Escape");
   await page.waitForSelector("#song:visible");
   check("escape closes the pattern", await page.locator("#song").isVisible());
+
+  // The block those double clicks needed goes again, so the song is empty for the checks
+  // below that count what is in it.
+  await rubOutBlock(0, 0);
+  await page.waitForFunction(() => window.__weetbeats_state.song.length === 0);
+  check("the song view says what to do again", await page.locator("#songHint").isVisible());
 
   // --- escape in the song view is still the panic button
   await clearCalls();
@@ -713,8 +812,6 @@ try {
   check("and stays in the pattern", await page.locator("#editor").isVisible());
 
   // --- duplicating brings the notes with it
-  await rows.first().click();
-  await page.waitForSelector("#editor:visible");
   await rows.first().hover();
   await rows.first().locator(".tick.dup").click();
   await page.waitForFunction(() => document.querySelectorAll("#patternList .prow").length === 3);
@@ -849,8 +946,7 @@ try {
     JSON.stringify((await lastCall("place_pattern")).args));
 
   // --- a four step pattern goes in four steps at a time, not a bar at a time
-  await rows.nth(1).click();
-  await page.waitForSelector("#editor:visible");
+  await openViaSong(1);
   await page.locator("#steps").click();
   await page.locator("#steps").fill("4");
   await page.locator("#steps").press("Enter");
@@ -1030,6 +1126,28 @@ try {
   check("and the rows are not rebuilt while it plays, so a rename survives",
     (await rows.first().evaluate((n) => n.dataset.marked)) === "yes");
 
+  // --- the level meter moves while the song plays
+  // It is a transform, not a width: a width has to lay the page out, and doing that sixty
+  // times a second behind a song view that is already redrawing is what made it look dead.
+  const maskScale = () =>
+    page.evaluate(() => {
+      const shown = getComputedStyle(document.getElementById("meterMask")).transform;
+      const numbers = shown.match(/-?[\d.]+/g);
+      return numbers ? Number(numbers[0]) : 1;
+    });
+  check("the meter is driven by a transform, not an animated width",
+    (await page.evaluate(() =>
+      getComputedStyle(document.getElementById("meterMask")).transitionProperty)) === "all" ||
+      (await page.evaluate(() =>
+        getComputedStyle(document.getElementById("meterMask")).transitionDuration)) === "0s");
+  await page.waitForFunction(() => {
+    const shown = getComputedStyle(document.getElementById("meterMask")).transform;
+    const numbers = shown.match(/-?[\d.]+/g);
+    return numbers && Number(numbers[0]) < 0.5;
+  }, null, { timeout: 4000 });
+  check("the meter reads the mix while the song plays", (await maskScale()) < 0.5,
+    String(await maskScale()));
+
   // --- space plays and stops
   await clearCalls();
   await page.locator("body").press("Space");
@@ -1048,8 +1166,7 @@ try {
   check("space works with the tempo focused", (await calls("set_playing")).length > 0);
 
   // --- mute, solo, volume, delete
-  await rows.first().click();
-  await page.waitForSelector("#editor:visible");
+  await openViaSong(0);
   await clearCalls();
   await page.locator("#trackHeaders .track").first().locator(".tick.mute").click();
   await page.locator("#trackHeaders .track").first().locator(".tick.solo").click();
@@ -1068,6 +1185,113 @@ try {
   check("deleting a track removes the row", (await page.locator("#trackHeaders .track").count()) === 2);
   check("and its notes go with it", await page.evaluate(() =>
     window.__weetbeats_state.patterns.every((p) => p.lanes.every((l) => l.track !== 0))));
+
+  // --- undo and redo
+  const steps = () => page.evaluate(() => window.__weetbeats_history());
+  await openViaSong(0);
+  await clearCalls();
+  const boxAt = async (step, row) => {
+    const box = await page.locator("#grid").boundingBox();
+    return { x: box.x + step * CELL + CELL / 2, y: box.y + row * ROW + ROW / 2 };
+  };
+  const ticked = () =>
+    page.evaluate(() =>
+      window.__weetbeats_state.patterns
+        .find((p) => p.id === 0)
+        .lanes.flatMap((l) => l.notes.map((n) => n.step))
+        .sort((a, b) => a - b)
+        .join(","));
+
+  const one = await boxAt(3, 0);
+  await page.mouse.click(one.x, one.y);
+  await page.waitForFunction(() => window.__weetbeats_calls.some((c) => c.name === "set_step"));
+  const withBox = await ticked();
+  check("a box is ticked", withBox.split(",").includes("3"), withBox);
+
+  await page.keyboard.press("Control+z");
+  await page.waitForFunction((was) => {
+    const now = window.__weetbeats_state.patterns
+      .find((p) => p.id === 0)
+      .lanes.flatMap((l) => l.notes.map((n) => n.step))
+      .sort((a, b) => a - b)
+      .join(",");
+    return now !== was;
+  }, withBox);
+  check("undo takes the box back", !(await ticked()).split(",").includes("3"), await ticked());
+  check("and it does not throw you out of the pattern",
+    await page.locator("#editor").isVisible());
+  check("and the engine is told the pattern is still the live one",
+    (await lastCall("open_pattern")).args.id === 0,
+    JSON.stringify((await lastCall("open_pattern")).args));
+  check("and the grid is drawn without it",
+    (await settledGrid(3, 0, EMPTY_BOX)) === EMPTY_BOX, await gridPixel(3, 0));
+
+  await page.keyboard.press("Control+Shift+z");
+  await page.waitForFunction((want) => {
+    const now = window.__weetbeats_state.patterns
+      .find((p) => p.id === 0)
+      .lanes.flatMap((l) => l.notes.map((n) => n.step))
+      .sort((a, b) => a - b)
+      .join(",");
+    return now === want;
+  }, withBox);
+  check("redo puts it back", (await ticked()) === withBox, await ticked());
+
+  // A drag across boxes is one thing you did, so it comes back in one step.
+  await clearCalls();
+  const stepsBefore = (await steps()).past;
+  const dragFrom = await boxAt(8, 0);
+  await page.mouse.move(dragFrom.x, dragFrom.y);
+  await page.mouse.down();
+  for (const at of [9, 10, 11, 12]) {
+    const p = await boxAt(at, 0);
+    await page.mouse.move(p.x, p.y, { steps: 2 });
+  }
+  await page.mouse.up();
+  await page.waitForFunction(() =>
+    window.__weetbeats_calls.filter((c) => c.name === "set_step").length >= 5);
+  check("a drag across boxes is one step to take back",
+    (await steps()).past === stepsBefore + 1,
+    `${(await steps()).past} vs ${stepsBefore + 1}`);
+  const dragged = await ticked();
+  await page.keyboard.press("Control+z");
+  await page.waitForFunction((was) => {
+    const now = window.__weetbeats_state.patterns
+      .find((p) => p.id === 0)
+      .lanes.flatMap((l) => l.notes.map((n) => n.step))
+      .sort((a, b) => a - b)
+      .join(",");
+    return now !== was;
+  }, dragged);
+  check("and one undo takes the whole drag back", (await ticked()) === withBox,
+    await ticked());
+
+  // Renaming, which is a different kind of edit, is its own step.
+  await page.locator("#songMode").click();
+  await page.waitForSelector("#song:visible");
+  await rows.first().dblclick();
+  await page.waitForSelector("#patternList .rename");
+  await page.locator("#patternList .rename").fill("Verse");
+  await page.locator("#patternList .rename").press("Enter");
+  await page.waitForFunction(() =>
+    document.querySelector("#patternList .prow .pname").textContent === "Verse");
+  await page.keyboard.press("Control+z");
+  await page.waitForFunction(() =>
+    document.querySelector("#patternList .prow .pname").textContent !== "Verse");
+  check("undo puts a name back", (await rows.first().locator(".pname").textContent()) !== "Verse",
+    await rows.first().locator(".pname").textContent());
+
+  // And when there is nothing left to take back it says so rather than doing something.
+  await page.evaluate(() => {
+    while (window.__weetbeats_history().past > 0) window.__TAURI__.core.invoke("undo");
+  });
+  await page.waitForFunction(() => window.__weetbeats_history().past === 0);
+  await clearCalls();
+  await page.keyboard.press("Control+z");
+  await page.waitForFunction(() =>
+    document.getElementById("status").textContent.includes("nothing to undo"));
+  check("with nothing to undo it says so",
+    (await page.locator("#status").textContent()).includes("nothing to undo"));
 
   // --- the File menu is Rust's, and it tells the front end what it did
   await menu("save");

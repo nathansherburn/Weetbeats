@@ -58,6 +58,8 @@ fn main() {
             commands::set_pattern_steps,
             commands::open_pattern,
             commands::close_pattern,
+            commands::undo,
+            commands::redo,
             commands::set_pattern_colour,
             commands::rename_project,
             commands::place_pattern,

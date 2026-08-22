@@ -31,8 +31,8 @@ use crate::sample::Sample;
 use crate::shared::Shared;
 use crate::voice::{Trigger, VoicePool};
 use crate::{
-    pitch_ratio, soft_clip, velocity_gain, MAX_BLOCK, MAX_NOTES_PER_TRACK, MAX_PATTERNS,
-    MAX_SONG_STEPS, MAX_STEPS, MAX_TRACKS, PREVIEW_TRACK,
+    pitch_ratio, soft_clip, velocity_gain, DEFAULT_PITCH, MAX_BLOCK, MAX_NOTES_PER_TRACK,
+    MAX_PATTERNS, MAX_SONG_STEPS, MAX_STEPS, MAX_TRACKS, PREVIEW_TRACK,
 };
 
 /// How fast a gain change slides to its new value. About 10ms at 48k, which is slow enough
@@ -466,6 +466,13 @@ impl Engine {
             for i in 0..self.patterns[pattern].tracks[track].count {
                 let note = self.patterns[pattern].tracks[track].notes[i];
                 if note.step != step {
+                    continue;
+                }
+                // A row of boxes plays what the boxes show, and a box can only mean a note
+                // at the sampler's own pitch. Anything drawn in the piano roll is still
+                // there in the same lane, and comes back the moment the roll is turned on
+                // again — but a note nothing on screen is showing must not make a sound.
+                if !held && note.pitch != DEFAULT_PITCH {
                     continue;
                 }
                 let trigger = Trigger {

@@ -297,6 +297,10 @@ const handlers = {
   },
   seek_song: ({ step }) => { fake.step = step; return null; },
 
+  // Undo and redo. `stepBack` is declared below, and hoists.
+  undo: () => stepBack(true),
+  redo: () => stepBack(false),
+
   set_bpm: ({ bpm }) => { fake.bpm = Math.max(40, Math.min(240, bpm)); return fake.bpm; },
   set_playing: ({ playing }) => {
     fake.playing = playing;
@@ -320,6 +324,90 @@ const handlers = {
     saveError: null,
   }),
 };
+
+/*
+ * Undo and redo, mirroring AppState: a copy of the whole project before each edit, and edits
+ * of the same kind close together counted as one step, so a drag is one thing to take back.
+ */
+const HISTORY_DEPTH = 128;
+const COALESCE_MS = 600;
+const history = { past: [], future: [], last: null };
+
+const snapshot = () => ({
+  bpm: fake.bpm,
+  tracks: [...fake.tracks.entries()].map(([id, track]) => [id, { ...track }]),
+  patterns: JSON.parse(JSON.stringify(fake.patterns)),
+  song: JSON.parse(JSON.stringify(fake.song)),
+  name: fake.name,
+});
+
+const restore = (kept) => {
+  fake.bpm = kept.bpm;
+  fake.tracks = new Map(kept.tracks.map(([id, track]) => [id, { ...track }]));
+  fake.patterns = JSON.parse(JSON.stringify(kept.patterns));
+  fake.song = JSON.parse(JSON.stringify(kept.song));
+  fake.name = kept.name;
+};
+
+function remember(what, at) {
+  const carryingOn = history.last && history.last.what === what && at - history.last.at < COALESCE_MS;
+  history.last = { what, at };
+  if (carryingOn) return;
+  history.future.length = 0;
+  history.past.push(snapshot());
+  if (history.past.length > HISTORY_DEPTH) history.past.shift();
+}
+
+function stepBack(back) {
+  const taken = back ? history.past.pop() : history.future.pop();
+  if (!taken) return null;
+  const leftBehind = snapshot();
+  if (back) history.future.push(leftBehind);
+  else history.past.push(leftBehind);
+  restore(taken);
+  history.last = null;
+  return startup();
+}
+
+// What each edit is called, which is what decides where one step ends and the next begins.
+const EDITS = {
+  add_instruments: "tracks",
+  add_dropped: "tracks",
+  remove_track: "tracks",
+  set_track_gain: "gain",
+  set_track_muted: "mute",
+  set_track_soloed: "solo",
+  set_track_pitched: "pitched",
+  set_step: "boxes",
+  set_note: "notes",
+  clear_note: "notes",
+  move_note: "notes",
+  add_pattern: "patterns",
+  duplicate_pattern: "patterns",
+  remove_pattern: "patterns",
+  rename_pattern: "name",
+  set_pattern_colour: "colour",
+  set_pattern_steps: "length",
+  place_pattern: "song",
+  move_placement: "song",
+  resize_placement: "song",
+  clear_song_bar: "song",
+  set_bpm: "tempo",
+  // Renaming the project is not in here, because it is not in Rust either: the name is the
+  // folder's, and a step back that did not rename the folder would be a step back in name
+  // only.
+};
+
+for (const [name, what] of Object.entries(EDITS)) {
+  const edit = handlers[name];
+  handlers[name] = (args) => {
+    remember(what, performance.now());
+    return edit(args);
+  };
+}
+
+// Lets a test see how many steps back there are without reaching into the history.
+window.__weetbeats_history = () => ({ past: history.past.length, future: history.future.length });
 
 // The native drag-drop events the webview sends instead of HTML5 ones.
 const listeners = new Map();

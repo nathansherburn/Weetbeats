@@ -18,9 +18,11 @@ with.
 - Eight drums ship with it, and the picker opens on them the first time
 - Click or drag across the boxes to paint a beat; right click rubs one out
 - Set how many boxes a pattern has, one step at a time
-- Patterns down the left: click to open one, click it again to go back to the song
+- Patterns down the left: click one to pick it out, double click a block to edit it
 - Song view: draw a pattern anywhere, drag it about, drag its ends to say how long it plays
-- Snap, zoom (buttons or a trackpad pinch), and a colour per pattern
+- Snap, zoom (buttons or a trackpad pinch) in the song and in the piano roll
+- A colour per pattern, lighter while it sounds
+- Undo and redo, with a drag counted as one step
 - Any track can be a pitched instrument instead of a drum, with a piano roll to write in
 - An instrument's row in a pattern shows its notes instead of boxes; click it for the roll
 - Click a track's name to hear it, or a key in the roll to hear that note
@@ -58,10 +60,15 @@ on its row in the panel changes it. Bars of sixteen steps are the ruler along th
 along it to move the playhead, playing or not, and right click a bar to empty it. Zoom with
 the buttons in the corner or by pinching the trackpad.
 
-Patterns are windows over the song. Click one in the panel to open it, click it again — or
-press escape, or the × in the corner, or the **song** button at the top of the panel — to put
-it away. That button carries the project's name; double click it to rename the project, which
-renames its folder.
+Patterns are windows over the song. **Double click a block to edit its pattern**, and press
+escape, or the × in the corner, or the **song** button at the top of the panel, to put it
+away. A click in the patterns panel only picks a pattern out — highlighting its row and its
+lane — so nothing in that list can take you off the song you are looking at. The song button
+carries the project's name; double click it to rename the project, which renames its folder.
+
+A brand new pattern opens as soon as it is made, because there is nothing in the song to
+double click yet. Close it without putting it anywhere and the way back in is to draw a block
+for it first.
 
 ### Instruments and the piano roll
 
@@ -84,6 +91,10 @@ pattern longer, which is how one bar becomes two.
 A box in the step grid *is* a note in the roll: middle C, one step long. There is no
 converting between them and nothing to keep in step.
 
+What plays is what you can see. A row of boxes plays only the notes a box can mean — the ones
+at middle C — so a melody written in the roll goes quiet when you switch the row back to
+boxes, and comes back the moment you switch it again. Nothing is deleted either way.
+
 ## Projects
 
 A project is a folder, so you can send one to a friend in one piece.
@@ -94,6 +105,7 @@ MySong.beat/
   samples/
     kick.wav
     clap.wav
+    .undo/        # samples a deleted track might still want back
 ```
 
 Samples are copied in the moment their track is added, and deleted when the last track using
@@ -198,13 +210,51 @@ tested on another. Both halves of that are fixed. Blocks are hit tested over the
 wherever they sit, and opening a project never moves anything — the only thing it throws away
 is a block whose pattern is gone.
 
-### The meter is in decibels
+### Undo is a copy of the whole project
+
+Not a list of changes and their opposites. Every edit would otherwise need an opposite, and
+its opposite's opposite for redo, and the one that gets forgotten is the one that loses your
+work. A project is a few hundred notes and a list of samples — small enough to copy — so it
+is copied, before each edit, up to a hundred and twenty eight steps back.
+
+Edits of the same kind less than 600ms apart are one step, so a drag across sixteen boxes
+comes back in one go rather than sixteen.
+
+The one thing a copy of `project.json` cannot put back is a file. Deleting the last track
+using a sample used to delete the sample, which would make an undo a liar — the track would
+come back pointing at nothing. So it is moved to `samples/.undo/` inside the project instead,
+and undo brings it out again. Opening a project throws that folder away, because a window
+that has just opened has nothing to undo, and "save as" never copies it.
+
+Renaming the project is the one edit outside the history: the name is the folder's, not
+`project.json`'s, and a step back that left the folder where it was would be a step back in
+name only.
+
+Undo and redo are in the Edit menu, and that is not a detail — on macOS a menu item's key
+equivalent is handled before the window sees the key, so a standard Edit menu would swallow
+cmd-Z and hand it to the webview, which would undo typing and nothing else. Ours emit an
+event; cut, copy, paste and select all are still the standard items.
+
+### The meter is in decibels, and it is a transform
 
 A linear meter spends nearly all of its travel in the top six decibels, so a mix at a sensible
 level barely moves it while a raw one-shot on its own slams it — which reads as a meter that
 does not work. The engine holds the peak and lets it fall at 1.6 per second so a hit between
 two of the front end's polls is still seen; the front end draws that peak on a scale from
 &minus;48 dB up.
+
+It is drawn by scaling an opaque cover over a gradient, not by animating a width. A width has
+to lay the page out, and it was being set sixty times a second behind a song view that was
+already redrawing every frame — which is why it looked dead in song mode in particular. A
+transform is the one thing a browser can animate without laying out anything.
+
+### Zoom is one zoom per frame
+
+A trackpad pinch arrives as a run of wheel events, far faster than the screen refreshes.
+Zooming on each one meant several relayouts a frame, which is what made it judder, so they
+are added up and applied once, in the frame that draws. The song's canvases do not change
+size when it zooms at all — they are the window's width at every zoom — so all that changes
+there is how wide the song says it is.
 
 ### No master volume
 

@@ -23,8 +23,13 @@
       <div class="controls" data-tauri-drag-region>
         <div class="dial" title="How loud the mix is right now">
           <span class="dial-label">out</span>
+          <!--
+            The gradient is the meter; the cover over it is the level. Scaling a cover is
+            something the browser can do without laying the page out again, which animating
+            a width is not — see .meter-mask in the stylesheet.
+          -->
           <div class="meter">
-            <div class="meter-fill" id="meterFill"></div>
+            <div class="meter-mask" id="meterMask"></div>
           </div>
         </div>
       </div>
@@ -100,7 +105,7 @@
             </label>
             <span class="tool" title="Zoom — or pinch the trackpad">
               <button id="zoomOut" class="tick" aria-label="Zoom out">&minus;</button>
-              <span class="zoom-read" id="zoomRead">1&times;</span>
+              <button class="zoom-read" id="zoomRead" title="Back to life size">1&times;</button>
               <button id="zoomIn" class="tick" aria-label="Zoom in">+</button>
             </span>
           </div>
@@ -158,6 +163,14 @@
               <div class="corner vel-corner"><span class="head-label">hit</span></div>
               <div class="vel-lane"><canvas id="velocity" class="velocity"></canvas></div>
             </div>
+          </div>
+          <!-- Zoom, in the same corner the song keeps it. Pinching the trackpad does it too. -->
+          <div class="song-tools roll-tools">
+            <span class="tool" title="Zoom — or pinch the trackpad">
+              <button id="rollZoomOut" class="tick" aria-label="Zoom out">&minus;</button>
+              <button class="zoom-read" id="rollZoomRead" title="Back to life size">1&times;</button>
+              <button id="rollZoomIn" class="tick" aria-label="Zoom in">+</button>
+            </span>
           </div>
           <button id="closeRoll" class="close" title="Back to the boxes (esc)">&times;</button>
         </div>

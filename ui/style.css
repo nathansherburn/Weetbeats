@@ -175,19 +175,29 @@ input[type="range"]:active::-webkit-slider-thumb {
 }
 
 .meter {
-  width: 74px;
-  height: 7px;
-  border-radius: 4px;
-  background: var(--bg);
+  position: relative;
+  width: 90px;
+  height: 9px;
+  border-radius: 5px;
+  background: linear-gradient(90deg, var(--ok), var(--lit) 78%, var(--accent));
   border: 1px solid var(--line);
   overflow: hidden;
 }
 
-.meter-fill {
-  height: 100%;
-  width: 0;
-  background: linear-gradient(90deg, var(--ok), var(--lit) 78%, var(--accent));
-  transition: width 0.06s linear;
+/*
+ * The level, as an opaque cover over the part of the gradient that is not lit, scaled in
+ * from the right. A transform is the one thing a browser can animate without laying the
+ * page out again. The width this replaces could not: it was being set sixty times a second
+ * behind a song view that was already redrawing every frame, with a transition restarting
+ * each time, and the bar hardly moved — which is what "the meter does not work in song
+ * mode" turned out to be.
+ */
+.meter-mask {
+  position: absolute;
+  inset: 0;
+  background: var(--bg);
+  transform-origin: right center;
+  transform: scaleX(1);
 }
 
 /* Only ever a warning or a note: nothing lives here the rest of the time. */
@@ -460,10 +470,19 @@ body.drop-target::after {
   background: var(--panel-2);
 }
 
-/* The pattern the editor has open. Click it again and it closes. */
+/* The pattern the editor has open. Escape, the ×, or the song button puts it away. */
 .prow.open {
   background: var(--accent-soft);
   box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/*
+ * The pattern picked out by a click. Not the same thing as being open: a click here says
+ * "this one", and opening it to edit is a double click on one of its blocks in the song.
+ */
+.prow.picked {
+  background: var(--panel-2);
+  box-shadow: inset 2px 0 0 var(--dim);
 }
 
 .prow.playing .pname {
@@ -588,6 +607,11 @@ body.drop-target::after {
   border-radius: 8px;
 }
 
+/* The roll keeps its zoom in the same corner, clear of the velocity lane along the bottom. */
+.roll-tools {
+  bottom: calc(var(--velocity) + 12px);
+}
+
 .song-tools .tool {
   display: flex;
   align-items: center;
@@ -600,12 +624,20 @@ input.number.small-number {
   padding: 1px 0;
 }
 
+/* The read-out is also the way back to life size, which is the one zoom worth a shortcut. */
 .zoom-read {
   font-size: 10px;
   color: var(--dim);
   font-variant-numeric: tabular-nums;
-  min-width: 26px;
+  min-width: 30px;
   text-align: center;
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+
+.zoom-read:hover {
+  color: var(--text);
 }
 
 /* The scrubber sticks to the top so it is still there when the lanes scroll. */

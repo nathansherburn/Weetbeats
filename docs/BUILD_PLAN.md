@@ -138,6 +138,22 @@ Three earlier passes at this were wrong, and all three in the same direction —
 
 The engine holds every pattern's notes and owns the song as two grids: a step of it is a `u32` with a bit per pattern saying what *starts* there, and beside it a `u16` per pattern saying how long that block is. Each pattern carries how far into its block it is, which is what makes it play through, come round again when the block is longer than the pattern, and stop part way when it is shorter. A step's starts being a `u32` is what caps patterns at 32.
 
+**Undo is a copy of the whole project, not a list of changes.** Every edit would otherwise
+need an opposite, and its opposite's opposite for redo, and the one that gets forgotten is
+the one that loses your work. A project is small enough to copy, so it is copied — before
+each edit, up to 128 steps back, with edits of the same kind inside 600ms counted as one
+step so a drag comes back in one go.
+
+The one thing a copy of `project.json` cannot put back is a file, so deleting the last track
+using a sample moves it to `samples/.undo/` rather than unlinking it, and undo brings it out
+again. Opening a project throws that folder away. Renaming the project stays outside the
+history: the name is the folder's, not the file's.
+
+**Double clicking a block in the song is the way into a pattern.** A click in the patterns
+panel picks a pattern out and does nothing else, so nothing in that list can move you off the
+song you are looking at. The cost is that a pattern with nothing in the song can only be
+reached the moment it is made; the gain is that the panel is a list you can browse.
+
 **Opening and saving are in the menu bar**, not buttons in the window. So is everything else a Mac app keeps up there — and the Edit menu earns its keep even here, because without it copy and paste stop working in the one text field the app has.
 
 ## Stage 3 - Sampler instrument
@@ -163,6 +179,8 @@ That last part is the only new thing on the audio thread: a voice carries how ma
 Opening the piano roll on a track turns the flag on, because a roll full of pitches and lengths that mean nothing would be a lie. The **♪** button on the row turns it back.
 
 That one flag also decides what the row looks like in the step grid, because it is the same fact seen twice: an instrument's notes mean a pitch and a length, so its row is a small piano roll of them; a one-shot's notes mean "here", so its row is a line of boxes. There is no third state where the sound and the row disagree.
+
+It decides what *sounds* too: a row of boxes plays only the notes a box can mean, the ones at the sampler's own pitch. A melody written in the roll goes quiet when the row goes back to boxes and comes back when it does — nothing is deleted, but nothing plays that the window is not showing.
 
 ## Stage 4 - Piano roll
 

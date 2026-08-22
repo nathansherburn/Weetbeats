@@ -603,6 +603,77 @@ fn a_block_shorter_than_its_pattern_stops_part_way() {
     assert_eq!(onsets(&out), vec![0], "the block was over before step ten");
 }
 
+/// A row of boxes plays what the boxes show. A note the piano roll put somewhere else is
+/// still in the pattern — turning the roll back on brings it back — but while the row is
+/// boxes it must be silent, because nothing on screen is showing it.
+#[test]
+fn a_row_of_boxes_plays_only_what_the_boxes_show() {
+    let mut rig = Rig::new(120.0, 16);
+    track_with(&mut rig, 0, dc_sample(400));
+    // A box at step nought, and a melody note somewhere the boxes cannot reach.
+    note_in(&mut rig, 0, 0, 0);
+    rig.send(Command::SetNote {
+        pattern: 0,
+        track: 0,
+        note: EngineNote {
+            step: 8,
+            pitch: 67,
+            velocity: 100,
+            length: 2,
+        },
+    });
+    rig.send(Command::SetPlaying(true));
+
+    let out = rig.render_chunked(STEP * 16, 373);
+    assert_eq!(onsets(&out), vec![0], "a hidden roll note made a sound");
+
+    // Turn the row into a piano roll and the whole lane plays, the box included.
+    rig.send(Command::SetTrackPitched {
+        track: 0,
+        pitched: true,
+    });
+    rig.send(Command::SeekSong(0));
+    rig.send(Command::SetPlaying(false));
+    rig.send(Command::SetPlaying(true));
+    let out = rig.render_chunked(STEP * 16, 373);
+    assert_eq!(
+        onsets(&out),
+        vec![0, 8 * STEP],
+        "the roll's own note did not come back"
+    );
+}
+
+/// The meter in song mode, which is where it was reported dead. Nothing about it is
+/// different from pattern mode — the peak is taken from the mixed output either way — and
+/// this is here to say so out loud rather than leaving it to be argued about.
+#[test]
+fn the_meter_reads_the_song_the_same_as_a_pattern() {
+    let mut rig = Rig::new(120.0, 16);
+    track_with(&mut rig, 0, dc_sample(400));
+    note_in(&mut rig, 0, 0, 0);
+    note_in(&mut rig, 1, 0, 8);
+    song(&mut rig, 32, &[(0, 0, 16), (1, 16, 16)]);
+    rig.send(Command::SetPlaying(true));
+
+    // The hit at the top of the song.
+    rig.render_chunked(STEP, 256);
+    let first = rig.shared.playhead().peak;
+    assert!(
+        first > 0.3,
+        "the song's first hit did not register: {first}"
+    );
+
+    // And the one in the second bar, from the other pattern, after a stretch of quiet.
+    rig.render_chunked(BAR + STEP * 7, 256);
+    let quiet = rig.shared.playhead().peak;
+    rig.render_chunked(STEP, 256);
+    let second = rig.shared.playhead().peak;
+    assert!(
+        second > quiet,
+        "the second pattern's hit did not move the meter: {quiet} then {second}"
+    );
+}
+
 /// Seeking into a long block picks the pattern up at the right point of its repeat.
 #[test]
 fn seeking_into_a_repeat_lands_in_the_right_place() {
