@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use rtrb::{Consumer, Producer};
 use weetbeats_engine::command::{TrashBin, COMMAND_CAPACITY, TRASH_CAPACITY};
+use weetbeats_engine::plugins::{Desk, Found, Param};
 use weetbeats_engine::sample::decode_file;
 use weetbeats_engine::{
     folder, Command, EngineNote, Pattern, Project, Sample, Shared, Trash, DEFAULT_STEPS,
@@ -78,6 +79,18 @@ pub struct AppState {
     cache: Mutex<HashMap<PathBuf, Arc<Sample>>>,
     pub shared: Arc<Shared>,
     stream_errors: Arc<AtomicU32>,
+    /// The plugin thread. Every CLAP instrument lives on it, because a plugin instance is
+    /// `!Send` and CLAP says one thread owns it.
+    desk: Desk,
+    /// What a scan turned up last, so the picker does not have to open every `.clap` on the
+    /// machine each time it is asked. Cleared by asking for a fresh scan.
+    plugins: Mutex<Option<Vec<Found>>>,
+    /// Which plugin the desk is holding for each track, as its file and its id.
+    ///
+    /// Only so that handing the whole project over again — which an undo does, once per step
+    /// — does not tear down and rebuild every plugin. Loading Surge XT takes long enough that
+    /// undoing a ticked box would stop the music.
+    loaded: Mutex<HashMap<u16, (String, String)>>,
     /// Where the file picker opened last, so it does not send you back to your home
     /// folder every time.
     last_folder: Mutex<Option<PathBuf>>,
@@ -125,6 +138,9 @@ impl AppState {
             cache: Mutex::new(HashMap::new()),
             shared,
             stream_errors,
+            desk: Desk::start(audio.sample_rate as f64),
+            plugins: Mutex::new(None),
+            loaded: Mutex::new(HashMap::new()),
             last_folder: Mutex::new(None),
             history: Mutex::new(History::default()),
         };
@@ -168,14 +184,107 @@ impl AppState {
 
     /// Drop anything the audio thread handed back. Called from the playhead poll, so it
     /// happens about sixty times a second while the app is open.
+    ///
+    /// Samples are dropped here. A plugin is not: letting go of the last piece of one
+    /// destroys it, and CLAP says a plugin is destroyed on the thread that made it, so it
+    /// goes back to the desk to be dropped there.
     pub fn take_out_the_trash(&self) {
-        if let Ok(mut trash) = self.trash.lock() {
-            while trash.pop().is_ok() {}
+        let Ok(mut trash) = self.trash.lock() else {
+            return;
+        };
+        while let Ok(item) = trash.pop() {
+            if let Trash::Plugin(slot) = item {
+                self.desk.bin(slot);
+            }
         }
     }
 
     pub fn stream_errors(&self) -> u32 {
         self.stream_errors.load(Ordering::Relaxed)
+    }
+
+    // --- plugins -----------------------------------------------------------
+
+    /// Every CLAP plugin on the machine. Scanned once and remembered: opening every `.clap`
+    /// takes a moment, and they do not appear while the app is running.
+    pub fn plugins(&self, again: bool) -> Vec<Found> {
+        let mut cached = self.plugins.lock().unwrap();
+        if again {
+            *cached = None;
+        }
+        cached.get_or_insert_with(|| self.desk.scan()).clone()
+    }
+
+    /// Put a plugin on a track: load it on the plugin thread, then hand the audio thread the
+    /// half that belongs to it.
+    ///
+    /// The track's own settings for that plugin come out of the project folder, so opening a
+    /// project puts the patch back the way it was.
+    pub fn load_plugin(&self, track: u16, path: &str, id: &str) -> Result<String, String> {
+        let state = {
+            let project = self.project.lock().unwrap();
+            project
+                .track(track)
+                .and_then(|t| t.plugin.as_ref())
+                .and_then(|p| p.state.as_ref())
+                .and_then(|relative| folder::load_plugin_state(&self.dir(), relative))
+        };
+        let loaded = self.desk.load(track, Path::new(path), id, state)?;
+        self.send(Command::SetTrackPlugin {
+            track,
+            slot: Some(loaded.slot),
+        });
+        self.loaded
+            .lock()
+            .unwrap()
+            .insert(track, (path.to_string(), id.to_string()));
+        Ok(loaded.name)
+    }
+
+    /// Take it off, both halves.
+    pub fn unload_plugin(&self, track: u16) {
+        self.send(Command::SetTrackPlugin { track, slot: None });
+        self.desk.unload(track);
+        self.loaded.lock().unwrap().remove(&track);
+    }
+
+    pub fn plugin_params(&self, track: u16) -> Vec<Param> {
+        self.desk.params(track)
+    }
+
+    /// Let any plugin that asked for it have its turn on the main thread. Called from the
+    /// playhead poll, which runs whether or not anything is playing.
+    pub fn tick_plugins(&self) {
+        self.desk.tick();
+    }
+
+    /// Ask every plugin what it is set to and write it into the project folder.
+    ///
+    /// Done as part of saving rather than on every knob turn: a plugin's state is the whole
+    /// patch, which for Surge XT is a good few kilobytes, and it is only ever read again when
+    /// the project is opened.
+    fn save_plugin_states(&self) {
+        let tracks: Vec<(u16, String)> = {
+            let mut project = self.project.lock().unwrap();
+            let mut wanted = Vec::new();
+            for track in &mut project.tracks {
+                let id = track.id;
+                if let Some(plugin) = track.plugin.as_mut() {
+                    let relative = plugin
+                        .state
+                        .get_or_insert_with(|| folder::plugin_state_path(id))
+                        .clone();
+                    wanted.push((id, relative));
+                }
+            }
+            wanted
+        };
+        let dir = self.dir();
+        for (track, relative) in tracks {
+            if let Some(blob) = self.desk.save_state(track) {
+                let _ = folder::save_plugin_state(&dir, &relative, &blob);
+            }
+        }
     }
 
     /// Hand the audio thread the whole project: every track, every pattern, the song.
@@ -187,8 +296,33 @@ impl AppState {
         let dir = self.dir();
 
         self.send(Command::SetPlaying(false));
+
+        // A plugin that is already on the track it is going back onto stays where it is.
+        // Everything else about the track is sent again, but the instance is not rebuilt: an
+        // undo hands the whole project over, and reloading Surge XT once per undone box is
+        // not a thing anybody would sit through.
+        let staying: Vec<u16> = {
+            let loaded = self.loaded.lock().unwrap();
+            project
+                .tracks
+                .iter()
+                .filter(|track| {
+                    track.plugin.as_ref().is_some_and(|plugin| {
+                        loaded.get(&track.id) == Some(&(plugin.path.clone(), plugin.id.clone()))
+                    })
+                })
+                .map(|track| track.id)
+                .collect()
+        };
         for track in 0..MAX_TRACKS as u16 {
-            self.send(Command::RemoveTrack { track });
+            if !staying.contains(&track) {
+                self.send(Command::RemoveTrack { track });
+                // And the desk lets go of anything it was holding for a slot that is not
+                // keeping it, so a plugin taken off by an undo really does go.
+                if self.loaded.lock().unwrap().remove(&track).is_some() {
+                    self.desk.unload(track);
+                }
+            }
         }
         for pattern in 0..MAX_PATTERNS as u16 {
             self.send(Command::ClearPattern { pattern });
@@ -200,7 +334,7 @@ impl AppState {
         let mut trouble: Vec<String> = Vec::new();
         for track in &project.tracks {
             self.send(Command::AddTrack { track: track.id });
-            // Before the sample, so a track can never be heard for a moment as its unshaped
+            // Before the sound, so a track can never be heard for a moment as its unshaped
             // self while a project is still going across.
             self.send(Command::SetTrackVoicing {
                 track: track.id,
@@ -217,6 +351,39 @@ impl AppState {
                     // The track stays, silent, with its notes: losing a sound is annoying,
                     // losing the beat you wrote with it is worse.
                     Err(e) => trouble.push(e),
+                }
+            }
+            if let Some(reference) = &track.plugin {
+                if staying.contains(&track.id) {
+                    // Already there, still playing, keeping its patch. Nothing to do.
+                    continue;
+                }
+                // Loading Surge XT takes a moment, and a project with several of them takes
+                // several. Nothing else can start until they are in, because the notes have
+                // to have somewhere to go.
+                //
+                // A plugin that is not on this machine leaves the track silent and says so,
+                // the same as a sample that would not decode: the part you wrote is still
+                // there, and installing the plugin brings it back.
+                let state = reference
+                    .state
+                    .as_ref()
+                    .and_then(|relative| folder::load_plugin_state(&dir, relative));
+                match self
+                    .desk
+                    .load(track.id, Path::new(&reference.path), &reference.id, state)
+                {
+                    Ok(loaded) => {
+                        self.send(Command::SetTrackPlugin {
+                            track: track.id,
+                            slot: Some(loaded.slot),
+                        });
+                        self.loaded
+                            .lock()
+                            .unwrap()
+                            .insert(track.id, (reference.path.clone(), reference.id.clone()));
+                    }
+                    Err(e) => trouble.push(format!("{}: {e}", reference.name)),
                 }
             }
         }
@@ -467,6 +634,9 @@ impl AppState {
 
     /// Write the project out now, whether or not anything changed.
     pub fn save_now(&self) -> Result<(), String> {
+        // The plugins first: each one's settings are a file of its own beside the project,
+        // and `project.json` has to name a file that is already there.
+        self.save_plugin_states();
         let dir = self.dir();
         let result = {
             let project = self.project.lock().unwrap();

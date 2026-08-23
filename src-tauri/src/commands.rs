@@ -13,9 +13,10 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use weetbeats_engine::folder;
+use weetbeats_engine::plugins::{Found, Param};
 use weetbeats_engine::sample::{is_audio_file, AUDIO_EXTENSIONS};
 use weetbeats_engine::{
-    Command, EngineNote, Note, Pattern, Placement, Project, SampleRef, Track, Voicing,
+    Command, EngineNote, Note, Pattern, Placement, PluginRef, Project, SampleRef, Track, Voicing,
     DEFAULT_PITCH,
 };
 
@@ -334,6 +335,113 @@ fn add_track_now(state: &AppState, source: PathBuf) -> Result<NewTrack, String> 
     })
 }
 
+// --- plugins ----------------------------------------------------------------
+
+/// Every CLAP instrument on the machine.
+///
+/// Scanned once and remembered, because it means opening every `.clap` in every folder CLAP
+/// plugins live in and asking what is inside it. Pass `again` to look properly, for somebody
+/// who has just installed one.
+#[tauri::command]
+pub async fn list_plugins(
+    again: Option<bool>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<Found>, String> {
+    let state = Arc::clone(state.inner());
+    let again = again.unwrap_or(false);
+    // On a blocking task: a first scan opens every plugin on the machine, and Surge XT alone
+    // is a moment. The window must not stop while it happens.
+    tauri::async_runtime::spawn_blocking(move || state.plugins(again))
+        .await
+        .map_err(|e| format!("the plugin scan did not finish: {e}"))
+}
+
+/// Give a track a CLAP instrument. Makes a new track, the same as adding a sample does.
+#[tauri::command]
+pub async fn add_plugin(
+    path: String,
+    id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<NewTrack, String> {
+    let state = Arc::clone(state.inner());
+    tauri::async_runtime::spawn_blocking(move || add_plugin_now(&state, &path, &id))
+        .await
+        .map_err(|e| format!("that plugin did not finish loading: {e}"))?
+}
+
+fn add_plugin_now(state: &AppState, path: &str, id: &str) -> Result<NewTrack, String> {
+    state.remember("tracks");
+    let free = {
+        let project = state.project.lock().unwrap();
+        project.free_track_id().ok_or_else(|| {
+            format!(
+                "that is {} tracks, which is all of them",
+                project.tracks.len()
+            )
+        })?
+    };
+
+    // The slot is claimed before the plugin is loaded, because loading it hands the audio
+    // thread something addressed to that slot.
+    state.send(Command::AddTrack { track: free });
+    let name = match state.load_plugin(free, path, id) {
+        Ok(name) => name,
+        Err(e) => {
+            // Nothing was made, so nothing is left behind.
+            state.send(Command::RemoveTrack { track: free });
+            return Err(e);
+        }
+    };
+
+    let mut track = Track::new(free, name.clone(), None);
+    track.plugin = Some(PluginRef {
+        path: path.to_string(),
+        id: id.to_string(),
+        name,
+        state: None,
+    });
+    state.send(Command::SetTrackVoicing {
+        track: free,
+        voicing: track.voicing,
+    });
+
+    state.project.lock().unwrap().tracks.push(track.clone());
+    state.touch();
+    Ok(NewTrack {
+        track,
+        // A plugin has no waveform to draw: it is not a file, it is an instrument.
+        peaks: Vec::new(),
+    })
+}
+
+/// What a plugin's parameters are and where they are now.
+///
+/// Read on the plugin thread, so this is also how the editor picks up a value the plugin
+/// changed by itself — loading a patch moves every one of them at once.
+#[tauri::command]
+pub async fn plugin_params(id: u16, state: State<'_, Arc<AppState>>) -> Result<Vec<Param>, String> {
+    let state = Arc::clone(state.inner());
+    tauri::async_runtime::spawn_blocking(move || state.plugin_params(id))
+        .await
+        .map_err(|e| format!("that plugin did not answer: {e}"))
+}
+
+/// Move one of them.
+///
+/// Straight to the audio thread and into the plugin as an event on the next block, which is
+/// the only way CLAP has of moving a parameter while it plays. Nothing is written down here:
+/// what a plugin is set to is the plugin's business, and it is saved by asking the plugin
+/// when the project is saved.
+#[tauri::command]
+pub fn set_plugin_param(id: u16, param: u32, value: f64, state: State<'_, Arc<AppState>>) {
+    state.send(Command::SetPluginParam {
+        track: id,
+        param,
+        value,
+    });
+    state.touch();
+}
+
 /// Delete a track, and the sample with it if nothing else was using it.
 #[tauri::command]
 pub fn remove_track(id: u16, state: State<'_, Arc<AppState>>) {
@@ -342,6 +450,10 @@ pub fn remove_track(id: u16, state: State<'_, Arc<AppState>>) {
         let mut project = state.project.lock().unwrap();
         let removed = project.remove_track(id);
         state.send(Command::RemoveTrack { track: id });
+        let was_plugin = removed.as_ref().is_some_and(|t| t.plugin.is_some());
+        if was_plugin {
+            state.unload_plugin(id);
+        }
         removed
             .and_then(|track| track.sample)
             .filter(|sample| project.sample_users(&sample.path) == 0)
@@ -927,6 +1039,10 @@ pub fn panic_stop(state: State<'_, Arc<AppState>>) {
 #[tauri::command]
 pub fn playhead(state: State<'_, Arc<AppState>>) -> PlayheadPayload {
     state.take_out_the_trash();
+    // And let any plugin that asked for it have its turn on the main thread. CLAP plugins
+    // ask for one when they have something to do that is not audio — Surge XT does it while
+    // it loads a patch — and this poll is the only thing that runs regularly enough to be it.
+    state.tick_plugins();
     let playhead = state.shared.playhead();
     PlayheadPayload {
         playing: playhead.playing,

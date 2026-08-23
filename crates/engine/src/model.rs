@@ -189,6 +189,27 @@ fn clamp_time(secs: f32) -> f32 {
     }
 }
 
+/// A CLAP instrument on a track, as the project remembers it.
+///
+/// The path and the id are how it is found again. The name is kept as well so a project that
+/// has been carried to a machine without that plugin can say *which* plugin is missing rather
+/// than only that one is.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginRef {
+    /// The `.clap` file or bundle, as an absolute path. Not copied into the project folder
+    /// the way a sample is: a plugin is installed software, often hundreds of megabytes, and
+    /// the licence to copy it is not ours to assume.
+    pub path: String,
+    /// Its id inside that file, which never changes for the life of the plugin.
+    pub id: String,
+    pub name: String,
+    /// Where its own settings live inside the project folder, e.g. `plugins/0.clapstate`.
+    /// The plugin decides what is in there; we only carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+}
+
 /// One instrument: a sound and how loud it is. Belongs to the project, not to a pattern.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -197,8 +218,15 @@ pub struct Track {
     pub id: u16,
     pub name: String,
     pub sample: Option<SampleRef>,
+    /// A CLAP instrument instead of a sample. A track has one or the other: adding a plugin
+    /// puts the sample down, and adding a sample puts the plugin down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<PluginRef>,
     /// How the sound is played: its envelope, where it sits, how it is tuned, and how much
     /// of the file a note uses. The track's own, so every pattern hears the same sound.
+    ///
+    /// A plugin has its own envelope, its own tuning and its own idea of where it sits, so
+    /// the only part of this that means anything on a plugin track is how loud it is.
     #[serde(default)]
     pub voicing: Voicing,
     /// How loud, whether it is heard, and whether it is an instrument — all left over from
@@ -223,6 +251,7 @@ impl Track {
             id,
             name,
             sample,
+            plugin: None,
             voicing: Voicing::default(),
             gain: DEFAULT_TRACK_GAIN,
             muted: false,
@@ -620,11 +649,6 @@ impl Project {
     /// Lowest free engine slot, or `None` when every slot is taken.
     pub fn free_track_id(&self) -> Option<u16> {
         (0..MAX_TRACKS as u16).find(|id| self.track(*id).is_none())
-    }
-
-    /// True while any track is soloed, which is when mutes stop mattering.
-    pub fn any_soloed(&self) -> bool {
-        self.tracks.iter().any(|t| t.soloed)
     }
 
     /// Delete a track, and with it every note anyone had drawn for it.

@@ -29,10 +29,46 @@ const fake = {
   folder: "/tmp/Untitled.beat",
   saves: 0,
   peaks: Array.from({ length: 96 }, (_, i) => Math.abs(Math.sin(i / 7)) * 0.9),
+  // What each plugin track's controls are set to, which is the plugin's business and not
+  // the project's.
+  pluginParams: new Map(),
 };
 
 // What the file picker "returns". A test sets this before clicking Add.
 fake.picks = ["/pack/01 kick.wav"];
+// And what a CLAP scan "finds". Two instruments and an effect, which is the case the picker
+// has to get right: effects are shown but cannot be added.
+fake.plugins = [
+  {
+    path: "/Library/Audio/Plug-Ins/CLAP/Surge XT.clap",
+    id: "org.surge-synth-team.surge-xt",
+    name: "Surge XT",
+    vendor: "Surge Synth Team",
+    instrument: true,
+  },
+  {
+    path: "/Library/Audio/Plug-Ins/CLAP/Vital.clap",
+    id: "audio.vital.synth",
+    name: "Vital",
+    vendor: "Vital Audio",
+    instrument: true,
+  },
+  {
+    path: "/Library/Audio/Plug-Ins/CLAP/Surge XT Effects.clap",
+    id: "org.surge-synth-team.surge-xt-fx",
+    name: "Surge XT Effects",
+    vendor: "Surge Synth Team",
+    instrument: false,
+  },
+];
+// How many times a proper look through the plugin folders has been asked for.
+fake.scans = 0;
+/* What a plugin says its controls are. Mirrors what the params extension hands back. */
+fake.params = [
+  { id: 0, name: "Level", module: "Output", min: 0, max: 1, value: 0.5, text: "50%", stepped: false },
+  { id: 1, name: "Cutoff", module: "Filter 1", min: 0, max: 1, value: 0.8, text: "8.0 kHz", stepped: false },
+  { id: 2, name: "Wave", module: "Osc 1", min: 0, max: 3, value: 0, text: "Sine", stepped: true },
+];
 // What the save and open dialogs "return". Null stands for cancelling.
 fake.saveAs = "/elsewhere/Newer.beat";
 fake.openFolder = null;
@@ -205,6 +241,42 @@ const handlers = {
   set_pattern_muted: ({ pattern: id, track, muted }) => setMix(id, track, { muted }),
   set_pattern_soloed: ({ pattern: id, track, soloed }) => setMix(id, track, { soloed }),
   set_pattern_pitched: ({ pattern: id, track, pitched }) => setMix(id, track, { pitched }),
+
+  // --- CLAP plugins. A track's sound can be an instrument that is installed on the machine
+  // rather than a file, and then the notes go to that instead.
+  list_plugins: ({ again }) => {
+    if (again) fake.scans += 1;
+    return fake.plugins;
+  },
+  add_plugin: ({ path, id }) => {
+    const found = fake.plugins.find((one) => one.id === id);
+    if (!found) throw new Error(`${id} is not in ${path}`);
+    if (!found.instrument) throw new Error(`${found.name} is not an instrument`);
+    if (fake.tracks.size >= MAX_TRACKS) {
+      throw new Error(`that is ${MAX_TRACKS} tracks, which is all of them`);
+    }
+    const track = {
+      id: fake.nextTrackId++,
+      name: found.name,
+      sample: null,
+      plugin: { path, id, name: found.name, state: null },
+      voicing: DEFAULT_VOICING(),
+    };
+    fake.tracks.set(track.id, track);
+    fake.pluginParams.set(track.id, fake.params.map((one) => ({ ...one })));
+    // A plugin has no waveform: it is an instrument, not a file.
+    return { track, peaks: [] };
+  },
+  plugin_params: ({ id }) => (fake.pluginParams.get(id) ?? []).map((one) => ({ ...one })),
+  set_plugin_param: ({ id, param, value }) => {
+    const found = (fake.pluginParams.get(id) ?? []).find((one) => one.id === param);
+    if (found) {
+      found.value = value;
+      // The plugin says what its value means, so a moved control gets a new word for it.
+      found.text = `${Math.round(value * 100)}%`;
+    }
+    return null;
+  },
 
   // How the sound is played, which belongs to the track rather than to any pattern. Hands
   // back what it settled on, not what it was asked for, the same as Rust does.
@@ -440,6 +512,7 @@ const EDITS = {
   set_pattern_soloed: "solo",
   set_pattern_pitched: "pitched",
   set_voicing: "voicing",
+  add_plugin: "tracks",
   set_step: "boxes",
   set_note: "notes",
   clear_note: "notes",

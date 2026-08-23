@@ -9,7 +9,7 @@ A tiny, fun, free music maker for macOS. Point it at a folder of samples, tick b
 | Language | Rust |
 | UI | Tauri, with an HTML/CSS/SVG front end |
 | Audio out | `cpal` |
-| Instruments | Sampler first. Host real plugins later |
+| Instruments | Sampler first, then CLAP instruments alongside it |
 | Plugin format | CLAP only. No VST3, no AU |
 | Pattern length | 16 steps by default, adjustable per pattern, one step at a time, up to 64 |
 | Song grid | A block is a pattern, a step and a length; blocks of different patterns overlap freely |
@@ -260,6 +260,16 @@ The payoff stage. Surge XT and friends inside your app.
 **Project files**
 
 Plugin state is an opaque blob the plugin gives you. Store it base64 in `project.json`, or as a separate file in the project folder. Note which plugin and version made it, so you can warn instead of crash when it's missing.
+
+**Where it got to**
+
+Done: scanning the standard folders plus `$CLAP_PATH`, loading instruments, notes in and audio out, parameters shown in the sound editor, state saved into `plugins/` in the project folder, and a message rather than a crash when a project asks for a plugin the machine does not have.
+
+Not done, and both halves of the same job: the plugin's own window, and the process boundary. Plugins run in-process, so one that crashes takes the app with it, and a patch is built out of the parameter list rather than by looking at the thing.
+
+One design decision worth writing down. A plugin makes one sound for the whole track, so there is nothing on the way out to hang a per-pattern fader on the way a sampler voice can. The pattern's fader and mute are applied to the notes going *in* instead. A note that is already ringing does not follow a fader, which is the one place a plugin track behaves differently from a sampler one. CLAP note expressions would fix it for the plugins that support them; velocity works everywhere.
+
+The tests load a real `.clap`: `tools/test-clap` is a CLAP instrument the size of a postage stamp, built as a dev dependency of the engine so `cargo test` produces one. Hosting is an agreement with somebody else's binary, and a mock on our side of the line would only ever agree with itself.
 
 ## Shipping it
 

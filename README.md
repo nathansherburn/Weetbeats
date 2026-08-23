@@ -12,7 +12,8 @@ Open source, free forever.
 
 Stages 1 to 4 of [the build plan](docs/BUILD_PLAN.md) are done: a step sequencer, patterns
 strung together into a song, samples played across the keyboard, and a piano roll to write
-with.
+with. Stage 6 has started early: CLAP instruments play alongside the sampler, though without
+their own windows yet.
 
 - Add instruments from the system file picker, or drop sounds on the window
 - Eight drums ship with it, and the picker opens on them the first time
@@ -29,8 +30,9 @@ with.
 - Play, stop, tempo, and a playhead you can drag whether or not it is playing
 - Per track: volume, mute, solo, delete
 - Click a sound's waveform to shape it: envelope, pan, tune, level, and trimming the file
+- A track's sound can be a CLAP instrument — Surge XT and friends — instead of a file
 
-Effects are stage 5, hosting CLAP plugins stage 6.
+Effects are stage 5. Plugins have their own window still to come; see below.
 
 ### Patterns and the song
 
@@ -141,6 +143,43 @@ hears it.
 Nothing already sounding is re-shaped part way through. Drag the attack about while it plays
 and the next hit comes out different; the one you can hear keeps the shape it started with.
 
+## CLAP plugins
+
+A track's sound can be a **CLAP instrument** rather than a file. `+ plugin` under the
+instrument list opens a picker with everything installed on the machine; pick one and it
+becomes a track like any other, with notes drawn in the same grid and the same piano roll.
+
+Weetbeats looks in the standard places — `~/Library/Audio/Plug-Ins/CLAP` and
+`/Library/Audio/Plug-Ins/CLAP` on a Mac, `~/.clap` and `/usr/lib/clap` elsewhere — plus
+anything in `$CLAP_PATH`. Effects are listed but greyed out: instruments first, effects with
+stage 5.
+
+Clicking a plugin track's plug opens the sound editor onto **the plugin's own controls**
+rather than ours. A synth has an envelope, a tuning and a panning inside it already, and a
+second set of ours beside them would be two things fighting over one sound. What stays ours
+is how loud the track is. Surge XT has more controls than fit on a screen, so there is a
+filter above them.
+
+What a plugin is set to is the plugin's business: it is asked for its settings when the
+project is saved, and they go in `plugins/` inside the project folder beside the samples. The
+plugin itself is not copied — it is installed software, often hundreds of megabytes, and the
+licence to hand it on is not ours to assume. A project opened on a machine without that
+plugin keeps the part you wrote and says which plugin is missing.
+
+**One thing works differently from a sampler track**, and it is worth knowing. A sampler gives
+every note its own voice, so a pattern's fader can be applied to the notes that pattern
+started even while several patterns play the same sound at once. A plugin makes one sound for
+the whole track, and there is nothing on the way out to hang a per-pattern fader on. So a
+pattern's fader and mute are applied to the notes it *sends*: a quieter fader sends quieter
+notes, a muted pattern sends none, and muting part way through lets go of what is ringing.
+Turning a fader down while a note sounds does not change that note; the next one is quieter.
+
+**Not there yet.** The plugin's own window — Surge XT's actual interface — is not hosted, so
+a patch is built out of the parameter list rather than by looking at it. And plugins run in
+this process rather than a child one, so a plugin that crashes takes the app with it. Both
+are the same piece of work: a native window for the plugin to draw into, and a process
+boundary to put it behind.
+
 ## Projects
 
 A project is a folder, so you can send one to a friend in one piece.
@@ -152,6 +191,8 @@ MySong.beat/
     kick.wav
     clap.wav
     .undo/        # samples a deleted track might still want back
+  plugins/
+    3.clapstate   # what the plugin on track 3 is set to, in its own format
 ```
 
 Anything the file picker will let you choose can be decoded: wav, aiff, caf, mp3, flac, ogg,

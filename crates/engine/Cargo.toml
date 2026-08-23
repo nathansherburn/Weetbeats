@@ -8,6 +8,17 @@ repository.workspace = true
 
 [dependencies]
 rtrb.workspace = true
+# Hosting CLAP instruments. `clack-host` is the API; the extensions are the parts of it a
+# host needs to know a plugin's ports, take its notes, move its parameters and save its
+# settings. Everything else CLAP defines is left switched off.
+clack-host = "0.1"
+clack-extensions = { version = "0.1", features = [
+    "clack-host",
+    "audio-ports",
+    "note-ports",
+    "params",
+    "state",
+] }
 serde.workspace = true
 serde_json.workspace = true
 # Every format the picker offers has to have a reader here, or a file passes the extension
@@ -24,3 +35,8 @@ symphonia = { version = "0.6", features = [
     "aiff",
     "caf",
 ] }
+
+[dev-dependencies]
+# Built as a side effect of `cargo test`, which is what puts a real `.clap` beside the test
+# binary for `tests/plugins.rs` to load. Nothing in this crate uses it as a library.
+weetbeats-test-clap = { path = "../../tools/test-clap" }

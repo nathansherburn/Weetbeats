@@ -129,6 +129,14 @@ const ICONS = {
     <rect x="1.5" y="9.4" width="3" height="4.4" rx="1.5" fill="currentColor" />
     <rect x="11.5" y="9.4" width="3" height="4.4" rx="1.5" fill="currentColor" />
   </svg>`,
+  // A plug, for a track whose sound is a CLAP instrument rather than a file.
+  plug: `<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+    <path d="M5.4 1.8v3.4M10.6 1.8v3.4" fill="none" stroke="currentColor" stroke-width="1.5"
+      stroke-linecap="round" />
+    <rect x="3" y="5.2" width="10" height="4.6" rx="1.4" fill="currentColor" />
+    <path d="M8 9.8v4.4" fill="none" stroke="currentColor" stroke-width="1.5"
+      stroke-linecap="round" />
+  </svg>`,
   // A keyboard, because that is what the row turns into.
   keys: `<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
     <rect x="1.9" y="3.4" width="12.2" height="9.2" rx="1.6" fill="none" stroke="currentColor"
@@ -182,6 +190,8 @@ for (const id of [
   "closeRoll", "rollZoomIn", "rollZoomOut", "rollZoomRead", "workspace", "patternTab",
   "sound", "soundChip", "soundName", "closeSound", "hearSound", "soundBody", "soundWave",
   "soundEnv", "soundTrimKnobs", "soundShapeKnobs", "soundToneKnobs",
+  "addPlugin", "picker", "closePicker", "rescan", "pluginFilter", "pluginList", "pickerNote",
+  "pluginBody", "pluginParams", "pluginLevelKnobs", "paramFilter",
 ]) {
   el[id] = document.getElementById(id);
 }
@@ -831,6 +841,7 @@ async function addInstruments(command, args) {
   adding = true;
   el.add.disabled = true;
   el.addBig.disabled = true;
+  el.addPlugin.disabled = true;
   try {
     const added = await invoke(command, args);
     for (const item of added.tracks) {
@@ -851,6 +862,7 @@ async function addInstruments(command, args) {
     adding = false;
     el.add.disabled = false;
     el.addBig.disabled = false;
+    el.addPlugin.disabled = false;
   }
 }
 
@@ -873,16 +885,24 @@ function drawTrackHeaders() {
       row.append(name);
 
       // The picture of the sound is the way to the sound: clicking a track's name plays
-      // it, clicking its waveform asks what it is.
+      // it, clicking its picture asks what it is. A plugin has no waveform to show — it is
+      // an instrument, not a file — so it wears a plug instead.
       const wave = document.createElement("button");
       wave.className = "wave";
-      wave.title = `${track.name} — click to shape this sound`;
+      wave.title = track.plugin
+        ? `${track.plugin.name} — click for its controls`
+        : `${track.name} — click to shape this sound`;
       wave.setAttribute("aria-label", wave.title);
-      const drawing = document.createElement("canvas");
-      drawing.width = 68;
-      drawing.height = 36;
-      drawWaveform(drawing, track.peaks);
-      wave.append(drawing);
+      if (track.plugin) {
+        wave.classList.add("plugged");
+        wave.append(icon("plug"));
+      } else {
+        const drawing = document.createElement("canvas");
+        drawing.width = 68;
+        drawing.height = 36;
+        drawWaveform(drawing, track.peaks);
+        wave.append(drawing);
+      }
       wave.addEventListener("click", () => openSound(track.id));
       row.append(wave);
 
@@ -972,6 +992,7 @@ function removeTrack(id) {
   }
   if (state.roll === id) closeRoll();
   if (state.sound === id) closeSound();
+  plugins.params.delete(id);
   drawTrackHeaders();
   resize();
 }
@@ -1114,6 +1135,10 @@ function resizeSong() {
  */
 function resizeSound() {
   if (state.sound === null) return;
+  if (isPlugin(state.sound)) {
+    drawSound();
+    return;
+  }
   const wave = el.soundWave.parentElement.clientWidth;
   size(el.soundWave, Math.max(80, wave), SOUND_WAVE_HEIGHT);
   const shape = el.soundEnv.parentElement.clientWidth;
@@ -1878,6 +1903,18 @@ const SOUND_CONTROLS = {
   ],
 };
 
+/*
+ * The one control of ours a plugin track keeps: how loud the track is. Everything else in a
+ * voicing — the envelope, the tuning, the panning — the plugin has its own of, and two sets
+ * of them would only fight. Named apart from the plugin's own "level", which is a different
+ * knob a few rows down.
+ */
+const TRACK_LEVEL = {
+  ...SOUND_CONTROLS.tone.find((one) => one.key === "level"),
+  label: "track level",
+  hint: "How loud this track is, wherever it is played. Not one of the plugin's own controls.",
+};
+
 /* The voicing of whichever track the editor has, or a default one when it has none. */
 function voicingOf(track) {
   return trackById(track)?.voicing ?? DEFAULT_VOICING();
@@ -1903,6 +1940,9 @@ function openSound(track) {
   // Through resize, because the two pictures in here are the shape of the window and this
   // is the first moment there is a window to measure.
   resize();
+  // What a plugin's controls are is the plugin's to say, and it may have moved them since
+  // we last looked.
+  if (isPlugin(track)) refreshParams(track);
 }
 
 function closeSound() {
@@ -1990,13 +2030,41 @@ function soundControl(spec) {
   return row;
 }
 
-/* The whole editor: the name, the sliders, the waveform and the envelope. */
+/*
+ * The whole editor. Two halves, one at a time: a sampler's file and shape, or a plugin's own
+ * controls. A synth has an envelope, a tuning and a panning of its own, and a second set of
+ * ours next to them would only be two things fighting over one sound.
+ */
 function drawSound() {
   const track = trackById(state.sound);
   if (!track) return;
-  el.soundName.textContent = track.name;
-  el.soundName.title = track.name;
+  el.soundName.textContent = track.plugin ? track.plugin.name : track.name;
+  el.soundName.title = track.plugin ? `${track.plugin.name} — ${track.plugin.path}` : track.name;
   if (el.soundShapeKnobs.childElementCount === 0) buildSoundControls();
+
+  const plugged = Boolean(track.plugin);
+  el.soundBody.classList.toggle("hidden", plugged);
+  el.pluginBody.classList.toggle("hidden", !plugged);
+  // Auditioning a plugin means playing it a note, which it has no way to refuse; the sampler
+  // it was written for is what "hear it" means. A plugin is played from the pattern instead.
+  el.hearSound.classList.toggle("hidden", plugged);
+  if (plugged) {
+    // How loud the track is still belongs to us: it is about the track, not about the synth.
+    // Named for what it is, because the plugin almost certainly has a "level" of its own a
+    // few rows below and the two are not the same knob.
+    if (el.pluginLevelKnobs.childElementCount === 0) {
+      el.pluginLevelKnobs.replaceChildren(soundControl(TRACK_LEVEL));
+    }
+    const value = voicingOf(state.sound)[TRACK_LEVEL.key];
+    const slider = el.pluginLevelKnobs.querySelector(`input[data-key="${TRACK_LEVEL.key}"]`);
+    const read = el.pluginLevelKnobs.querySelector(`[data-read="${TRACK_LEVEL.key}"]`);
+    if (slider && document.activeElement !== slider) {
+      slider.value = String(Math.round(TRACK_LEVEL.toSlider(value) * 1000));
+    }
+    if (read) read.textContent = TRACK_LEVEL.say(value);
+    drawPluginEditor(state.sound);
+    return;
+  }
 
   const voicing = voicingOf(state.sound);
   for (const group of Object.values(SOUND_CONTROLS)) {
@@ -2172,6 +2240,248 @@ const stopTrimming = () => {
 };
 el.soundWave.addEventListener("pointerup", stopTrimming);
 el.soundWave.addEventListener("pointercancel", stopTrimming);
+
+// --- CLAP plugins ---------------------------------------------------------
+
+/*
+ * A track's sound can be a CLAP instrument — Surge XT, say — instead of a file.
+ *
+ * The picker is a list rather than a file dialog: a plugin is not a file you go and find,
+ * it is installed software, and a host is supposed to know where those live. Rust scans the
+ * standard folders once and remembers what it found.
+ *
+ * Everything after that is the same as any other track. Notes go in, sound comes out, and
+ * the pattern's row says how loud it is here and whether it is heard here.
+ */
+
+/* How many parameters the editor will draw at once. Surge XT has thousands. */
+const MAX_SHOWN_PARAMS = 120;
+
+/* How long after the last drag before asking the plugin what its controls now say. */
+const PARAM_SETTLE = 250;
+
+const plugins = {
+  found: null, // what the last scan turned up, or null before the first one
+  loading: false,
+  filter: "",
+  params: new Map(), // track id -> the plugin's parameters, as Rust last described them
+  settling: null, // the timer waiting for a drag to finish
+};
+
+el.addPlugin.addEventListener("click", () => openPicker());
+el.closePicker.addEventListener("click", closePicker);
+el.rescan.addEventListener("click", () => openPicker(true));
+el.pluginFilter.addEventListener("input", () => {
+  plugins.filter = el.pluginFilter.value.trim().toLowerCase();
+  drawPluginList();
+});
+
+async function openPicker(again = false) {
+  el.picker.classList.remove("hidden");
+  el.pluginFilter.focus();
+  el.pluginFilter.select();
+  if (plugins.found !== null && !again) {
+    drawPluginList();
+    return;
+  }
+  plugins.found = null;
+  drawPluginList();
+  try {
+    plugins.found = await invoke("list_plugins", { again });
+  } catch (e) {
+    plugins.found = [];
+    showError(e);
+  }
+  drawPluginList();
+}
+
+function closePicker() {
+  el.picker.classList.add("hidden");
+}
+
+/*
+ * The list, filtered. Effects are shown greyed out rather than left out: "why is my plugin
+ * not here" deserves an answer, and "that one is an effect, and effects are stage five" is
+ * a better one than an empty list.
+ */
+function drawPluginList() {
+  if (plugins.found === null) {
+    el.pluginList.replaceChildren();
+    el.pickerNote.textContent = "Looking through the plugin folders…";
+    return;
+  }
+  const wanted = plugins.found.filter((one) =>
+    `${one.name} ${one.vendor}`.toLowerCase().includes(plugins.filter),
+  );
+  el.pluginList.replaceChildren(
+    ...wanted.map((one) => {
+      const row = document.createElement("button");
+      row.className = `plugin-row${one.instrument ? "" : " not-ours"}`;
+      row.disabled = !one.instrument || plugins.loading;
+
+      const name = document.createElement("span");
+      name.className = "plugin-name";
+      name.textContent = one.name;
+
+      const vendor = document.createElement("span");
+      vendor.className = "plugin-vendor";
+      vendor.textContent = one.instrument ? one.vendor : `${one.vendor} — not an instrument`;
+
+      row.append(name, vendor);
+      row.title = one.path;
+      row.addEventListener("click", () => addPlugin(one));
+      return row;
+    }),
+  );
+
+  if (!plugins.found.length) {
+    el.pickerNote.textContent =
+      "No CLAP plugins found. They live in ~/Library/Audio/Plug-Ins/CLAP on a Mac.";
+  } else if (!wanted.length) {
+    el.pickerNote.textContent = `Nothing matching that, out of ${plugins.found.length}.`;
+  } else {
+    el.pickerNote.textContent = "";
+  }
+}
+
+/* Load one onto a new track. Takes a moment: a big synth is a lot to read off the disk. */
+async function addPlugin(one) {
+  if (plugins.loading) return;
+  plugins.loading = true;
+  drawPluginList();
+  showWarning(`loading ${one.name}…`);
+  try {
+    const made = await invoke("add_plugin", { path: one.path, id: one.id });
+    state.tracks.push({ ...made.track, peaks: made.peaks });
+    closePicker();
+    clearStatus();
+    drawTrackHeaders();
+    resize();
+  } catch (e) {
+    showError(e);
+  } finally {
+    plugins.loading = false;
+    drawPluginList();
+  }
+}
+
+const isPlugin = (track) => Boolean(trackById(track)?.plugin);
+
+/*
+ * A plugin's parameters, from Rust. Asked for when the editor opens and again when a drag
+ * has settled, because a plugin can move its own controls — loading a patch moves all of
+ * them at once — and what it says they are is the truth.
+ */
+async function refreshParams(track) {
+  try {
+    const params = await invoke("plugin_params", { id: track });
+    plugins.params.set(track, params);
+    if (state.sound === track) drawSound();
+  } catch (e) {
+    showError(e);
+  }
+}
+
+/*
+ * Move one. Straight to the audio thread, so you hear it as you drag; the read-out shows the
+ * plain number while you are moving it and goes back to what the plugin calls that value
+ * once you let go, because only the plugin knows how to say it.
+ */
+function setParam(track, param, value) {
+  invoke("set_plugin_param", { id: track, param, value });
+  const params = plugins.params.get(track) ?? [];
+  const found = params.find((one) => one.id === param);
+  if (found) {
+    found.value = value;
+    found.text = "";
+  }
+  clearTimeout(plugins.settling);
+  plugins.settling = setTimeout(() => refreshParams(track), PARAM_SETTLE);
+}
+
+/* One parameter: what it is called, a slider, and what the plugin calls the value. */
+function paramControl(track, param) {
+  const row = document.createElement("label");
+  row.className = "knob";
+  row.title = param.module ? `${param.module} / ${param.name}` : param.name;
+
+  const label = document.createElement("span");
+  label.className = "knob-label";
+  label.textContent = param.name;
+
+  const slider = document.createElement("input");
+  slider.type = "range";
+  slider.min = "0";
+  slider.max = "1000";
+  slider.step = "1";
+  const span = param.max - param.min || 1;
+  slider.value = String(Math.round(((param.value - param.min) / span) * 1000));
+
+  const read = document.createElement("span");
+  read.className = "knob-read";
+  const say = () =>
+    param.text || (Math.abs(param.value) >= 100 ? param.value.toFixed(0) : param.value.toFixed(3));
+  read.textContent = say();
+
+  slider.addEventListener("input", () => {
+    let value = param.min + (Number(slider.value) / 1000) * span;
+    // A stepped parameter is a menu or a switch: anything between two of its values is not
+    // one of its values.
+    if (param.stepped) value = Math.round(value);
+    param.value = value;
+    param.text = "";
+    read.textContent = say();
+    setParam(track, param.id, value);
+  });
+
+  row.append(label, slider, read);
+  return row;
+}
+
+/*
+ * The plugin half of the sound editor. The sampler's controls are put away: a synth has its
+ * own envelope, its own tuning and its own panning, and a second set of ours would only
+ * fight them. What is left of ours is how loud the track is, which is about the track.
+ */
+function drawPluginEditor(track) {
+  const params = plugins.params.get(track);
+  const filter = el.paramFilter.value.trim().toLowerCase();
+
+  if (!params) {
+    el.pluginParams.replaceChildren(hint("Asking the plugin what it has…"));
+    return;
+  }
+  if (!params.length) {
+    el.pluginParams.replaceChildren(
+      hint("This plugin has no controls to show. Its own window is stage six."),
+    );
+    return;
+  }
+  const wanted = params.filter((one) =>
+    `${one.module} ${one.name}`.toLowerCase().includes(filter),
+  );
+  const shown = wanted.slice(0, MAX_SHOWN_PARAMS);
+  el.pluginParams.replaceChildren(...shown.map((one) => paramControl(track, one)));
+  if (wanted.length > shown.length) {
+    el.pluginParams.append(
+      hint(`and ${wanted.length - shown.length} more — type above to narrow it down`),
+    );
+  }
+  if (!wanted.length) {
+    el.pluginParams.replaceChildren(hint(`Nothing matching that, out of ${params.length}.`));
+  }
+}
+
+function hint(text) {
+  const line = document.createElement("p");
+  line.className = "small";
+  line.textContent = text;
+  return line;
+}
+
+el.paramFilter.addEventListener("input", () => {
+  if (state.sound !== null && isPlugin(state.sound)) drawPluginEditor(state.sound);
+});
 
 // --- the song -------------------------------------------------------------
 
@@ -2826,7 +3136,9 @@ window.addEventListener("keydown", (e) => {
     // pattern, and only then the panic button. The rename box keeps escape for itself and
     // stops it reaching here, because there it means "forget the new name".
     if (e.target instanceof HTMLElement) e.target.blur();
-    if (state.sound !== null) {
+    if (!el.picker.classList.contains("hidden")) {
+      closePicker();
+    } else if (state.sound !== null) {
       closeSound();
     } else if (state.roll !== null) {
       closeRoll();
@@ -2970,6 +3282,12 @@ function showWarning(text) {
 
 function showSaved(name) {
   note(`<span class="ok">saved ${escapeText(name)}</span>`, 1500);
+}
+
+/* Take a notice down before its time is up, for one that has stopped being true. */
+function clearStatus() {
+  el.status.innerHTML = "";
+  noticeUntil = 0;
 }
 
 function escapeText(value) {

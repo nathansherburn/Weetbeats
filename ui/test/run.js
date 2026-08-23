@@ -1448,6 +1448,83 @@ try {
   check("escape comes back out to the pattern", await page.locator("#editor").isVisible());
   check("and not all the way to the song", !(await page.locator("#song").isVisible()));
 
+  // --- a track whose sound is a CLAP instrument rather than a file
+  await clearCalls();
+  await page.locator("#addPlugin").click();
+  await page.waitForSelector("#picker:visible");
+  check("the plugin button opens the picker", await page.locator("#picker").isVisible());
+  await page.waitForFunction(() => document.querySelectorAll(".plugin-row").length > 0);
+  check("with what the scan found", (await page.locator(".plugin-row").count()) === 3);
+  // An effect is shown rather than hidden, because "why is my plugin not here" deserves an
+  // answer — but it cannot be added, because effects are a later stage.
+  check("an effect is shown but cannot be picked", await page.evaluate(() => {
+    const rows = [...document.querySelectorAll(".plugin-row")];
+    const effect = rows.find((r) => r.textContent.includes("not an instrument"));
+    return Boolean(effect) && effect.disabled;
+  }));
+  await page.locator("#pluginFilter").fill("vital");
+  await page.waitForFunction(() => document.querySelectorAll(".plugin-row").length === 1);
+  check("the filter narrows it down", (await page.locator(".plugin-row").count()) === 1);
+  await page.locator("#pluginFilter").fill("");
+  await page.waitForFunction(() => document.querySelectorAll(".plugin-row").length === 3);
+
+  const pluggedRows = () => page.locator("#trackHeaders .track").count();
+  const rowsBefore = await pluggedRows();
+  await page.locator(".plugin-row", { hasText: "Surge XT" }).first().click();
+  await page.waitForFunction((was) =>
+    document.querySelectorAll("#trackHeaders .track").length === was + 1, rowsBefore);
+  check("picking one adds a track", (await pluggedRows()) === rowsBefore + 1);
+  check("and says which plugin, from where",
+    (await lastCall("add_plugin")).args.id === "org.surge-synth-team.surge-xt",
+    JSON.stringify((await lastCall("add_plugin")).args));
+  check("and the picker goes away", !(await page.locator("#picker").isVisible()));
+
+  const plugRow = page.locator("#trackHeaders .track").last();
+  check("its row wears a plug instead of a waveform", await plugRow
+    .locator(".wave").evaluate((n) => n.classList.contains("plugged") && !!n.querySelector("svg")));
+
+  // Clicking it opens the sound editor, showing the plugin's own controls rather than ours.
+  await plugRow.locator(".wave").click();
+  await page.waitForSelector("#sound:visible");
+  check("clicking it opens the plugin's controls",
+    await page.locator("#pluginBody").isVisible());
+  check("and the sampler's are put away, because a synth has its own",
+    !(await page.locator("#soundBody").isVisible()));
+  check("it says which plugin it is",
+    (await page.locator("#soundName").textContent()) === "Surge XT",
+    await page.locator("#soundName").textContent());
+  await page.waitForFunction(() => document.querySelectorAll("#pluginParams .knob").length > 0);
+  check("with the parameters the plugin says it has",
+    (await page.locator("#pluginParams .knob").count()) === 3);
+  check("and how loud the track is, which is still ours",
+    (await page.locator("#pluginLevelKnobs .knob").count()) === 1);
+
+  // Moving one goes straight to the audio thread: what a plugin is set to is the plugin's.
+  await clearCalls();
+  await page.evaluate(() => {
+    const slider = document.querySelector("#pluginParams input");
+    slider.value = "1000";
+    slider.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await page.waitForFunction(() =>
+    window.__weetbeats_calls.some((c) => c.name === "set_plugin_param"));
+  const turned = (await lastCall("set_plugin_param")).args;
+  check("moving a control reaches the plugin", turned.param === 0 && turned.value === 1,
+    JSON.stringify(turned));
+
+  await page.locator("#paramFilter").fill("cutoff");
+  await page.waitForFunction(() =>
+    document.querySelectorAll("#pluginParams .knob").length === 1);
+  check("the parameter filter narrows it down",
+    (await page.locator("#pluginParams .knob").count()) === 1);
+  await page.locator("#paramFilter").fill("");
+
+  await page.locator("body").press("Escape");
+  await page.waitForSelector("#editor:visible");
+  await page.locator("#trackHeaders .track").last().locator(".tick.kill").click();
+  await page.waitForFunction((was) =>
+    document.querySelectorAll("#trackHeaders .track").length === was, rowsBefore);
+
   // --- deleting a track takes its notes out of every pattern
   await page.locator("#trackHeaders .track").first().locator(".tick.kill").click();
   await page.waitForFunction(() => document.querySelectorAll("#trackHeaders .track").length === 2);
