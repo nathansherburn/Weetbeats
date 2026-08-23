@@ -49,13 +49,15 @@ pub enum Command {
         track: u16,
         gain: f32,
     },
-    /// Silent in this pattern. Fades out rather than cutting, for the same reason.
+    /// Silent in this pattern. Fades out rather than cutting, for the same reason. Beats
+    /// solo: a track that is both is silent, so mute always means the one thing.
     SetPatternMuted {
         pattern: u16,
         track: u16,
         muted: bool,
     },
-    /// Anything soloed in a pattern means only the soloed tracks are heard in it.
+    /// Anything soloed in a pattern means only the soloed tracks are heard in it — of the
+    /// ones that are not muted, because mute wins.
     SetPatternSoloed {
         pattern: u16,
         track: u16,

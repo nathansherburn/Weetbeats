@@ -304,8 +304,10 @@ impl Engine {
         // pattern started it, so this works out a level for every pattern and track pair and
         // the voice loop picks the one it belongs to.
         //
-        // Solo beats mute, within a pattern: if anything is soloed in it, only the soloed
-        // tracks are heard in it.
+        // Mute wins, and solo narrows what is left: if anything is soloed in a pattern then
+        // only the soloed tracks are heard in it, and a muted track is silent either way.
+        // Mute is the one switch that always means silence, so pressing it never has to be
+        // read against what else is on.
         //
         // Gain never jumps to its new value, it slides. A block is anywhere from 64 to
         // 1024 frames, so clamping the change per block would still be a step change at
@@ -320,11 +322,8 @@ impl Engine {
             for track in 0..MAX_TRACKS {
                 let bit = 1u32 << track;
                 let audible = self.tracks[track].active
-                    && if soloing {
-                        state.soloed & bit != 0
-                    } else {
-                        state.muted & bit == 0
-                    };
+                    && state.muted & bit == 0
+                    && (!soloing || state.soloed & bit != 0);
                 let target = if audible { state.gains[track] } else { 0.0 };
                 let at = Self::fader(pattern, track);
                 let start = self.faders[at];
@@ -413,18 +412,16 @@ impl Engine {
     /// Where one pattern's fader for one track is heading. Zero when the track is not heard
     /// in that pattern, which is what makes a mute a fade rather than a cut.
     ///
-    /// Solo beats mute, within the pattern: anything soloed in it and only the soloed tracks
-    /// are heard in it. The block prologue works this out for every pair in one pass rather
-    /// than calling this, so it can hold the pattern's state across the inner loop.
+    /// Mute wins, and solo narrows what is left: anything soloed in the pattern and only the
+    /// soloed tracks are heard in it, but a muted track is silent whether or not it is one of
+    /// them. The block prologue works this out for every pair in one pass rather than calling
+    /// this, so it can hold the pattern's state across the inner loop.
     fn target_gain(&self, pattern: usize, track: usize) -> f32 {
         let state = &self.patterns[pattern];
         let bit = 1u32 << track;
         let audible = self.tracks[track].active
-            && if state.soloed != 0 {
-                state.soloed & bit != 0
-            } else {
-                state.muted & bit == 0
-            };
+            && state.muted & bit == 0
+            && (state.soloed == 0 || state.soloed & bit != 0);
         if audible {
             state.gains[track]
         } else {

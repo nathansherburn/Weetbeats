@@ -162,7 +162,7 @@ fn tempo_decides_the_spacing() {
 }
 
 #[test]
-fn mute_silences_and_solo_beats_mute() {
+fn mute_silences_and_beats_solo() {
     // Quiet tracks on purpose: at full tilt the soft clipper flattens both cases to 1.0
     // and the test would pass no matter what mute did.
     fn rig_with(muted: bool, soloed: bool) -> f32 {
@@ -194,18 +194,25 @@ fn mute_silences_and_solo_beats_mute() {
 
     let both = rig_with(false, false);
     let muted = rig_with(true, false);
-    let soloed = rig_with(true, true);
+    let soloed = rig_with(false, true);
+    let both_switches = rig_with(true, true);
 
     assert!(both > 0.1, "two tracks should be audible");
     assert!(
         muted < both * 0.7,
         "mute did not quieten anything: {muted} vs {both}"
     );
-    // Solo wins over the track's own mute, and silences the track that is not soloed.
+    // Solo silences the track that is not soloed, and leaves the one that is.
     assert!(soloed > 0.1, "soloed track was silent");
     assert!(
         soloed < both * 0.7,
         "the unsoloed track was still audible: {soloed} vs {both}"
+    );
+    // Mute wins. Track 1 is muted so it is silent however it is soloed, and track 0 is not
+    // soloed so the solo shuts it up: the pattern goes quiet altogether.
+    assert!(
+        both_switches < both * 0.1,
+        "a track that is muted and soloed was still heard: {both_switches} vs {both}"
     );
 }
 

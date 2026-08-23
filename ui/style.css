@@ -335,6 +335,31 @@ body.drop-target::after {
   color: #241c00;
 }
 
+/*
+ * A solo a mute is overruling. Mute wins, so the track is silent whatever the solo says;
+ * the button stays lit because turning the mute off brings it straight back, and goes faint
+ * to say it is not what you are hearing.
+ */
+.tick.solo.beaten {
+  opacity: 0.4;
+}
+
+/*
+ * The drawings on a track's row. Sized here rather than in the markup so one number moves
+ * all three, and painted in `currentColor` so a button lighting up takes its icon with it.
+ */
+.tick .icon {
+  display: block;
+  width: 13px;
+  height: 13px;
+}
+
+.tick .icon svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
 .tick.kill:hover {
   border-color: var(--accent);
   color: var(--accent);
@@ -744,14 +769,24 @@ input.number.small-number {
   grid-template-columns: var(--keys) max-content;
   grid-template-rows: var(--head) max-content var(--velocity);
   min-width: 100%;
-  /* A line under each semitone, all the way across. Same trick as the song lanes. */
-  background-image: linear-gradient(
-    to bottom,
-    transparent calc(var(--semitone) - 1px),
-    var(--line) calc(var(--semitone) - 1px)
-  );
-  background-size: 100% var(--semitone);
-  background-position: 0 var(--head);
+  /* The same two layers the step grid has: the head strip with the pattern's colour along
+     its bottom edge, and a line under each semitone all the way across. */
+  background-image:
+    linear-gradient(
+      to bottom,
+      var(--panel) calc(var(--head) - 3px),
+      var(--pattern) calc(var(--head) - 3px),
+      var(--pattern) var(--head),
+      transparent var(--head)
+    ),
+    linear-gradient(
+      to bottom,
+      transparent calc(var(--semitone) - 1px),
+      var(--line) calc(var(--semitone) - 1px)
+    );
+  background-size: 100% 100%, 100% var(--semitone);
+  background-position: 0 0, 0 var(--head);
+  background-repeat: no-repeat, repeat;
 }
 
 .keys-chip .pattern-tab {
@@ -824,14 +859,31 @@ input.number.small-number {
   grid-template-columns: var(--headers) max-content;
   grid-template-rows: var(--head) max-content;
   min-width: 100%;
-  /* A line under each track, all the way across. Same trick as the song lanes. */
-  background-image: linear-gradient(
-    to bottom,
-    transparent calc(var(--row) - 1px),
-    var(--line) calc(var(--row) - 1px)
-  );
-  background-size: 100% var(--row);
-  background-position: 0 var(--head);
+  /*
+   * Two layers. The first is the strip along the top and the band of the pattern's colour
+   * along its bottom edge, carried across the part of the row that neither the ruler nor the
+   * corner reaches — a sixteen step pattern does not fill the window, and the band has to run
+   * the whole way to the close button at the far right rather than stopping at the last box.
+   * The second is a line under each track, all the way across, the same trick as the song
+   * lanes. Both are the stylesheet's rather than the canvas's, so they cannot land a pixel
+   * off what the cells beside them draw.
+   */
+  background-image:
+    linear-gradient(
+      to bottom,
+      var(--panel) calc(var(--head) - 3px),
+      var(--pattern) calc(var(--head) - 3px),
+      var(--pattern) var(--head),
+      transparent var(--head)
+    ),
+    linear-gradient(
+      to bottom,
+      transparent calc(var(--row) - 1px),
+      var(--line) calc(var(--row) - 1px)
+    );
+  background-size: 100% 100%, 100% var(--row);
+  background-position: 0 0, 0 var(--head);
+  background-repeat: no-repeat, repeat;
 }
 
 .corner {
@@ -911,13 +963,26 @@ input.number.small-number {
   border-color: var(--accent);
 }
 
+/*
+ * The ruler, and the band of the pattern's colour along the bottom of the strip it sits in.
+ *
+ * The colour is a border rather than something the canvas draws, because the canvas is
+ * scaled to whatever height it is given and the chip beside it is not: three pixels drawn
+ * inside the canvas landed a pixel or two off the three the chip has, and the band across
+ * the top of the editor had a visible step in it where the two met. A border on both, of
+ * the same width, in a row of the same height, cannot drift.
+ *
+ * `content-box` so the height main.js sets is the part the canvas actually draws in: the
+ * border is on top of it, and the two together are exactly one `--head`.
+ */
 .ruler {
   position: sticky;
   top: 0;
   z-index: 2;
   display: block;
+  box-sizing: content-box;
   background: var(--panel);
-  border-bottom: 1px solid var(--line);
+  border-bottom: 3px solid var(--pattern);
 }
 
 .header-col {
@@ -981,18 +1046,20 @@ input.number.small-number {
 }
 
 /*
- * The pattern is a window over the song, and this shuts it. In the pattern's own colour,
- * right beside its name, at the top left of the editor.
+ * The pattern is a window over the song, and this shuts it. In the pattern's own colour, at
+ * the far right of the strip the ruler runs along — the corner a window's close button is
+ * expected in, and the one place in the editor nothing else wants.
  *
- * It used to be pinned to the far right of the workspace, which is a bad place for the one
- * control you always need: at the far edge of the window it can end up under a scrollbar or
- * clipped by the window's own corner, and it is the longest possible journey from the
- * patterns panel you just clicked in. The corner it is in now is stuck to the top left of
- * the editor, so nothing can ever cover it and it is never more than a few pixels from the
- * pattern list.
+ * Absolutely placed inside the editor rather than dropped into the grid, so it holds that
+ * corner however far the grid is scrolled and can never end up under a sticky cell. Kept a
+ * little in from the edge so an overlay scrollbar cannot sit on top of it, and short enough
+ * to clear the band of the pattern's colour that runs underneath.
  */
 .shut {
-  margin-left: auto;
+  position: absolute;
+  top: 4px;
+  right: 12px;
+  z-index: 6;
   width: 22px;
   height: 22px;
   border: none;

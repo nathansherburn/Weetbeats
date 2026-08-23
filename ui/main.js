@@ -11,7 +11,7 @@
  *
  * An instrument's row in a pattern is a small piano roll rather than a line of boxes, and
  * clicking it opens the roll proper. Both are the same lane of notes seen two ways, so the
- * ♪ button switches between them without anything being lost.
+ * keyboard button switches between them without anything being lost.
  *
  * It holds a copy of the project so a click can light a box up straight away, but Rust owns
  * it: every change goes there too, and the audio thread hears about it from Rust.
@@ -42,6 +42,13 @@ const ROW = 46; // must match --row in the stylesheet
 const HEADERS = 296; // the instrument column: must match --headers
 const LANE = 34; // one pattern's row, in the panel and in the song: must match --lane
 const HEAD = 34; // the strip along the top of every view: must match --head
+/*
+ * The band of the open pattern's colour along the bottom of that strip. The stylesheet
+ * draws it, as a border on the ruler and on the chip beside it, so the two cannot land a
+ * pixel apart; this is only how much of the strip the ruler has left to draw in. Must match
+ * the border-bottom on .ruler, .corner and .head-chip.
+ */
+const HEAD_LINE = 3;
 const STEPS_PER_BEAT = 4; // sixteenth notes
 const STEPS_PER_BAR = 16; // a bar of the song, and the length of a new pattern
 const MAX_STEPS = 256; // as far as the engine will play
@@ -91,6 +98,49 @@ const BLOCK_COLOURS = [
   "#ff4d87", "#ff9d4d", "#ffd75e", "#9be34d",
   "#4de3a8", "#4dc9ff", "#8f8bff", "#f07bff",
 ];
+
+/*
+ * The little pictures on a track's row: mute, solo, and the switch to the piano roll.
+ *
+ * Drawings rather than letters. M and S only read as mute and solo if you already know the
+ * words, they say nothing in the languages that do not start those words with those letters,
+ * and ♪ was a character out of the body text with the wrong weight, the wrong size and no
+ * say in either. These are one square each, drawn in `currentColor`, so a button lighting up
+ * takes its icon with it.
+ *
+ * Written out as markup because an SVG is markup, and this is the whole of it: three static
+ * strings with nothing in them from anywhere else.
+ */
+const ICONS = {
+  // A speaker with the sound crossed out.
+  mute: `<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+    <path d="M2.4 6.2h2.2L7.6 3.4v9.2L4.6 9.8H2.4z" fill="currentColor" />
+    <path d="M10.2 5.8l3.6 4.4M13.8 5.8l-3.6 4.4" fill="none" stroke="currentColor"
+      stroke-width="1.5" stroke-linecap="round" />
+  </svg>`,
+  // Headphones: the one track you have put them on to listen to.
+  solo: `<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+    <path d="M3.1 10.4V8.6a4.9 4.9 0 0 1 9.8 0v1.8" fill="none" stroke="currentColor"
+      stroke-width="1.5" stroke-linecap="round" />
+    <rect x="1.5" y="9.4" width="3" height="4.4" rx="1.5" fill="currentColor" />
+    <rect x="11.5" y="9.4" width="3" height="4.4" rx="1.5" fill="currentColor" />
+  </svg>`,
+  // A keyboard, because that is what the row turns into.
+  keys: `<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+    <rect x="1.9" y="3.4" width="12.2" height="9.2" rx="1.6" fill="none" stroke="currentColor"
+      stroke-width="1.4" />
+    <path d="M6 3.4v9.2M10 3.4v9.2" fill="none" stroke="currentColor" stroke-width="1.2" />
+    <path d="M4.7 3.4h2.6v5H4.7zM8.7 3.4h2.6v5H8.7z" fill="currentColor" />
+  </svg>`,
+};
+
+/* One of them, ready to go in a button. */
+function icon(name) {
+  const holder = document.createElement("span");
+  holder.className = "icon";
+  holder.innerHTML = ICONS[name] ?? "";
+  return holder;
+}
 
 // Pixels of drag per step of a number field.
 const DRAG_PIXELS = 3;
@@ -812,12 +862,15 @@ function drawTrackHeaders() {
       // The whole row belongs to the pattern that is open: how loud, what is heard, and
       // whether it is an instrument.
       const mix = mixOf(track.id);
-      const mute = toggle("M", "mute", mix.muted, (on) => {
-        setMix(track.id, { muted: on }, "set_pattern_muted", { muted: on });
-      });
-      const solo = toggle("S", "solo", mix.soloed, (on) => {
+      const solo = toggle("solo", "Solo in this pattern", mix.soloed, (on) => {
         setMix(track.id, { soloed: on }, "set_pattern_soloed", { soloed: on });
       });
+      const mute = toggle("mute", "Mute in this pattern", mix.muted, (on) => {
+        setMix(track.id, { muted: on }, "set_pattern_muted", { muted: on });
+        // Mute wins, so a muted track's solo is showing something that is not happening.
+        beaten(solo, on);
+      });
+      beaten(solo, mix.muted);
 
       const gain = document.createElement("input");
       gain.type = "range";
@@ -836,10 +889,11 @@ function drawTrackHeaders() {
       const pitched = isPitched(track.id);
       const roll = document.createElement("button");
       roll.className = `tick keys-on${pitched ? " on" : ""}`;
-      roll.textContent = "♪";
+      roll.replaceChildren(icon("keys"));
       roll.title = pitched
         ? "Back to the boxes in this pattern, and back to a one-shot"
         : "Piano roll: in this pattern, play this one pitched and show its notes";
+      roll.setAttribute("aria-label", roll.title);
       roll.addEventListener("click", () => setPitched(track.id, !isPitched(track.id)));
 
       const kill = document.createElement("button");
@@ -854,17 +908,32 @@ function drawTrackHeaders() {
   );
 }
 
-function toggle(label, extra, on, onChange) {
+function toggle(name, title, on, onChange) {
   const button = document.createElement("button");
-  button.className = `tick ${extra}${on ? " on" : ""}`;
-  button.textContent = label;
-  button.title = extra;
+  button.className = `tick ${name}${on ? " on" : ""}`;
+  button.replaceChildren(icon(name));
+  button.title = title;
+  button.setAttribute("aria-label", title);
   button.addEventListener("click", () => {
     const next = !button.classList.contains("on");
     button.classList.toggle("on", next);
     onChange(next);
   });
   return button;
+}
+
+/*
+ * Solo, shown as something a mute is overruling. Mute is the switch that always means
+ * silence, so a track that is both is quiet however it is soloed — and a solo button lit up
+ * on a silent track would be saying the opposite. It stays lit, because turning the mute off
+ * brings it straight back, and goes faint to say it is not the one being listened to.
+ */
+function beaten(solo, muted) {
+  solo.classList.toggle("beaten", muted);
+  solo.title = muted
+    ? "Solo in this pattern — the mute wins while it is on"
+    : "Solo in this pattern";
+  solo.setAttribute("aria-label", solo.title);
 }
 
 /* Deleting a track takes its notes out of every pattern, and its sample out of the folder. */
@@ -975,7 +1044,7 @@ function rollSteps() {
  */
 function resizeEditor() {
   size(el.grid, gridWidth(), gridHeight());
-  size(el.ruler, gridWidth(), HEAD - 1);
+  size(el.ruler, gridWidth(), HEAD - HEAD_LINE);
   state.needsDraw = true;
   drawRuler();
 }
@@ -984,7 +1053,7 @@ function resizeRoll() {
   const width = rollSteps() * rollCell();
   const height = PITCHES * semitone();
   size(el.notes, width, height);
-  size(el.rollRuler, width, HEAD - 1);
+  size(el.rollRuler, width, HEAD - HEAD_LINE);
   size(el.keys, KEYS, height);
   size(el.velocity, width, VELOCITY);
   // The stylesheet draws a line under every semitone across the whole width, so it has to
@@ -1052,10 +1121,6 @@ function drawRuler() {
       ctx.fillRect(step * CELL + GAP, 13, 3, 1);
     }
   }
-  // The pattern's colour along the bottom of the strip, running the whole way across:
-  // the name tab at one end, the close button at the other, and this joining them.
-  ctx.fillStyle = colourOf(state.open);
-  ctx.fillRect(0, HEAD - 4, width, 3);
 }
 
 function drawGrid() {
@@ -1112,8 +1177,8 @@ function drawGrid() {
 
 /*
  * One instrument's notes, in the room a row of boxes would have taken. Click it to open the
- * roll proper; the ♪ button in the header puts the boxes back, and neither throws anything
- * away — the boxes and the roll have always been the same lane of notes.
+ * roll proper; the keyboard button on the row puts the boxes back, and neither throws
+ * anything away — the boxes and the roll have always been the same lane of notes.
  *
  * The pitches are scaled to what is actually in there, never less than an octave, so a bass
  * line that stays inside a fifth still uses the height rather than hugging the middle.
@@ -1278,7 +1343,7 @@ function openRoll(track) {
   state.roll = track;
   showView();
   // Notes only mean pitch and length on an instrument, so opening the roll makes it one in
-  // this pattern. The ♪ button on the row is there to change your mind.
+  // this pattern. The keyboard button on the row is there to change your mind.
   if (!isPitched(track)) setPitched(track, true);
   showPitched();
   resize();
@@ -1398,8 +1463,6 @@ function drawRollRuler() {
     }
   }
   ctx.globalAlpha = 1;
-  ctx.fillStyle = colourOf(state.open);
-  ctx.fillRect(0, HEAD - 4, width, 3);
 }
 
 function drawNotes() {

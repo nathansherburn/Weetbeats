@@ -78,7 +78,7 @@ which is a thing sticky grid items do.
 ### Instruments and the piano roll
 
 A track is a drum until you say otherwise: hit it and the whole sample plays, however short
-the note is. Press **♪** on a track and it becomes an instrument instead — the sample is
+the note is. Press the little keyboard on a track and it becomes an instrument instead — the sample is
 pitched across the keyboard, faster for higher notes and slower for lower ones, and a note
 **stops when it ends**. Press it again and it is a drum again.
 
@@ -92,10 +92,15 @@ Solo means "in this pattern, only the soloed tracks". Several patterns play at o
 so each applies its own — which is also a way to write "just the kick in the intro" without
 deleting anything.
 
+**Mute wins.** A track that is muted is silent whether or not it is also soloed, so the mute
+button always means the one thing and you never have to read it against what else is on. A
+solo sitting under a mute goes faint rather than out, because taking the mute off brings it
+straight back.
+
 That one switch also changes what its row looks like. An instrument's row is a **small piano
 roll** of its own notes rather than a line of boxes, because boxes cannot say which pitch or
-how long. Click the small one to open the roll proper, and press **♪** to go back to boxes.
-Nothing is lost either way: they are two views of one lane of notes.
+how long. Click the small one to open the roll proper, and press the keyboard button again to
+go back to boxes. Nothing is lost either way: they are two views of one lane of notes.
 
 In the roll, press to draw a note and keep dragging to set how long it is; the next one you
 draw comes out that long. Grab a note to move it, grab its right hand end to stretch it,

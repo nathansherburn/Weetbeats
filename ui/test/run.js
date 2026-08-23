@@ -508,6 +508,34 @@ try {
   check("the roll spans the whole of MIDI",
     (await canvasSize("keys")).h === 128 * SEMITONE, `${(await canvasSize("keys")).h}px`);
 
+  // The roll wears the same titlebar the boxes do: one band of the pattern's colour across
+  // the top, and the way out at the far right of it.
+  check("the roll's ruler is underlined in the pattern's colour, level with the chip",
+    await page.evaluate(() => {
+      const line = (id) => {
+        const node = document.getElementById(id);
+        const style = getComputedStyle(node);
+        return {
+          colour: style.borderBottomColor,
+          width: parseFloat(style.borderBottomWidth),
+          bottom: node.getBoundingClientRect().bottom,
+        };
+      };
+      const ruler = line("rollRuler");
+      const chip = line("rollChip");
+      return (
+        ruler.colour === chip.colour &&
+        ruler.width === chip.width &&
+        Math.abs(ruler.bottom - chip.bottom) < 0.5
+      );
+    }));
+  check("and its way out sits at the far right too", await page.evaluate(() => {
+    const shut = document.getElementById("closeRoll").getBoundingClientRect();
+    const roll = document.getElementById("roll").getBoundingClientRect();
+    const chip = document.getElementById("rollChip").getBoundingClientRect();
+    return shut.left > chip.right && roll.right - shut.right < 20 && shut.bottom < chip.bottom;
+  }));
+
   // --- drawing a note
   await clearCalls();
   const c4 = await noteAt(2, MIDDLE_C);
@@ -794,10 +822,13 @@ try {
   check("and so is the button that closes it",
     rgb(await cssColour("closePattern", "backgroundColor")) === blockColour(0),
     await cssColour("closePattern", "backgroundColor"));
-  check("the way out sits with the name, not out at the window's edge", await page.evaluate(() => {
+  check("the way out sits at the far right, clear of the instruments", await page.evaluate(() => {
     const shut = document.getElementById("closePattern").getBoundingClientRect();
-    const corner = document.querySelector("#editor .corner").getBoundingClientRect();
-    return shut.left >= corner.left && shut.right <= corner.right;
+    const editor = document.getElementById("editor").getBoundingClientRect();
+    const chip = document.getElementById("patternChip").getBoundingClientRect();
+    // Past the instrument column, hard up against the right hand edge, and inside the strip
+    // the ruler runs along rather than down over the grid.
+    return shut.left > chip.right && editor.right - shut.right < 20 && shut.bottom < chip.bottom;
   }));
 
   // Scrolled a long way along, it is still exactly where it was: the corner is stuck to the
@@ -823,15 +854,25 @@ try {
   await page.locator("#steps").press("Enter");
   await page.waitForFunction(() => document.getElementById("steps").value === "16");
 
-  check("the ruler is underlined in it", await page.evaluate(
-    ([head]) => {
-      const dpr = window.devicePixelRatio || 1;
-      const ctx = document.getElementById("ruler").getContext("2d");
-      const [r, g, b] = ctx.getImageData(20 * dpr, Math.round((head - 3) * dpr), 1, 1).data;
-      return `${r},${g},${b}`;
-    },
-    [34],
-  ) === blockColour(0));
+  const underline = (id) =>
+    page.evaluate((id) => {
+      const node = document.getElementById(id);
+      const style = getComputedStyle(node);
+      const box = node.getBoundingClientRect();
+      return {
+        colour: (style.borderBottomColor.match(/\d+/g) ?? []).slice(0, 3).join(","),
+        width: parseFloat(style.borderBottomWidth),
+        bottom: box.bottom,
+      };
+    }, id);
+  const rulerLine = await underline("ruler");
+  const chipLine = await underline("patternChip");
+  check("the ruler is underlined in it", rulerLine.colour === blockColour(0), rulerLine.colour);
+  // One band across the whole top of the editor, so the two halves of it cannot show a step
+  // where the instrument column ends and the grid begins.
+  check("and the line beside it starts at the same height",
+    rulerLine.width === chipLine.width && Math.abs(rulerLine.bottom - chipLine.bottom) < 0.5,
+    `${rulerLine.width}px ending ${rulerLine.bottom} vs ${chipLine.width}px ending ${chipLine.bottom}`);
 
   // --- closing a pattern: the X, and escape
   await page.locator("#closePattern").click();
@@ -1259,6 +1300,31 @@ try {
     (await lastCall("set_pattern_soloed")).args.soloed === true);
   check("mute button shows as on", await page.locator("#trackHeaders .track").first()
     .locator(".tick.mute").evaluate((n) => n.classList.contains("on")));
+  // Mute wins, so a solo underneath one is showing something that is not happening.
+  check("and the solo under it goes faint, because mute wins",
+    await page.locator("#trackHeaders .track").first()
+      .locator(".tick.solo").evaluate((n) => n.classList.contains("beaten")));
+  await page.locator("#trackHeaders .track").first().locator(".tick.mute").click();
+  check("and comes back when the mute goes",
+    !(await page.locator("#trackHeaders .track").first()
+      .locator(".tick.solo").evaluate((n) => n.classList.contains("beaten"))));
+  // Muted again, which is how the checks further down expect to find it.
+  await page.locator("#trackHeaders .track").first().locator(".tick.mute").click();
+
+  // The three switches on a row are drawings, not letters: M and S say nothing unless you
+  // already know the words, and ♪ was body text pretending to be an icon.
+  check("mute, solo and the piano roll are drawn, not spelled out", await page.evaluate(() => {
+    const row = document.querySelector("#trackHeaders .track");
+    return ["mute", "solo", "keys-on"].every((name) => {
+      const button = row.querySelector(`.tick.${name}`);
+      return button && button.querySelector("svg") && !button.textContent.trim();
+    });
+  }));
+  check("and they say what they are for anyone not looking at them", await page.evaluate(() => {
+    const row = document.querySelector("#trackHeaders .track");
+    return ["mute", "solo", "keys-on"].every((name) =>
+      (row.querySelector(`.tick.${name}`).getAttribute("aria-label") ?? "").length > 3);
+  }));
 
   await page.locator("#trackHeaders .track").first().locator("input[type=range]").fill("40");
   const gain = (await lastCall("set_pattern_gain")).args;
