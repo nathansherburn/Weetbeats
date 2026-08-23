@@ -169,6 +169,58 @@
         </div>
 
         <!--
+          The sound editor: one track's instrument, rather than one pattern's part.
+
+          The row in the pattern says how loud this sound is *here* and whether it is heard
+          *here*. This says what the sound is — how it starts, how long it hangs on, where it
+          sits, how it is tuned, how much of the file a note uses — and that is the same
+          wherever it is played. Opening it from the little waveform on the row is the point:
+          the waveform is the sound, so clicking it is asking about the sound.
+        -->
+        <div class="sound hidden" id="sound">
+          <div class="head-chip sound-chip" id="soundChip">
+            <span class="pattern-tab" id="soundName"></span>
+            <button id="hearSound" class="hear" title="Hear it (or click the waveform)">
+              hear it
+            </button>
+          </div>
+          <button id="closeSound" class="shut" title="Back to the pattern (esc)">
+            &times;
+          </button>
+          <div class="sound-body" id="soundBody">
+            <!--
+              The file, with the part a note actually reads picked out in the pattern's
+              colour. Drag either end to trim it; click anywhere in it to hear the result.
+            -->
+            <section class="sound-panel wide">
+              <h2 class="head-label">the file</h2>
+              <canvas
+                id="soundWave"
+                class="sound-wave"
+                title="Drag either end to trim it — click it to hear it"
+              ></canvas>
+              <div class="knobs" id="soundTrimKnobs"></div>
+            </section>
+
+            <!--
+              The envelope, drawn as the shape it is. The picture is the read-out: four
+              numbers do not tell you what a sound will do, and a shape does.
+            -->
+            <section class="sound-panel">
+              <h2 class="head-label">shape</h2>
+              <canvas id="soundEnv" class="sound-env"></canvas>
+              <div class="knobs" id="soundShapeKnobs"></div>
+            </section>
+
+            <!-- Where it sits, how it is tuned, and how loud the sound itself is. -->
+            <section class="sound-panel">
+              <h2 class="head-label">the sound</h2>
+              <div class="knobs" id="soundToneKnobs"></div>
+            </section>
+          </div>
+        </div>
+
+        <!--
           The piano roll: the same pattern, one track, seen as notes instead of boxes. Keys
           down the left, the notes in the middle, how hard each one is hit underneath.
         -->

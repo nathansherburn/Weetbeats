@@ -48,6 +48,7 @@ fn main() {
             commands::set_pattern_soloed,
             commands::audition,
             commands::set_pattern_pitched,
+            commands::set_voicing,
             commands::set_note,
             commands::clear_note,
             commands::move_note,

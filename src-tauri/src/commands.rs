@@ -15,7 +15,8 @@ use tauri_plugin_dialog::DialogExt;
 use weetbeats_engine::folder;
 use weetbeats_engine::sample::{is_audio_file, AUDIO_EXTENSIONS};
 use weetbeats_engine::{
-    Command, EngineNote, Note, Pattern, Placement, Project, SampleRef, Track, DEFAULT_PITCH,
+    Command, EngineNote, Note, Pattern, Placement, Project, SampleRef, Track, Voicing,
+    DEFAULT_PITCH,
 };
 
 use crate::state::AppState;
@@ -405,6 +406,34 @@ pub fn set_pattern_soloed(pattern: u16, track: u16, soloed: bool, state: State<'
     }
     drop(project);
     state.touch();
+}
+
+/// How the track's sound is played: its envelope, where it sits between the speakers, how it
+/// is tuned, its level and how much of the file a note reads.
+///
+/// The track's rather than a pattern's, and that is the whole distinction: how loud a part is
+/// belongs to the part, but what the sound *is* is the same wherever it is played. Change it
+/// and every pattern using that sound changes with it.
+///
+/// The whole voicing comes across each time rather than a field at a time. It is nine numbers,
+/// the front end has all nine in front of it, and a change to one is never worth its own
+/// command name.
+#[tauri::command]
+pub fn set_voicing(id: u16, voicing: Voicing, state: State<'_, Arc<AppState>>) -> Voicing {
+    state.remember("voicing");
+    let settled = voicing.settled();
+    let mut project = state.project.lock().unwrap();
+    let Some(track) = project.track_mut(id) else {
+        return settled;
+    };
+    track.voicing = settled;
+    state.send(Command::SetTrackVoicing {
+        track: id,
+        voicing: settled,
+    });
+    drop(project);
+    state.touch();
+    settled
 }
 
 /// Hear a track without waiting for its next step, at whatever pitch is asked for. Clicking

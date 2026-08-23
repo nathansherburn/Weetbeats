@@ -1360,6 +1360,94 @@ try {
   await page.waitForFunction((was) =>
     document.querySelectorAll("#patternList .prow").length === was, turnedDown);
 
+  // --- the sound editor: one track's instrument, rather than one pattern's part
+  await clearCalls();
+  await page.locator("#trackHeaders .track").first().locator(".wave").click();
+  await page.waitForSelector("#sound:visible");
+  check("clicking a track's waveform opens the sound editor",
+    await page.locator("#sound").isVisible());
+  check("and the boxes step aside", !(await page.locator("#editor").isVisible()));
+  check("it says which sound it is",
+    (await page.locator("#soundName").textContent()).includes("kick"),
+    await page.locator("#soundName").textContent());
+  // The same band across the top the other views have, in the colour of the pattern it was
+  // opened over, with the way out at the far right of it.
+  check("and wears the open pattern's colour", await page.evaluate(() => {
+    const chip = getComputedStyle(document.getElementById("soundChip")).borderBottomColor;
+    const shut = getComputedStyle(document.getElementById("closeSound")).backgroundColor;
+    return chip === shut;
+  }));
+  check("with the way out at the far right", await page.evaluate(() => {
+    const shut = document.getElementById("closeSound").getBoundingClientRect();
+    const view = document.getElementById("sound").getBoundingClientRect();
+    return view.right - shut.right < 20;
+  }));
+
+  // Every control is there, and each one starts where an unshaped sound starts.
+  const knob = (key) => page.locator(`#sound input[data-key="${key}"]`);
+  const reads = (key) => page.locator(`#sound [data-read="${key}"]`).textContent();
+  for (const key of ["attack", "decay", "sustain", "release", "pan", "tune", "level",
+    "start", "end"]) {
+    check(`the sound editor has a ${key}`, (await knob(key).count()) === 1);
+  }
+  check("a sound nobody has shaped sits in the middle", (await reads("pan")) === "middle");
+  check("and is tuned as it was recorded", (await reads("tune")) === "as recorded");
+  check("and uses the whole file", (await reads("end")) === "100%");
+
+  // Moving one reaches Rust, whole, and says which track.
+  const setKnob = (key, value) =>
+    page.evaluate(([key, value]) => {
+      const slider = document.querySelector(`#sound input[data-key="${key}"]`);
+      slider.value = String(value);
+      slider.dispatchEvent(new Event("input", { bubbles: true }));
+    }, [key, value]);
+  await setKnob("release", 500);
+  await page.waitForFunction(() =>
+    window.__weetbeats_calls.some((c) => c.name === "set_voicing"));
+  const voiced = (await lastCall("set_voicing")).args;
+  check("a control reaches Rust", voiced.id === 0, JSON.stringify(voiced.id));
+  check("as a whole voicing, not a field", Object.keys(voiced.voicing).length === 9,
+    Object.keys(voiced.voicing).join(","));
+  // Half way along a squared slider is a quarter of the way up the range, not half: the
+  // difference between nought and thirty milliseconds matters far more often than the one
+  // between three seconds and four.
+  check("with the value the slider means, not the slider's own number",
+    Math.abs(voiced.voicing.release - 0.5 * 0.5 * 4) < 1e-6,
+    String(voiced.voicing.release));
+  check("and the read-out says it in units", (await reads("release")) === "1.00 s",
+    await reads("release"));
+
+  // It belongs to the track, so it is the same wherever the sound is played.
+  check("the sound belongs to the track, not the pattern", await page.evaluate(() =>
+    Math.abs(window.__weetbeats_state.tracks.get(0).voicing.release - 1) < 1e-6));
+
+  // Rust pushes the ends of a trim apart rather than letting them cross, and the editor
+  // shows where they really ended up.
+  await setKnob("start", 900);
+  await setKnob("end", 100);
+  await page.waitForFunction(() =>
+    window.__weetbeats_state.tracks.get(0).voicing.end > 0.9);
+  check("the end of a trim cannot be dragged past its start",
+    await page.evaluate(() => {
+      const v = window.__weetbeats_state.tracks.get(0).voicing;
+      return v.end > v.start;
+    }));
+  check("and the control shows where it really landed",
+    (await knob("end").inputValue()) !== "100", await knob("end").inputValue());
+
+  // Double click puts one control back, which is the only way to "none of this".
+  await page.locator("#sound .knob").filter({ hasText: "release" }).dblclick();
+  await page.waitForFunction(() =>
+    window.__weetbeats_state.tracks.get(0).voicing.release < 0.01);
+  check("double clicking a control puts it back where it started",
+    (await reads("release")) === "3 ms", await reads("release"));
+
+  // Escape walks back out to the pattern, not all the way to the song.
+  await page.locator("body").press("Escape");
+  await page.waitForSelector("#editor:visible");
+  check("escape comes back out to the pattern", await page.locator("#editor").isVisible());
+  check("and not all the way to the song", !(await page.locator("#song").isVisible()));
+
   // --- deleting a track takes its notes out of every pattern
   await page.locator("#trackHeaders .track").first().locator(".tick.kill").click();
   await page.waitForFunction(() => document.querySelectorAll("#trackHeaders .track").length === 2);

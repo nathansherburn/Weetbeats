@@ -53,6 +53,10 @@ const STEPS_PER_BEAT = 4; // sixteenth notes
 const STEPS_PER_BAR = 16; // a bar of the song, and the length of a new pattern
 const MAX_STEPS = 256; // as far as the engine will play
 
+// The sound editor's two pictures. Must match .sound-wave and .sound-env in the stylesheet.
+const SOUND_WAVE_HEIGHT = 96;
+const SOUND_ENV_HEIGHT = 118;
+
 // The piano roll. Must match --keys, --semitone and --velocity in the stylesheet.
 const KEYS = 152;
 const SEMITONE = 15;
@@ -152,6 +156,8 @@ const state = {
   song: [], // { pattern, step, length }, sorted: what plays where
   open: null, // the pattern the editor has, or null for the song view
   roll: null, // the track the piano roll has, or null for the boxes
+  sound: null, // the track the sound editor has, or null for the music
+  trimming: null, // which end of the sound is being dragged: "start", "end", or null
   drawLength: 1, // how long the last note drawn was, so the next one matches
   snap: STEPS_PER_BAR, // what blocks in the song snap to, in steps
   zoom: 1, // how wide a step of the song is drawn, as a multiple of SONG_STEP
@@ -174,6 +180,8 @@ for (const id of [
   "add", "addBig", "steps", "fewerSteps", "moreSteps", "trackHeaders", "grid", "ruler",
   "empty", "roll", "rollScroll", "rollName", "rollRuler", "keys", "notes", "velocity",
   "closeRoll", "rollZoomIn", "rollZoomOut", "rollZoomRead", "workspace", "patternTab",
+  "sound", "soundChip", "soundName", "closeSound", "hearSound", "soundBody", "soundWave",
+  "soundEnv", "soundTrimKnobs", "soundShapeKnobs", "soundToneKnobs",
 ]) {
   el[id] = document.getElementById(id);
 }
@@ -235,6 +243,9 @@ function applyProject(startup) {
 
   if (state.open !== null && patternById(state.open) === null) {
     closePattern();
+  } else if (state.sound !== null && trackById(state.sound) === null) {
+    // The sound it was showing has gone: an undo took the track back out.
+    closeSound();
   } else if (state.roll !== null && !isPitched(state.roll)) {
     // The track it was showing is a row of boxes again, or gone altogether.
     closeRoll();
@@ -361,13 +372,20 @@ function isPitched(track) {
 
 // --- the two views --------------------------------------------------------
 
-/* One of the three at a time: the song, a pattern's boxes, or a pattern's piano roll. */
+/*
+ * One of four at a time: the song, a pattern's boxes, a pattern's piano roll, or one track's
+ * sound. The first three are the same music at different magnifications; the fourth is a
+ * different question altogether — not what is played but what it is played with — which is
+ * why it sits on top of the pattern rather than beside it.
+ */
 function showView() {
   const inPattern = state.open !== null;
-  const inRoll = inPattern && state.roll !== null;
+  const inSound = inPattern && state.sound !== null;
+  const inRoll = inPattern && !inSound && state.roll !== null;
   el.song.classList.toggle("hidden", inPattern);
-  el.editor.classList.toggle("hidden", !inPattern || inRoll);
+  el.editor.classList.toggle("hidden", !inPattern || inRoll || inSound);
   el.roll.classList.toggle("hidden", !inRoll);
+  el.sound.classList.toggle("hidden", !inSound);
 }
 
 /*
@@ -389,6 +407,7 @@ function openPattern(id) {
   state.open = id;
   state.selected = id;
   state.roll = null;
+  state.sound = null;
   el.steps.value = String(stepsOf(id));
   showPatternColour();
   showView();
@@ -405,6 +424,7 @@ function closePattern() {
   if (state.open !== null) state.selected = state.open;
   state.open = null;
   state.roll = null;
+  state.sound = null;
   showView();
   invoke("close_pattern");
   drawPatternPanel();
@@ -852,11 +872,18 @@ function drawTrackHeaders() {
       name.addEventListener("click", () => invoke("audition", { id: track.id }));
       row.append(name);
 
-      const wave = document.createElement("canvas");
+      // The picture of the sound is the way to the sound: clicking a track's name plays
+      // it, clicking its waveform asks what it is.
+      const wave = document.createElement("button");
       wave.className = "wave";
-      wave.width = 68;
-      wave.height = 36;
-      drawWaveform(wave, track.peaks);
+      wave.title = `${track.name} — click to shape this sound`;
+      wave.setAttribute("aria-label", wave.title);
+      const drawing = document.createElement("canvas");
+      drawing.width = 68;
+      drawing.height = 36;
+      drawWaveform(drawing, track.peaks);
+      wave.append(drawing);
+      wave.addEventListener("click", () => openSound(track.id));
       row.append(wave);
 
       // The whole row belongs to the pattern that is open: how loud, what is heard, and
@@ -944,6 +971,7 @@ function removeTrack(id) {
     pattern.notes.delete(id);
   }
   if (state.roll === id) closeRoll();
+  if (state.sound === id) closeSound();
   drawTrackHeaders();
   resize();
 }
@@ -1007,6 +1035,11 @@ function size(canvas, w, h) {
 /* How wide a canvas ended up, which is the width its drawing code works in. */
 function drawnWidth(canvas) {
   return parseInt(canvas.style.width, 10) || 0;
+}
+
+/* And how tall, for the ones whose height is the window's rather than the music's. */
+function drawnHeight(canvas) {
+  return parseInt(canvas.style.height, 10) || 0;
 }
 
 function gridWidth() {
@@ -1075,10 +1108,24 @@ function resizeSong() {
   state.needsDraw = true;
 }
 
+/*
+ * The sound editor is the one view whose canvases are the shape of the window rather than
+ * the shape of the music, so it is measured off the panels it sits in.
+ */
+function resizeSound() {
+  if (state.sound === null) return;
+  const wave = el.soundWave.parentElement.clientWidth;
+  size(el.soundWave, Math.max(80, wave), SOUND_WAVE_HEIGHT);
+  const shape = el.soundEnv.parentElement.clientWidth;
+  size(el.soundEnv, Math.max(80, shape), SOUND_ENV_HEIGHT);
+  drawSound();
+}
+
 function resize() {
   resizeEditor();
   resizeRoll();
   resizeSong();
+  resizeSound();
 }
 
 /*
@@ -1753,6 +1800,379 @@ el.keys.addEventListener("pointerdown", (e) => {
   invoke("audition", { id: state.roll, pitch: rowPitch(row) });
 });
 
+// --- the sound editor -----------------------------------------------------
+
+/*
+ * One track's instrument, rather than one pattern's part.
+ *
+ * The row in a pattern says how loud this sound is *there* and whether it is heard *there*.
+ * All of that is writing the part, so it belongs to the pattern. What is in here is what the
+ * sound *is* — how sharply it starts, how long it hangs on, where it sits between the
+ * speakers, how it is tuned, how much of the file a note uses — and that is the same
+ * wherever it is played, so it belongs to the track. Change the snare's tail here and every
+ * pattern using the snare hears it.
+ *
+ * You get in through the little waveform on the row, because the waveform is the sound.
+ * Clicking a track's name plays it; clicking its picture asks about it.
+ */
+
+/*
+ * The controls, as data. Each one says what it reads and writes on the voicing, how its
+ * slider maps onto that, and how to say the value out loud.
+ *
+ * Times get a squared slider. Attack is the difference between nought and thirty
+ * milliseconds far more often than between one second and two, and a linear slider spends
+ * nine tenths of its travel on the part nobody wants.
+ */
+const SOUND_MAX_TIME = 4; // seconds, the longest any one stage of the envelope goes
+
+const squared = (max) => ({
+  toValue: (t) => t * t * max,
+  toSlider: (v) => Math.sqrt(Math.max(0, v) / max),
+});
+const straight = (min, max) => ({
+  toValue: (t) => min + t * (max - min),
+  toSlider: (v) => (v - min) / (max - min),
+});
+
+const millis = (v) => (v < 0.1 ? `${Math.round(v * 1000)} ms` : `${v.toFixed(2)} s`);
+const percent = (v) => `${Math.round(v * 100)}%`;
+
+const SOUND_CONTROLS = {
+  shape: [
+    { key: "attack", label: "attack", ...squared(SOUND_MAX_TIME), say: millis,
+      hint: "How long a note takes to come up. Nothing is instant: a hard start clicks." },
+    { key: "decay", label: "decay", ...squared(SOUND_MAX_TIME), say: millis,
+      hint: "How long it takes to fall from full to where it sits." },
+    { key: "sustain", label: "sustain", ...straight(0, 1), say: percent,
+      hint: "Where it sits while the note is held. Full means the decay does nothing." },
+    { key: "release", label: "release", ...squared(SOUND_MAX_TIME), say: millis,
+      hint: "How long the tail is once the note ends." },
+  ],
+  tone: [
+    {
+      key: "pan",
+      label: "pan",
+      ...straight(-1, 1),
+      say: (v) =>
+        Math.abs(v) < 0.02
+          ? "middle"
+          : `${Math.round(Math.abs(v) * 100)}% ${v < 0 ? "left" : "right"}`,
+      hint: "Where it sits between the speakers.",
+    },
+    {
+      key: "tune",
+      label: "tune",
+      ...straight(-24, 24),
+      say: (v) => (Math.abs(v) < 0.005 ? "as recorded" : `${v > 0 ? "+" : ""}${v.toFixed(2)} st`),
+      hint: "Semitones up or down, on top of whatever pitch a note is.",
+    },
+    { key: "level", label: "level", ...straight(0, 2), say: percent,
+      hint: "How loud the sound itself is, wherever it is played." },
+  ],
+  trim: [
+    { key: "start", label: "starts at", ...straight(0, 1), say: percent,
+      hint: "How far into the file a note starts. Drag the left hand end of the waveform too." },
+    { key: "end", label: "ends at", ...straight(0, 1), say: percent,
+      hint: "And where it stops. Drag the right hand end of the waveform too." },
+  ],
+};
+
+/* The voicing of whichever track the editor has, or a default one when it has none. */
+function voicingOf(track) {
+  return trackById(track)?.voicing ?? DEFAULT_VOICING();
+}
+
+/* What a track that nobody has shaped sounds like. Must match Voicing::default in Rust. */
+const DEFAULT_VOICING = () => ({
+  attack: 0.002,
+  decay: 0,
+  sustain: 1,
+  release: 0.003,
+  pan: 0,
+  tune: 0,
+  level: 1,
+  start: 0,
+  end: 1,
+});
+
+function openSound(track) {
+  if (state.open === null || trackById(track) === null) return;
+  state.sound = track;
+  showView();
+  // Through resize, because the two pictures in here are the shape of the window and this
+  // is the first moment there is a window to measure.
+  resize();
+}
+
+function closeSound() {
+  state.sound = null;
+  state.trimming = null;
+  showView();
+  resize();
+}
+
+el.closeSound.addEventListener("click", closeSound);
+el.hearSound.addEventListener("click", () => {
+  if (state.sound !== null) invoke("audition", { id: state.sound });
+});
+
+/*
+ * Change one thing about the sound, here and in Rust.
+ *
+ * Rust hands back what it settled on rather than what was asked for — the ends of a trim
+ * cannot cross, the times have a ceiling — so the controls show what the sound actually is
+ * and not what you tried to make it.
+ */
+async function setVoicing(change) {
+  const track = trackById(state.sound);
+  if (!track) return;
+  const asked = { ...voicingOf(state.sound), ...change };
+  // Shown straight away, so a dragged slider is never a frame behind your hand.
+  track.voicing = asked;
+  drawSound();
+  const settled = await invoke("set_voicing", { id: track.id, voicing: asked });
+  const still = trackById(track.id);
+  if (!still) return;
+  still.voicing = settled;
+  // Only redraw for a value Rust would not have: a redraw per frame of a drag would fight
+  // the slider you are holding.
+  if (SOUND_KEYS.some((key) => Math.abs(settled[key] - asked[key]) > 1e-6)) drawSound();
+}
+
+const SOUND_KEYS = Object.keys(DEFAULT_VOICING());
+
+/* Every control, in the panel it belongs to. Built once per track the editor opens. */
+function buildSoundControls() {
+  for (const [group, where] of [
+    ["shape", el.soundShapeKnobs],
+    ["tone", el.soundToneKnobs],
+    ["trim", el.soundTrimKnobs],
+  ]) {
+    where.replaceChildren(...SOUND_CONTROLS[group].map(soundControl));
+  }
+}
+
+/*
+ * One labelled slider with its value beside it. The value is a read-out rather than a field:
+ * "40 ms" and "70% left" say what the number means, and nobody types a pan.
+ */
+function soundControl(spec) {
+  const row = document.createElement("label");
+  row.className = "knob";
+  row.title = spec.hint;
+
+  const label = document.createElement("span");
+  label.className = "knob-label";
+  label.textContent = spec.label;
+
+  const slider = document.createElement("input");
+  slider.type = "range";
+  slider.min = "0";
+  slider.max = "1000";
+  slider.step = "1";
+  slider.dataset.key = spec.key;
+
+  const read = document.createElement("span");
+  read.className = "knob-read";
+  read.dataset.read = spec.key;
+
+  slider.addEventListener("input", () => {
+    setVoicing({ [spec.key]: spec.toValue(Number(slider.value) / 1000) });
+  });
+  // Double click puts one control back where it started, which is the only way back to
+  // "exactly none of this" once you have moved it.
+  row.addEventListener("dblclick", () => {
+    setVoicing({ [spec.key]: DEFAULT_VOICING()[spec.key] });
+  });
+
+  row.append(label, slider, read);
+  return row;
+}
+
+/* The whole editor: the name, the sliders, the waveform and the envelope. */
+function drawSound() {
+  const track = trackById(state.sound);
+  if (!track) return;
+  el.soundName.textContent = track.name;
+  el.soundName.title = track.name;
+  if (el.soundShapeKnobs.childElementCount === 0) buildSoundControls();
+
+  const voicing = voicingOf(state.sound);
+  for (const group of Object.values(SOUND_CONTROLS)) {
+    for (const spec of group) {
+      const slider = el.soundBody.querySelector(`input[data-key="${spec.key}"]`);
+      const read = el.soundBody.querySelector(`[data-read="${spec.key}"]`);
+      if (slider && document.activeElement !== slider) {
+        slider.value = String(Math.round(spec.toSlider(voicing[spec.key]) * 1000));
+      }
+      if (read) read.textContent = spec.say(voicing[spec.key]);
+    }
+  }
+  drawSoundWave();
+  drawSoundEnvelope();
+}
+
+/*
+ * The file, with the part a note actually reads picked out in the pattern's colour and the
+ * trimmed off ends left dim. The handles are the edges of the lit part: there is nothing to
+ * find, because the thing you drag is the thing you can see.
+ */
+function drawSoundWave() {
+  const track = trackById(state.sound);
+  if (!track) return;
+  const ctx = el.soundWave.getContext("2d");
+  const w = drawnWidth(el.soundWave);
+  const h = drawnHeight(el.soundWave);
+  const voicing = voicingOf(state.sound);
+  ctx.clearRect(0, 0, w, h);
+
+  const peaks = track.peaks ?? [];
+  const from = voicing.start * w;
+  const to = voicing.end * w;
+  const colour = colourOf(state.open);
+  const step = w / Math.max(1, peaks.length);
+  for (let i = 0; i < peaks.length; i++) {
+    const x = i * step;
+    const inside = x + step / 2 >= from && x + step / 2 <= to;
+    ctx.fillStyle = inside ? colour : PALETTE.line;
+    const bar = Math.max(1, peaks[i] * (h - 16));
+    ctx.fillRect(x, (h - bar) / 2, Math.max(1, step - 1), bar);
+  }
+
+  // The two ends, as full height grips.
+  ctx.fillStyle = colour;
+  for (const x of [from, to]) {
+    ctx.fillRect(Math.min(w - 3, Math.max(0, x - 1.5)), 0, 3, h);
+  }
+}
+
+/*
+ * The envelope, drawn as the shape it is.
+ *
+ * Four numbers do not tell you what a sound will do and a shape does, so this is the real
+ * read-out and the sliders under it are how you move it. The hold in the middle is a fixed
+ * slice of the width rather than a real length, because how long a note is held is the
+ * pattern's business and this is only about the shape.
+ */
+const ENVELOPE_HOLD = 0.22; // of the width, given over to the sustain
+
+function drawSoundEnvelope() {
+  const ctx = el.soundEnv.getContext("2d");
+  const w = drawnWidth(el.soundEnv);
+  const h = drawnHeight(el.soundEnv);
+  ctx.clearRect(0, 0, w, h);
+  const voicing = voicingOf(state.sound);
+
+  const pad = 8;
+  const floor = h - pad;
+  const ceiling = pad;
+  const level = (v) => floor - v * (floor - ceiling);
+
+  // The three timed stages share what is left after the hold, in proportion to how long they
+  // are — so a long release really does look longer than a short attack.
+  const times = [voicing.attack, voicing.decay, voicing.release];
+  const total = times.reduce((a, b) => a + b, 0);
+  const room = w - pad * 2;
+  const spread = room * (1 - ENVELOPE_HOLD);
+  const widths = total > 0 ? times.map((t) => (t / total) * spread) : [0, 0, 0];
+
+  const points = [];
+  let x = pad;
+  points.push([x, level(0)]);
+  x += widths[0];
+  points.push([x, level(1)]);
+  x += widths[1];
+  points.push([x, level(voicing.sustain)]);
+  x += room * ENVELOPE_HOLD;
+  points.push([x, level(voicing.sustain)]);
+  x += widths[2];
+  points.push([x, level(0)]);
+
+  const colour = colourOf(state.open);
+  ctx.beginPath();
+  ctx.moveTo(points[0][0], floor);
+  for (const [px, py] of points) ctx.lineTo(px, py);
+  ctx.lineTo(points[points.length - 1][0], floor);
+  ctx.closePath();
+  ctx.fillStyle = tint(colour, 0.22);
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.moveTo(points[0][0], points[0][1]);
+  for (const [px, py] of points.slice(1)) ctx.lineTo(px, py);
+  ctx.strokeStyle = colour;
+  ctx.lineWidth = 2;
+  ctx.lineJoin = "round";
+  ctx.stroke();
+
+  // The line the note is let go on, which is where the release starts.
+  const releaseAt = points[3][0];
+  ctx.setLineDash([3, 3]);
+  ctx.beginPath();
+  ctx.moveTo(releaseAt, ceiling - 4);
+  ctx.lineTo(releaseAt, floor);
+  ctx.strokeStyle = PALETTE.dim;
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+/*
+ * Trimming, by dragging either end of the lit part. Anywhere else in the waveform plays the
+ * sound as it now is, because the whole point of trimming is hearing where it starts.
+ */
+const TRIM_GRAB = 8; // pixels either side of an end that count as grabbing it
+
+el.soundWave.addEventListener("pointerdown", (e) => {
+  if (state.sound === null) return;
+  const w = drawnWidth(el.soundWave);
+  const at = (e.clientX - el.soundWave.getBoundingClientRect().left) / Math.max(1, w);
+  const voicing = voicingOf(state.sound);
+  const grab = TRIM_GRAB / Math.max(1, w);
+  const ends = [
+    ["start", voicing.start],
+    ["end", voicing.end],
+  ]
+    .map(([which, value]) => [which, Math.abs(value - at)])
+    .filter(([, away]) => away <= grab)
+    .sort((a, b) => a[1] - b[1]);
+
+  if (!ends.length) {
+    invoke("audition", { id: state.sound });
+    return;
+  }
+  state.trimming = ends[0][0];
+  el.soundWave.setPointerCapture(e.pointerId);
+});
+
+el.soundWave.addEventListener("pointermove", (e) => {
+  if (!state.trimming) {
+    // A pointer near an end says so before you press, which is the only way to know the
+    // ends are draggable at all.
+    const w = drawnWidth(el.soundWave);
+    const at = (e.clientX - el.soundWave.getBoundingClientRect().left) / Math.max(1, w);
+    const voicing = voicingOf(state.sound);
+    const near =
+      Math.min(Math.abs(voicing.start - at), Math.abs(voicing.end - at)) <=
+      TRIM_GRAB / Math.max(1, w);
+    el.soundWave.classList.toggle("grabbing", near);
+    return;
+  }
+  const w = drawnWidth(el.soundWave);
+  const at = (e.clientX - el.soundWave.getBoundingClientRect().left) / Math.max(1, w);
+  setVoicing({ [state.trimming]: Math.min(1, Math.max(0, at)) });
+});
+
+const stopTrimming = () => {
+  if (!state.trimming) return;
+  state.trimming = null;
+  // Rust may have pushed an end back off the other one; show where they really are.
+  drawSound();
+};
+el.soundWave.addEventListener("pointerup", stopTrimming);
+el.soundWave.addEventListener("pointercancel", stopTrimming);
+
 // --- the song -------------------------------------------------------------
 
 /*
@@ -2406,7 +2826,9 @@ window.addEventListener("keydown", (e) => {
     // pattern, and only then the panic button. The rename box keeps escape for itself and
     // stops it reaching here, because there it means "forget the new name".
     if (e.target instanceof HTMLElement) e.target.blur();
-    if (state.roll !== null) {
+    if (state.sound !== null) {
+      closeSound();
+    } else if (state.roll !== null) {
       closeRoll();
     } else if (state.open !== null) {
       closePattern();

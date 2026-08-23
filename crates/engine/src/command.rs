@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use crate::model::Voicing;
 use crate::sample::Sample;
 
 /// A note as the engine holds it: steps and MIDI pitch, sized down so [`Command`] stays small.
@@ -41,6 +42,16 @@ pub enum Command {
     SetTrackSample {
         track: u16,
         sample: Option<Arc<Sample>>,
+    },
+    /// How the track's sound is played: its envelope, where it sits between the speakers, how
+    /// it is tuned, its level trim and how much of the file a note reads.
+    ///
+    /// The track's, not a pattern's, so this arrives once however many patterns use it. Only
+    /// the next note hears it: a voice keeps the shape it started with, so dragging the
+    /// attack about while it plays does not warp what is already sounding.
+    SetTrackVoicing {
+        track: u16,
+        voicing: Voicing,
     },
     /// How loud a track is in one pattern. Slides to its new value rather than jumping, so
     /// a fader moved while it plays takes what is already sounding with it.

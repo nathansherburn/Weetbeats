@@ -78,6 +78,36 @@ const arrangement = () => ({ patterns: fake.patterns, song: fake.song });
 /* How a track sits in a pattern, made on the spot if nobody has touched it yet. */
 const DEFAULT_GAIN = 0.8;
 
+/* And how its sound is played, which belongs to the track. Mirrors Voicing::default. */
+const DEFAULT_VOICING = () => ({
+  attack: 0.002,
+  decay: 0,
+  sustain: 1,
+  release: 0.003,
+  pan: 0,
+  tune: 0,
+  level: 1,
+  start: 0,
+  end: 1,
+});
+
+/* Mirrors Voicing::settled: every control pushed back inside the range its editor offers. */
+function settleVoicing(voicing) {
+  const clamp = (v, low, high) => Math.min(high, Math.max(low, Number(v) || 0));
+  const start = clamp(voicing.start, 0, 0.99);
+  return {
+    attack: clamp(voicing.attack, 0, 10),
+    decay: clamp(voicing.decay, 0, 10),
+    sustain: clamp(voicing.sustain, 0, 1),
+    release: clamp(voicing.release, 0, 10),
+    pan: clamp(voicing.pan, -1, 1),
+    tune: clamp(voicing.tune, -24, 24),
+    level: clamp(voicing.level, 0, 2),
+    start,
+    end: clamp(voicing.end, start + 0.01, 1),
+  };
+}
+
 function setMix(id, track, change) {
   const p = pattern(id);
   if (!p) return null;
@@ -137,6 +167,7 @@ function addAll(paths) {
       name,
       // Rust copies the file into the project folder and refers to it from there.
       sample: { path: `samples/${base}`, name },
+      voicing: DEFAULT_VOICING(),
     };
     fake.tracks.set(id, track);
     added.tracks.push({ track, peaks: fake.peaks });
@@ -174,6 +205,15 @@ const handlers = {
   set_pattern_muted: ({ pattern: id, track, muted }) => setMix(id, track, { muted }),
   set_pattern_soloed: ({ pattern: id, track, soloed }) => setMix(id, track, { soloed }),
   set_pattern_pitched: ({ pattern: id, track, pitched }) => setMix(id, track, { pitched }),
+
+  // How the sound is played, which belongs to the track rather than to any pattern. Hands
+  // back what it settled on, not what it was asked for, the same as Rust does.
+  set_voicing: ({ id, voicing }) => {
+    const settled = settleVoicing(voicing);
+    const track = fake.tracks.get(id);
+    if (track) track.voicing = settled;
+    return settled;
+  },
 
   // The piano roll's three commands. A note is identified by where it is.
   set_note: ({ pattern: id, track, at, velocity, length }) => {
@@ -399,6 +439,7 @@ const EDITS = {
   set_pattern_muted: "mute",
   set_pattern_soloed: "solo",
   set_pattern_pitched: "pitched",
+  set_voicing: "voicing",
   set_step: "boxes",
   set_note: "notes",
   clear_note: "notes",

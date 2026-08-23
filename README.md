@@ -28,6 +28,7 @@ with.
 - Click a track's name to hear it, or a key in the roll to hear that note
 - Play, stop, tempo, and a playhead you can drag whether or not it is playing
 - Per track: volume, mute, solo, delete
+- Click a sound's waveform to shape it: envelope, pan, tune, level, and trimming the file
 
 Effects are stage 5, hosting CLAP plugins stage 6.
 
@@ -114,6 +115,31 @@ converting between them and nothing to keep in step.
 What plays is what you can see. A row of boxes plays only the notes a box can mean — the ones
 at middle C — so a melody written in the roll goes quiet when you switch the row back to
 boxes, and comes back the moment you switch it again. Nothing is deleted either way.
+
+### Shaping a sound
+
+Click a track's name and you hear it. Click its **waveform** and you get the sound editor, a
+fourth view over the pattern:
+
+- **The file**, with the part a note actually reads picked out in the pattern's colour. Drag
+  either end to trim it — the silence off the front of somebody else's kick, the tail off a
+  crash. Click anywhere else in it to hear the result.
+- **Shape**: attack, decay, sustain and release, drawn as the shape they make. Four numbers
+  do not tell you what a sound will do, so the picture is the read-out and the sliders are how
+  you move it.
+- **The sound**: where it sits between the speakers, how it is tuned, and how loud the sound
+  itself is.
+
+Double click any control to put that one back where it started.
+
+All of this belongs to the **track**, not to the pattern — the opposite way round from the
+row of switches beside it. How loud a part is and whether you hear it at all is writing the
+part, so it belongs to the pattern; what the sound *is* is the same wherever it is played, so
+it belongs to the track. Shorten the snare's tail here and every pattern using the snare
+hears it.
+
+Nothing already sounding is re-shaped part way through. Drag the attack about while it plays
+and the next hit comes out different; the one you can hear keeps the shape it started with.
 
 ## Projects
 

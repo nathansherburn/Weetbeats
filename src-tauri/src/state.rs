@@ -200,6 +200,12 @@ impl AppState {
         let mut trouble: Vec<String> = Vec::new();
         for track in &project.tracks {
             self.send(Command::AddTrack { track: track.id });
+            // Before the sample, so a track can never be heard for a moment as its unshaped
+            // self while a project is still going across.
+            self.send(Command::SetTrackVoicing {
+                track: track.id,
+                voicing: track.voicing,
+            });
             if let Some(reference) = &track.sample {
                 match folder::resolve(&dir, &reference.path)
                     .and_then(|path| self.load_sample(&path))
