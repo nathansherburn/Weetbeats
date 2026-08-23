@@ -18,8 +18,15 @@
   /* The patterns panel, and one pattern in it. Must match PATTERNS and LANE in main.js. */
   --patterns: 208px;
   --lane: 34px;
-  /* The strip along the top of both views: the ruler, and the scrubber. */
-  --head: 30px;
+  /* The strip along the top of every view: the ruler, the scrubber, and the panel's own
+     head, which is the Song button. They have to match or the pattern rows on the left
+     stop lining up with the lanes on the right. */
+  --head: 34px;
+  /* The piano roll: the keyboard column, one semitone, one step, and the velocity lane.
+     Must match KEYS, SEMITONE, ROLL_CELL and VELOCITY in main.js. */
+  --keys: 152px;
+  --semitone: 15px;
+  --velocity: 54px;
 }
 
 * {
@@ -59,7 +66,7 @@ button {
   display: flex;
   align-items: center;
   gap: 22px;
-  padding: 10px 16px 10px 88px; /* room for the traffic lights */
+  padding: 10px 14px 10px 88px; /* room for the traffic lights */
   background: var(--panel);
   border-bottom: 1px solid var(--line);
   flex: none;
@@ -76,7 +83,7 @@ button {
 .meta {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 16px;
   min-width: 0;
 }
 
@@ -168,29 +175,29 @@ input[type="range"]:active::-webkit-slider-thumb {
 }
 
 .meter {
-  width: 74px;
-  height: 7px;
-  border-radius: 4px;
-  background: var(--bg);
+  position: relative;
+  width: 90px;
+  height: 9px;
+  border-radius: 5px;
+  background: linear-gradient(90deg, var(--ok), var(--lit) 78%, var(--accent));
   border: 1px solid var(--line);
   overflow: hidden;
 }
 
-.meter-fill {
-  height: 100%;
-  width: 0;
-  background: linear-gradient(90deg, var(--ok), var(--lit) 78%, var(--accent));
-  transition: width 0.06s linear;
-}
-
-/* The project is a folder, and this is its name. */
-.project-name {
-  font-size: 11px;
-  color: var(--dim);
-  max-width: 190px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+/*
+ * The level, as an opaque cover over the part of the gradient that is not lit, scaled in
+ * from the right. A transform is the one thing a browser can animate without laying the
+ * page out again. The width this replaces could not: it was being set sixty times a second
+ * behind a song view that was already redrawing every frame, with a transition restarting
+ * each time, and the bar hardly moved — which is what "the meter does not work in song
+ * mode" turned out to be.
+ */
+.meter-mask {
+  position: absolute;
+  inset: 0;
+  background: var(--bg);
+  transform-origin: right center;
+  transform: scaleX(1);
 }
 
 /* Only ever a warning or a note: nothing lives here the rest of the time. */
@@ -229,6 +236,28 @@ main {
   display: flex;
   min-width: 0;
   position: relative;
+  /* The open pattern's colour, set from main.js. Falls back to the app's own accent. */
+  --pattern: var(--accent);
+}
+
+/*
+ * The open pattern's name, in its own colour, sitting in the corner above the instruments
+ * where it is always in view however far the grid is scrolled. It is drawn to look like the
+ * block in the song that it is: same colour, same dark ink, same rounded corners — so
+ * opening a pattern reads as pulling that block open rather than going somewhere else.
+ */
+.pattern-tab {
+  background: var(--pattern);
+  color: #1a0b12;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 4px;
+  padding: 3px 8px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: none;
 }
 
 body.drop-target::after {
@@ -333,37 +362,70 @@ body.drop-target::after {
 .panel-head {
   height: var(--head);
   flex: none;
-  padding: 0 8px 0 10px;
   border-bottom: 1px solid var(--line);
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  align-items: stretch;
 }
 
-/* The heading, and the way back to the song. Lit while the song is what you are looking at. */
+/*
+ * The song's name, which is also the way back to it. It fills the head because it is the
+ * thing everything else in this panel sits under: the patterns are windows over the song,
+ * and this is the song.
+ */
 .song-mode {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.09em;
-  color: var(--dim);
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
   background: transparent;
-  border: 1px solid transparent;
-  border-radius: 5px;
-  padding: 2px 8px;
-  transition: color 0.12s, background 0.12s, border-color 0.12s;
+  border: none;
+  border-right: 1px solid transparent;
+  text-align: left;
+  transition: color 0.12s, background 0.12s;
+}
+
+.song-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--dim);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .song-mode:hover {
+  background: var(--panel-2);
+}
+
+.song-mode:hover .song-name {
   color: var(--text);
-  border-color: var(--line);
 }
 
 .song-mode.on {
-  color: var(--text);
   background: var(--accent-soft);
-  border-color: transparent;
-  box-shadow: inset 2px 0 0 var(--accent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.song-mode.on .song-name {
+  color: var(--text);
+}
+
+/* Renaming the song, in place, the same way a pattern is renamed. */
+.song-mode .rename {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 1px 4px;
+  outline: none;
 }
 
 /*
@@ -414,18 +476,38 @@ body.drop-target::after {
   background: var(--panel-2);
 }
 
-/* The pattern the editor has open. Click it again and it closes. */
+/*
+ * The pattern the editor has open, in its own colour — the same one its blocks are drawn in
+ * and the same one the editor is wearing. Escape, the ×, or the song button puts it away.
+ */
 .prow.open {
-  background: var(--accent-soft);
-  box-shadow: inset 2px 0 0 var(--accent);
+  background: var(--pattern-soft, var(--accent-soft));
+  box-shadow: inset 3px 0 0 var(--pattern, var(--accent));
+}
+
+/*
+ * The pattern picked out by a click. Not the same thing as being open: a click here says
+ * "this one", and opening it to edit is a double click on one of its blocks in the song.
+ */
+.prow.picked {
+  background: var(--panel-2);
+  box-shadow: inset 2px 0 0 var(--dim);
 }
 
 .prow.playing .pname {
   color: var(--lit);
 }
 
+.prow.open .pname {
+  font-weight: 600;
+}
+
+/*
+ * The name and how long the pattern is, together on the left: the number belongs to the
+ * name, and reading it meant crossing the row to the far edge and back.
+ */
 .prow .pname {
-  flex: 1;
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -449,6 +531,49 @@ body.drop-target::after {
   color: var(--dim);
   font-variant-numeric: tabular-nums;
   flex: none;
+  margin-right: auto;
+}
+
+/* The colour this pattern's blocks are drawn in, and the way to change it. */
+.prow .swatch {
+  width: 13px;
+  height: 13px;
+  border-radius: 4px;
+  border: 1px solid rgba(0, 0, 0, 0.45);
+  flex: none;
+  padding: 0;
+}
+
+.prow .swatch:hover {
+  outline: 1px solid var(--text);
+  outline-offset: 1px;
+}
+
+/* The colours to pick from, over the top of everything. */
+.colours {
+  position: fixed;
+  z-index: 20;
+  display: grid;
+  grid-template-columns: repeat(4, 18px);
+  gap: 6px;
+  padding: 8px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.colours button {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  border: 1px solid rgba(0, 0, 0, 0.45);
+  padding: 0;
+}
+
+.colours button:hover {
+  outline: 1px solid var(--text);
+  outline-offset: 1px;
 }
 
 /* Duplicate and delete stay out of the way until you go looking for them. */
@@ -477,6 +602,57 @@ body.drop-target::after {
   overflow: auto;
 }
 
+/*
+ * Snap and zoom, floating over the bottom right corner of the song. Not in a toolbar
+ * along the top: that row is the scrubber's, and it has to line up with the panel head.
+ */
+.song-tools {
+  position: absolute;
+  right: 14px;
+  bottom: 12px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 5px 9px;
+  background: rgba(27, 24, 35, 0.92);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+/* The roll keeps its zoom in the same corner, clear of the velocity lane along the bottom. */
+.roll-tools {
+  bottom: calc(var(--velocity) + 12px);
+}
+
+.song-tools .tool {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+input.number.small-number {
+  width: 34px;
+  font-size: 11px;
+  padding: 1px 0;
+}
+
+/* The read-out is also the way back to life size, which is the one zoom worth a shortcut. */
+.zoom-read {
+  font-size: 10px;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+  min-width: 30px;
+  text-align: center;
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+
+.zoom-read:hover {
+  color: var(--text);
+}
+
 /* The scrubber sticks to the top so it is still there when the lanes scroll. */
 .song-grid {
   display: grid;
@@ -499,17 +675,26 @@ body.drop-target::after {
   background-position: 0 var(--head);
 }
 
+/*
+ * Both canvases stick to the left as well as the scrubber sticking to the top: they are
+ * only as wide as the window, and the grid around them is as wide as the song. A canvas
+ * that grew with the song would hit the browser's own size limit a long way before the two
+ * hundred and fifty sixth bar.
+ */
 .scrubber {
   position: sticky;
   top: 0;
+  left: 0;
   z-index: 2;
   display: block;
   background: var(--panel);
   border-bottom: 1px solid var(--line);
-  cursor: pointer;
+  cursor: ew-resize;
 }
 
 .lanes {
+  position: sticky;
+  left: 0;
   display: block;
 }
 
@@ -532,6 +717,87 @@ body.drop-target::after {
 .small {
   font-size: 11px;
   opacity: 0.7;
+}
+
+/* --- the piano roll --- */
+
+.roll {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  position: relative;
+}
+
+.roll-scroll {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+}
+
+/*
+ * Same two sticky edges as the step grid — keys down the left, ruler along the top — with a
+ * third along the bottom for how hard each note is hit, so it stays with the notes it
+ * belongs to however far down the keyboard you are.
+ */
+.roll-grid {
+  display: grid;
+  grid-template-columns: var(--keys) max-content;
+  grid-template-rows: var(--head) max-content var(--velocity);
+  min-width: 100%;
+  /* A line under each semitone, all the way across. Same trick as the song lanes. */
+  background-image: linear-gradient(
+    to bottom,
+    transparent calc(var(--semitone) - 1px),
+    var(--line) calc(var(--semitone) - 1px)
+  );
+  background-size: 100% var(--semitone);
+  background-position: 0 var(--head);
+}
+
+.keys-chip .pattern-tab {
+  max-width: none;
+  min-width: 0;
+}
+
+.keys {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  display: block;
+  border-right: 1px solid var(--line);
+  background: var(--panel);
+  cursor: pointer;
+}
+
+.notes {
+  display: block;
+}
+
+.vel-corner {
+  position: sticky;
+  left: 0;
+  bottom: 0;
+  z-index: 3;
+  border-top: 1px solid var(--line);
+  border-bottom: none;
+  padding-left: 9px;
+  align-items: flex-start;
+  padding-top: 5px;
+}
+
+/* Holds the lane's own background across the whole width, over the semitone stripes. */
+.vel-lane {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  min-width: 100%;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+}
+
+.velocity {
+  display: block;
+  cursor: ns-resize;
 }
 
 /* --- the pattern editor --- */
@@ -575,11 +841,43 @@ body.drop-target::after {
   z-index: 3;
   background: var(--panel);
   border-right: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
+  /* The pattern's colour, picked up again by the line the ruler draws along its own bottom
+     edge, so one band of it runs the whole way across the top of the editor. */
+  border-bottom: 3px solid var(--pattern);
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   padding: 0 9px;
+}
+
+/*
+ * The pattern's titlebar, sitting over the top left corner of the editor and the roll.
+ *
+ * Outside the scrolling area, because there is nowhere inside it that is safe. Pinned to the
+ * far right, a button can be clipped by a scrollbar or the window's own corner — which is
+ * what happened to the close button. Put in the grid as a sticky cell, it holds for a while
+ * and then slides away: a sticky grid item is clamped to the space its own column leaves, so
+ * past roughly a windowful of scrolling it stops sticking. Absolutely placed over the corner
+ * it covers, it cannot go anywhere at all.
+ */
+.head-chip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: var(--headers);
+  height: var(--head);
+  z-index: 5;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  border-bottom: 3px solid var(--pattern);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 9px;
+}
+
+.keys-chip {
+  width: var(--keys);
 }
 
 .steps {
@@ -667,37 +965,52 @@ body.drop-target::after {
 }
 
 .track input[type="range"] {
-  width: 46px;
+  width: 40px;
   flex: none;
+}
+
+/* A track that is a sampler instrument rather than a one-shot. */
+.tick.keys-on.on {
+  background: var(--ok);
+  border-color: var(--ok);
+  color: #06301c;
 }
 
 .grid {
   display: block;
 }
 
-/* The pattern is a window over the song, and this shuts it. */
-.close {
-  position: absolute;
-  top: 0;
-  right: 0;
-  width: 30px;
-  height: var(--head);
+/*
+ * The pattern is a window over the song, and this shuts it. In the pattern's own colour,
+ * right beside its name, at the top left of the editor.
+ *
+ * It used to be pinned to the far right of the workspace, which is a bad place for the one
+ * control you always need: at the far edge of the window it can end up under a scrollbar or
+ * clipped by the window's own corner, and it is the longest possible journey from the
+ * patterns panel you just clicked in. The corner it is in now is stuck to the top left of
+ * the editor, so nothing can ever cover it and it is never more than a few pixels from the
+ * pattern list.
+ */
+.shut {
+  margin-left: auto;
+  width: 22px;
+  height: 22px;
   border: none;
-  border-left: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
-  background: var(--panel);
-  color: var(--dim);
-  font-size: 17px;
+  border-radius: 5px;
+  background: var(--pattern);
+  color: #1a0b12;
+  font-size: 15px;
+  font-weight: 600;
   line-height: 1;
-  z-index: 4;
   display: grid;
   place-items: center;
   padding: 0;
+  flex: none;
+  transition: filter 0.12s;
 }
 
-.close:hover {
-  background: var(--accent);
-  color: #1a0b12;
+.shut:hover {
+  filter: brightness(1.25);
 }
 
 .empty {

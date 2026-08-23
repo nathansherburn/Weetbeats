@@ -32,11 +32,16 @@ pub const MAX_NOTES_PER_TRACK: usize = 256;
 /// Voices in the pool. Run out and the oldest gets stolen.
 pub const MAX_VOICES: usize = 64;
 
-/// Longest pattern the engine will play.
-pub const MAX_STEPS: u16 = 64;
+/// Longest pattern the engine will play. Notes are held in a flat list rather than a slot
+/// per step, so this costs nothing but the clock's range.
+pub const MAX_STEPS: u16 = 256;
 
 /// Boxes a new pattern has.
 pub const DEFAULT_STEPS: u32 = 16;
+
+/// How loud a track is in a pattern until somebody moves it. A little under unity, so a
+/// handful of drums hitting together does not sit on the clipper.
+pub const DEFAULT_TRACK_GAIN: f32 = 0.8;
 
 /// Pattern slots the engine keeps notes for. A pattern's id in the project *is* its slot,
 /// the same trick as tracks, so the engine never has to be told a pattern has moved.
@@ -56,6 +61,12 @@ pub const STEPS_PER_BAR: u32 = 16;
 /// Bars the song can hold.
 pub const MAX_SONG_BARS: usize = 256;
 
+/// Steps the song can hold. The engine keeps a slot per step, so this is a real array.
+pub const MAX_SONG_STEPS: usize = MAX_SONG_BARS * STEPS_PER_BAR as usize;
+
+/// Patterns the song can hold at once, all placements together.
+pub const MAX_PLACEMENTS: usize = 1024;
+
 /// Frames the mixer works on at a time. Longer callbacks get chopped into these.
 pub const MAX_BLOCK: usize = 1024;
 
@@ -68,9 +79,15 @@ pub const DEFAULT_PITCH: u8 = 60;
 /// Voice slot marker for auditioned samples that belong to no track.
 pub const PREVIEW_TRACK: u16 = u16::MAX;
 
+/// And the pattern a note played by hand belongs to, which is none of them. Falls off the end
+/// of the fader table, so an audition plays at unity: clicking a sound to hear it should not
+/// be quiet because some pattern's fader is down, and should not be silent because it is muted
+/// there.
+pub const PREVIEW_PATTERN: u16 = u16::MAX;
+
 pub use command::{Command, EngineNote, Trash};
 pub use engine::Engine;
-pub use model::{Lane, Note, Pattern, Project, SampleRef, Track};
+pub use model::{Lane, Note, Pattern, Placement, Project, SampleRef, Track};
 pub use sample::Sample;
 pub use shared::{Playhead, Shared};
 

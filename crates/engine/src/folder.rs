@@ -8,6 +8,7 @@
 //!   samples/
 //!     kick.wav
 //!     clap.wav
+//!     .undo/        # samples a deleted track might still be undone back into
 //! ```
 //!
 //! Sample paths in `project.json` are relative to the folder. A sample is copied in the
@@ -54,6 +55,33 @@ pub fn name_of(dir: &Path) -> String {
         .to_string()
 }
 
+/// Rename the project folder, keeping it where it is. Returns where it ended up.
+///
+/// The name is the project's, so this is what typing a new one on the Song button does.
+/// A name with a slash in it, or one already taken next door, is refused rather than
+/// quietly written somewhere else.
+pub fn rename(dir: &Path, name: &str) -> Result<PathBuf, String> {
+    let wanted: String = name.trim().chars().take(60).collect();
+    if wanted.is_empty() {
+        return Err("a project needs a name".into());
+    }
+    if wanted.contains(['/', '\\']) || wanted.starts_with('.') {
+        return Err(format!("{wanted} is not a name a folder can have"));
+    }
+    let parent = dir
+        .parent()
+        .ok_or_else(|| "there is nowhere to put it".to_string())?;
+    let to = parent.join(format!("{wanted}.beat"));
+    if to == dir {
+        return Ok(to);
+    }
+    if to.exists() {
+        return Err(format!("there is already a {wanted} next to this one"));
+    }
+    fs::rename(dir, &to).map_err(|e| whined(dir, "rename", e))?;
+    Ok(to)
+}
+
 /// Turn a path out of `project.json` into a real one, refusing anything that points
 /// outside the project folder. A hand-edited file is not a reason to write elsewhere.
 pub fn resolve(dir: &Path, relative: &str) -> Result<PathBuf, String> {
@@ -82,7 +110,7 @@ pub fn save(dir: &Path, project: &Project) -> Result<(), String> {
 pub fn load(dir: &Path) -> Result<Project, String> {
     let path = project_file(dir);
     let text = fs::read_to_string(&path).map_err(|e| whined(&path, "read", e))?;
-    let project: Project = serde_json::from_str(&text)
+    let mut project: Project = serde_json::from_str(&text)
         .map_err(|e| format!("{} is not a Weetbeats project: {e}", path.display()))?;
     if project.version > PROJECT_VERSION {
         return Err(format!(
@@ -94,6 +122,9 @@ pub fn load(dir: &Path) -> Result<Project, String> {
     if project.patterns.is_empty() {
         return Err(format!("{} has no patterns in it", name_of(dir)));
     }
+    // Every project gets looked over on the way in, so a file written by an older version
+    // cannot leave the app holding something it has no way to edit.
+    project.repair();
     Ok(project)
 }
 
@@ -159,6 +190,101 @@ pub fn remove_sample(dir: &Path, path: &str) -> Result<(), String> {
     }
 }
 
+/// Where a sample goes when the last track using it is deleted.
+///
+/// Deleting the file outright would make undo a liar: the track would come back pointing at
+/// nothing. So it is moved aside instead — inside the project, so it travels with it, and
+/// hidden, so nobody has to look at it. Opening a project throws the stash away, because a
+/// window that has just opened has nothing to undo.
+pub const STASH_DIR: &str = ".undo";
+
+fn stash_dir(dir: &Path) -> PathBuf {
+    samples_dir(dir).join(STASH_DIR)
+}
+
+/// Move a sample out of the project's samples and into the stash.
+pub fn stash_sample(dir: &Path, path: &str) -> Result<(), String> {
+    let from = resolve(dir, path)?;
+    if !from.starts_with(samples_dir(dir)) {
+        return Err(format!("{path} is not one of the project's samples"));
+    }
+    if !from.is_file() {
+        return Ok(());
+    }
+    let Some(name) = from.file_name() else {
+        return Ok(());
+    };
+    let into = stash_dir(dir);
+    fs::create_dir_all(&into).map_err(|e| whined(&into, "make", e))?;
+    let to = into.join(name);
+    fs::rename(&from, &to).map_err(|e| whined(&from, "move", e))
+}
+
+/// Bring a sample back out of the stash. `false` if it was not in there.
+pub fn unstash_sample(dir: &Path, path: &str) -> Result<bool, String> {
+    let to = resolve(dir, path)?;
+    if to.is_file() {
+        return Ok(true);
+    }
+    let Some(name) = to.file_name() else {
+        return Ok(false);
+    };
+    let from = stash_dir(dir).join(name);
+    if !from.is_file() {
+        return Ok(false);
+    }
+    if let Some(above) = to.parent() {
+        fs::create_dir_all(above).map_err(|e| whined(above, "make", e))?;
+    }
+    fs::rename(&from, &to).map_err(|e| whined(&from, "move", e))?;
+    Ok(true)
+}
+
+/// Throw the stash away. Nothing can be undone into it any more.
+pub fn clear_stash(dir: &Path) -> Result<(), String> {
+    let stash = stash_dir(dir);
+    if !stash.is_dir() {
+        return Ok(());
+    }
+    fs::remove_dir_all(&stash).map_err(|e| whined(&stash, "delete", e))
+}
+
+/// Make the folder match the project again: every sample it refers to comes back out of the
+/// stash, and every sample on disk it no longer refers to goes into it.
+///
+/// This is what an undo needs. It is the same job as [`forget_unused_samples`], except that
+/// nothing is deleted, because the step being undone might be redone in a moment.
+pub fn reconcile_samples(dir: &Path, project: &Project) -> Result<(), String> {
+    for track in &project.tracks {
+        if let Some(sample) = &track.sample {
+            unstash_sample(dir, &sample.path)?;
+        }
+    }
+    let samples = samples_dir(dir);
+    if !samples.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(&samples).map_err(|e| whined(&samples, "read", e))? {
+        let entry = entry.map_err(|e| whined(&samples, "read", e))?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let used = project.tracks.iter().any(|t| {
+            t.sample
+                .as_ref()
+                .and_then(|s| resolve(dir, &s.path).ok())
+                .is_some_and(|p| p == path)
+        });
+        if !used {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                stash_sample(dir, &format!("{SAMPLES_DIR}/{name}"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Copy a whole project folder somewhere else, for "save as". The destination is made if
 /// it is not there, and files already in it with the same names are overwritten.
 pub fn copy_folder(from: &Path, to: &Path) -> Result<(), String> {
@@ -166,21 +292,32 @@ pub fn copy_folder(from: &Path, to: &Path) -> Result<(), String> {
         return Ok(());
     }
     fs::create_dir_all(to).map_err(|e| whined(to, "make", e))?;
-    let samples = samples_dir(from);
-    if samples.is_dir() {
-        let into = samples_dir(to);
-        fs::create_dir_all(&into).map_err(|e| whined(&into, "make", e))?;
-        for entry in fs::read_dir(&samples).map_err(|e| whined(&samples, "read", e))? {
-            let entry = entry.map_err(|e| whined(&samples, "read", e))?;
-            if entry.path().is_file() {
-                let target = into.join(entry.file_name());
-                fs::copy(entry.path(), &target).map_err(|e| whined(&target, "copy into", e))?;
-            }
-        }
-    }
+    copy_files(&samples_dir(from), &samples_dir(to))?;
+    // The stash goes too. It looks like clutter in a copy, but the window's undo history
+    // still points at it and the copy is where the project now lives: leave it behind and
+    // taking back a deleted track would put the track back with no sound in it. Opening the
+    // copy throws it away, so it does not linger.
+    copy_files(&stash_dir(from), &stash_dir(to))?;
     let project = project_file(from);
     if project.is_file() {
         fs::copy(&project, project_file(to)).map_err(|e| whined(to, "copy into", e))?;
+    }
+    Ok(())
+}
+
+/// Every file in one folder into another, making the destination if it is not there. Files
+/// only: a folder inside is somebody else's business.
+fn copy_files(from: &Path, to: &Path) -> Result<(), String> {
+    if !from.is_dir() {
+        return Ok(());
+    }
+    fs::create_dir_all(to).map_err(|e| whined(to, "make", e))?;
+    for entry in fs::read_dir(from).map_err(|e| whined(from, "read", e))? {
+        let entry = entry.map_err(|e| whined(from, "read", e))?;
+        if entry.path().is_file() {
+            let target = to.join(entry.file_name());
+            fs::copy(entry.path(), &target).map_err(|e| whined(&target, "copy into", e))?;
+        }
     }
     Ok(())
 }
@@ -299,8 +436,8 @@ mod tests {
             ..Default::default()
         };
         let second = project.add_pattern().unwrap();
-        project.pattern_mut(second).unwrap().set_steps(32);
-        project.set_bar_pattern(0, second, true);
+        project.set_pattern_steps(second, 32);
+        project.place(second, 0, 0);
 
         save(&dir, &project).unwrap();
         assert!(is_project(&dir));
@@ -309,7 +446,7 @@ mod tests {
         let back = load(&dir).unwrap();
         assert_eq!(back.bpm, 143.0);
         assert_eq!(back.pattern(second).unwrap().steps, 32);
-        assert_eq!(back.song, vec![vec![second]]);
+        assert!(back.placed(second, 0));
     }
 
     #[test]
@@ -320,6 +457,171 @@ mod tests {
         // The temporary file is renamed into place, not left lying around.
         assert!(!dir.join("project.json.writing").exists());
         assert!(load(&dir).is_ok());
+    }
+
+    /// Opening a project leaves the music where it is. An older version could write a
+    /// placement that no click could land on, and the answer to that is hit testing the
+    /// block rather than shoving it onto a grid it was never on.
+    #[test]
+    fn opening_a_project_does_not_move_anything() {
+        let temp = Temp::new("repair");
+        let dir = temp.path().join("Wonky.beat");
+
+        let mut project = Project::default();
+        project.set_pattern_steps(0, 32);
+        project.place(0, 0, 0);
+        // Where a length change under an older version would have left it: on the half bar.
+        project.song[0].step = 48;
+        save(&dir, &project).unwrap();
+
+        let back = load(&dir).unwrap();
+        assert!(back.placed(0, 48), "it moved the music");
+    }
+
+    #[test]
+    fn renaming_moves_the_folder_and_keeps_the_music() {
+        let temp = Temp::new("rename");
+        let dir = temp.path().join("Untitled.beat");
+        let mut project = Project::default();
+        project.pattern_mut(0).unwrap().set_step(0, 3, true);
+        save(&dir, &project).unwrap();
+
+        let to = rename(&dir, "  Bangers  ").unwrap();
+        assert_eq!(to, temp.path().join("Bangers.beat"));
+        assert!(!dir.exists(), "the old folder is still there");
+        assert!(load(&to).unwrap().pattern(0).unwrap().has_step(0, 3));
+        assert_eq!(name_of(&to), "Bangers");
+
+        // A name that would land on top of something else, and one no folder could have.
+        save(&dir, &project).unwrap();
+        assert!(rename(&dir, "Bangers").is_err());
+        assert!(rename(&dir, "../oops").is_err());
+        assert!(rename(&dir, "   ").is_err());
+        assert!(dir.exists(), "a refused rename moved it anyway");
+    }
+
+    /// Undo has to be able to bring a deleted track's sample back, so deleting one moves
+    /// the file aside rather than unlinking it.
+    #[test]
+    fn a_deleted_sample_can_be_brought_back() {
+        let temp = Temp::new("stash");
+        let dir = temp.path().join("Undo.beat");
+        let source = temp.path().join("kick.wav");
+        fs::write(&source, b"RIFFkick").unwrap();
+
+        let mut project = Project::default();
+        let brought = import_sample(&dir, &source).unwrap();
+        project.tracks.push(Track::new(
+            0,
+            "kick".into(),
+            Some(SampleRef {
+                path: brought.path.clone(),
+                name: "kick".into(),
+            }),
+        ));
+        save(&dir, &project).unwrap();
+        let file = resolve(&dir, &brought.path).unwrap();
+        assert!(file.is_file());
+
+        // The track goes, so the sample is moved aside.
+        let without = Project::default();
+        stash_sample(&dir, &brought.path).unwrap();
+        assert!(!file.is_file(), "the sample is still where it was");
+        reconcile_samples(&dir, &without).unwrap();
+        assert!(!file.is_file());
+
+        // Undo puts the track back, and the sample comes with it.
+        reconcile_samples(&dir, &project).unwrap();
+        assert!(file.is_file(), "undo could not get the sample back");
+        assert_eq!(fs::read(&file).unwrap(), b"RIFFkick");
+
+        // And once the stash is thrown away it is gone for good.
+        reconcile_samples(&dir, &without).unwrap();
+        clear_stash(&dir).unwrap();
+        reconcile_samples(&dir, &project).unwrap();
+        assert!(
+            !file.is_file(),
+            "it came back from a stash that was cleared"
+        );
+    }
+
+    /// Saving somewhere else takes the stash with it, or an undo in the copy would put a
+    /// track back with nothing to play.
+    #[test]
+    fn save_as_takes_what_undo_might_still_want() {
+        let temp = Temp::new("stash-copy");
+        let from = temp.path().join("Here.beat");
+        let to = temp.path().join("There.beat");
+        let source = temp.path().join("snare.wav");
+        fs::write(&source, b"RIFFsnare").unwrap();
+
+        let brought = import_sample(&from, &source).unwrap();
+        let mut project = Project::default();
+        project.tracks.push(Track::new(
+            0,
+            "snare".into(),
+            Some(SampleRef {
+                path: brought.path.clone(),
+                name: "snare".into(),
+            }),
+        ));
+        save(&from, &project).unwrap();
+
+        // The track is deleted, so its sample is moved aside, and then the project is saved
+        // somewhere else.
+        let without = Project::default();
+        save(&from, &without).unwrap();
+        stash_sample(&from, &brought.path).unwrap();
+        copy_folder(&from, &to).unwrap();
+
+        // Undo, in the copy: the track comes back and so does its sample.
+        reconcile_samples(&to, &project).unwrap();
+        let file = resolve(&to, &brought.path).unwrap();
+        assert!(file.is_file(), "undo in the copy lost the sample");
+        assert_eq!(fs::read(&file).unwrap(), b"RIFFsnare");
+    }
+
+    /// A sample two tracks share is not moved aside when one of them goes.
+    #[test]
+    fn a_shared_sample_stays_while_anything_uses_it() {
+        let temp = Temp::new("shared-stash");
+        let dir = temp.path().join("Shared.beat");
+        let source = temp.path().join("clap.wav");
+        fs::write(&source, b"RIFFclap").unwrap();
+
+        let brought = import_sample(&dir, &source).unwrap();
+        let reference = SampleRef {
+            path: brought.path.clone(),
+            name: "clap".into(),
+        };
+        let mut project = Project::default();
+        project
+            .tracks
+            .push(Track::new(0, "clap".into(), Some(reference.clone())));
+        save(&dir, &project).unwrap();
+
+        reconcile_samples(&dir, &project).unwrap();
+        assert!(resolve(&dir, &brought.path).unwrap().is_file());
+    }
+
+    /// A placement of a pattern that is not there is the one thing worth throwing away.
+    #[test]
+    fn a_placement_of_a_pattern_that_is_gone_is_dropped() {
+        let temp = Temp::new("orphan");
+        let dir = temp.path().join("Orphan.beat");
+
+        let mut project = Project::default();
+        project.place(0, 0, 0);
+        project.song.push(crate::model::Placement {
+            step: 32,
+            pattern: 9,
+            length: 16,
+        });
+        save(&dir, &project).unwrap();
+
+        let back = load(&dir).unwrap();
+        assert_eq!(back.song.len(), 1);
+        assert!(back.placed(0, 0));
     }
 
     #[test]

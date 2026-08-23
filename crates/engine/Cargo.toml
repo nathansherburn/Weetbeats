@@ -10,4 +10,17 @@ repository.workspace = true
 rtrb.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-symphonia = { version = "0.6", features = ["mp3", "flac", "vorbis", "ogg", "aac", "alac", "isomp4"] }
+# Every format the picker offers has to have a reader here, or a file passes the extension
+# filter and then fails to decode after it has already been copied into the project. aiff
+# and caf are not in symphonia's defaults; wav and ogg are.
+symphonia = { version = "0.6", features = [
+    "mp3",
+    "flac",
+    "vorbis",
+    "ogg",
+    "aac",
+    "alac",
+    "isomp4",
+    "aiff",
+    "caf",
+] }

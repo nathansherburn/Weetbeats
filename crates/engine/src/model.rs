@@ -11,17 +11,18 @@
 //! notes: one [`Lane`] per track that has any. That way adding a pattern gives you a fresh
 //! empty grid over the kit you already have, rather than an empty kit.
 //!
-//! The song is a row of bars, and each bar holds however many patterns you like. Patterns in
-//! the same bar sound together, which is how a kick pattern, a hat pattern and a snare
-//! pattern add up to a beat. A pattern painted across several bars keeps playing through
-//! them rather than starting again every bar, so a pattern longer than a bar gets the room
-//! it needs and a shorter one comes round again.
+//! The song is a list of placements: a pattern, and the step it starts at. One placement is
+//! one play-through, so a four step pattern takes four steps of the song and a thirty two
+//! step pattern takes thirty two. Placements sit on multiples of their own pattern's length,
+//! which is the only grid that makes sense when patterns are different lengths, and any
+//! number of them can overlap: that is how a kick pattern, a hat pattern and a snare pattern
+//! add up to a beat.
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    DEFAULT_PITCH, DEFAULT_STEPS, MAX_NOTES_PER_TRACK, MAX_PATTERNS, MAX_SONG_BARS, MAX_STEPS,
-    MAX_TRACKS, STEPS_PER_BAR,
+    DEFAULT_PITCH, DEFAULT_STEPS, DEFAULT_TRACK_GAIN, MAX_NOTES_PER_TRACK, MAX_PATTERNS,
+    MAX_PLACEMENTS, MAX_SONG_STEPS, MAX_STEPS, MAX_TRACKS, STEPS_PER_BAR,
 };
 
 /// Bumped whenever the on-disk shape changes. Version 1 never reached a file — stage 1 had
@@ -68,10 +69,20 @@ pub struct Track {
     pub id: u16,
     pub name: String,
     pub sample: Option<SampleRef>,
-    /// Linear, 0.0 to 1.5. 1.0 is unity.
+    /// How loud, whether it is heard, and whether it is an instrument — all left over from
+    /// when they belonged to the track rather than to each pattern.
+    ///
+    /// Read once on the way in, by [`Project::repair`], which writes them into every pattern
+    /// and then puts them back to their defaults, so a project written before the mixer moved
+    /// sounds the way it did. Never meaningful in a file this version wrote.
+    #[serde(default = "default_gain")]
     pub gain: f32,
+    #[serde(default)]
     pub muted: bool,
+    #[serde(default)]
     pub soloed: bool,
+    #[serde(default)]
+    pub pitched: bool,
 }
 
 impl Track {
@@ -80,10 +91,17 @@ impl Track {
             id,
             name,
             sample,
-            gain: 0.8,
+            gain: DEFAULT_TRACK_GAIN,
             muted: false,
             soloed: false,
+            pitched: false,
         }
+    }
+
+    /// True when nothing in the old per-track mixer was ever moved, so there is nothing to
+    /// carry into the patterns.
+    fn mixer_untouched(&self) -> bool {
+        self.gain == DEFAULT_TRACK_GAIN && !self.muted && !self.soloed && !self.pitched
     }
 }
 
@@ -136,9 +154,97 @@ impl Lane {
         }
     }
 
+    /// Add a note, or replace the one already at its step and pitch. False when the lane is
+    /// as full as the engine will hold.
+    pub fn set_note(&mut self, note: Note) -> bool {
+        match self.find(note.step, note.pitch) {
+            Some(i) => {
+                self.notes[i] = note;
+                true
+            }
+            None => {
+                if self.notes.len() >= MAX_NOTES_PER_TRACK {
+                    return false;
+                }
+                self.notes.push(note);
+                true
+            }
+        }
+    }
+
+    /// Take out the note at a step and pitch, if there is one.
+    pub fn clear_note(&mut self, step: u32, pitch: u8) -> bool {
+        match self.find(step, pitch) {
+            Some(i) => {
+                self.notes.remove(i);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The note at a step and pitch.
+    pub fn note(&self, step: u32, pitch: u8) -> Option<Note> {
+        self.find(step, pitch).map(|i| self.notes[i])
+    }
+
     /// Drop notes that fall outside a shortened pattern.
+    ///
+    /// A note that starts inside the pattern but runs off the end is shortened rather than
+    /// dropped: it is still a note you drew, it just has less room now.
     pub fn trim_to(&mut self, steps: u32) {
         self.notes.retain(|n| n.step < steps);
+        for note in &mut self.notes {
+            note.length = note.length.min(steps - note.step).max(1);
+        }
+    }
+}
+
+/// How one track sits in one pattern: how loud, whether it is heard, and whether it is
+/// played as an instrument or as a one-shot.
+///
+/// Per pattern, because all four are decisions about the part rather than about the sound.
+/// The same kick can be loud in the chorus and half its level in the verse, and the same bass
+/// can hold a rhythm down as a row of boxes in one pattern and play a melody in the next.
+///
+/// Only tracks that differ from the default get one of these, so a project full of patterns
+/// nobody has touched the mixer in costs nothing.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackMix {
+    pub track: u16,
+    /// Linear, 0.0 to 1.5. 1.0 is unity.
+    #[serde(default = "default_gain")]
+    pub gain: f32,
+    #[serde(default)]
+    pub muted: bool,
+    #[serde(default)]
+    pub soloed: bool,
+    /// A sampler instrument rather than a one-shot: pitched across the keyboard, each note
+    /// stopping when it ends, and edited as a piano roll instead of a row of boxes.
+    #[serde(default)]
+    pub pitched: bool,
+}
+
+fn default_gain() -> f32 {
+    DEFAULT_TRACK_GAIN
+}
+
+impl TrackMix {
+    pub fn new(track: u16) -> Self {
+        TrackMix {
+            track,
+            gain: DEFAULT_TRACK_GAIN,
+            muted: false,
+            soloed: false,
+            pitched: false,
+        }
+    }
+
+    /// True when nothing has been changed from how a new pattern starts, which is when the
+    /// record is not worth writing down.
+    pub fn untouched(&self) -> bool {
+        *self == TrackMix::new(self.track)
     }
 }
 
@@ -152,6 +258,18 @@ pub struct Pattern {
     pub name: String,
     /// How many boxes a row has. Patterns in one song need not agree.
     pub steps: u32,
+    /// Which of the song view's colours its blocks are. `None` means nobody chose, and the
+    /// front end picks from the pattern's id so a new pattern looks different from the last.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colour: Option<u8>,
+    /// How each track sits in this pattern. Only the ones that differ from the default are
+    /// in here; [`Pattern::mix_of`] answers for the rest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mix: Vec<TrackMix>,
+    /// Left over from the version that kept only the instruments, as a list of track ids.
+    /// Folded into `mix` by [`Project::repair`] and then cleared. Never written.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pitched: Vec<u16>,
     pub lanes: Vec<Lane>,
 }
 
@@ -161,8 +279,73 @@ impl Pattern {
             id,
             name,
             steps: DEFAULT_STEPS,
+            colour: None,
+            mix: Vec::new(),
+            pitched: Vec::new(),
             lanes: Vec::new(),
         }
+    }
+
+    /// How a track sits in this pattern. Every track has an answer, whether or not anybody
+    /// has touched it.
+    pub fn mix_of(&self, track: u16) -> TrackMix {
+        self.mix
+            .iter()
+            .find(|one| one.track == track)
+            .copied()
+            .unwrap_or_else(|| TrackMix::new(track))
+    }
+
+    /// The same, to write into. Makes the record if there is not one yet.
+    fn mix_mut(&mut self, track: u16) -> &mut TrackMix {
+        if let Some(at) = self.mix.iter().position(|one| one.track == track) {
+            return &mut self.mix[at];
+        }
+        self.mix.push(TrackMix::new(track));
+        self.mix.sort_unstable_by_key(|one| one.track);
+        let at = self.mix.iter().position(|one| one.track == track).unwrap();
+        &mut self.mix[at]
+    }
+
+    /// Change one thing about how a track sits in this pattern, and throw the record away
+    /// again if it is back to how a new pattern starts.
+    pub fn set_mix(&mut self, track: u16, change: impl FnOnce(&mut TrackMix)) {
+        change(self.mix_mut(track));
+        self.mix.retain(|one| !one.untouched());
+    }
+
+    pub fn set_gain(&mut self, track: u16, gain: f32) -> f32 {
+        let settled = gain.clamp(0.0, 1.5);
+        self.set_mix(track, |mix| mix.gain = settled);
+        settled
+    }
+
+    pub fn set_muted(&mut self, track: u16, muted: bool) {
+        self.set_mix(track, |mix| mix.muted = muted);
+    }
+
+    pub fn set_soloed(&mut self, track: u16, soloed: bool) {
+        self.set_mix(track, |mix| mix.soloed = soloed);
+    }
+
+    /// True if this track is an instrument in this pattern rather than a one-shot.
+    pub fn is_pitched(&self, track: u16) -> bool {
+        self.mix_of(track).pitched
+    }
+
+    /// Make a track an instrument in this pattern, or a one-shot again. Nothing is thrown
+    /// away either way: the notes are the same notes, and turning it back on shows them.
+    pub fn set_pitched(&mut self, track: u16, pitched: bool) -> bool {
+        self.set_mix(track, |mix| mix.pitched = pitched);
+        pitched
+    }
+
+    /// The instruments, as one bit per track, which is how the audio thread holds them.
+    pub fn pitched_mask(&self) -> u32 {
+        self.mix
+            .iter()
+            .filter(|one| one.pitched && (one.track as usize) < MAX_TRACKS)
+            .fold(0u32, |mask, one| mask | (1 << one.track))
     }
 
     pub fn lane(&self, track: u16) -> Option<&Lane> {
@@ -181,6 +364,20 @@ impl Pattern {
 
     pub fn has_step(&self, track: u16, step: u32) -> bool {
         self.lane(track).is_some_and(|l| l.has_step(step))
+    }
+
+    /// Add or replace a note, at any pitch and any length. What the piano roll draws with.
+    pub fn set_note(&mut self, track: u16, note: Note) -> bool {
+        let fits = self.lane_mut(track).set_note(note);
+        self.lanes.retain(|l| !l.notes.is_empty());
+        fits
+    }
+
+    /// Take a note out, wherever it is.
+    pub fn clear_note(&mut self, track: u16, step: u32, pitch: u8) -> bool {
+        let gone = self.lane_mut(track).clear_note(step, pitch);
+        self.lanes.retain(|l| !l.notes.is_empty());
+        gone
     }
 
     /// Tick or untick a box. Returns what the box now is.
@@ -209,6 +406,42 @@ impl Pattern {
     /// Forget a track that has been deleted from the project.
     pub fn forget_track(&mut self, track: u16) {
         self.lanes.retain(|l| l.track != track);
+        self.mix.retain(|one| one.track != track);
+        self.pitched.retain(|&t| t != track);
+    }
+}
+
+/// One pattern in the song: which pattern, where it starts, and how long it fills.
+///
+/// A placement starts wherever it was put — the song view snaps to whatever resolution you
+/// set, and nothing here cares what that was. `length` starts out as the pattern's own
+/// length and can be dragged: longer and the pattern comes round again inside it, shorter and
+/// it is cut off. Two placements of the same pattern never overlap, because putting one down
+/// takes out whatever it lands on.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase")]
+pub struct Placement {
+    pub step: u32,
+    pub pattern: u16,
+    /// Steps of song it fills. Zero means "as long as the pattern", which is what a project
+    /// written before placements could be dragged has, and what [`Project::repair`] fills in.
+    #[serde(default)]
+    pub length: u32,
+}
+
+impl Placement {
+    /// One past the last step it covers.
+    pub fn end(&self) -> u32 {
+        self.step + self.length.max(1)
+    }
+
+    pub fn covers(&self, step: u32) -> bool {
+        step >= self.step && step < self.end()
+    }
+
+    /// True if the two would sound over the top of each other.
+    pub fn overlaps(&self, other: &Placement) -> bool {
+        self.step < other.end() && other.step < self.end()
     }
 }
 
@@ -224,9 +457,9 @@ pub struct Project {
     pub tracks: Vec<Track>,
     /// Always at least one.
     pub patterns: Vec<Pattern>,
-    /// The song, a bar at a time: which patterns play during each bar. Everything in a bar
-    /// sounds together.
-    pub song: Vec<Vec<u16>>,
+    /// The song: what plays where. Sorted, so the same song is always written out the same
+    /// way. Placements overlap freely — that is the point of them.
+    pub song: Vec<Placement>,
 }
 
 impl Default for Project {
@@ -329,90 +562,272 @@ impl Project {
             return false;
         };
         self.patterns.remove(at);
-        for bar in &mut self.song {
-            bar.retain(|in_bar| *in_bar != id);
-        }
-        self.trim_song();
+        self.song.retain(|placement| placement.pattern != id);
         true
     }
 
-    /// The patterns playing in a bar. Bars past the end of the song are silent.
-    pub fn bar(&self, index: usize) -> &[u16] {
+    /// The placement of a pattern that covers a step, if any. What the song view hit tests
+    /// against: the block itself, wherever it was put, rather than a grid worked out from
+    /// the pattern's length.
+    pub fn placement_at(&self, pattern: u16, step: u32) -> Option<Placement> {
         self.song
-            .get(index)
-            .map(|bar| bar.as_slice())
-            .unwrap_or(&[])
-    }
-
-    pub fn bar_has(&self, index: usize, pattern: u16) -> bool {
-        self.bar(index).contains(&pattern)
-    }
-
-    /// The patterns in a bar as one bit each, which is how the audio thread holds them.
-    pub fn bar_mask(&self, index: usize) -> u32 {
-        self.bar(index)
             .iter()
-            .filter(|id| (**id as usize) < MAX_PATTERNS)
-            .fold(0u32, |mask, id| mask | (1 << *id))
+            .find(|one| one.pattern == pattern && one.covers(step))
+            .copied()
     }
 
-    pub fn bars(&self) -> usize {
-        self.song.len()
+    /// True if this pattern starts exactly here.
+    pub fn placed(&self, pattern: u16, step: u32) -> bool {
+        self.song
+            .iter()
+            .any(|one| one.pattern == pattern && one.step == step)
     }
 
-    /// Put a pattern in a bar of the song, or take it out. Returns whether it is in there
-    /// now, which is false if the pattern or the bar does not exist.
+    /// Put a pattern in the song. `length` of zero means "as long as the pattern is".
     ///
-    /// Turning one on fills in any empty bars before it, so you can drop a pattern in at
-    /// bar twelve and get eleven bars of silence in front of it. Turning one off leaves the
-    /// bar where it is, empty, because a rest in the middle of a song is a real thing to
-    /// want — only empty bars on the end are dropped.
-    pub fn set_bar_pattern(&mut self, index: usize, pattern: u16, on: bool) -> bool {
-        if self.pattern(pattern).is_none() {
+    /// Anything of the same pattern it lands on top of makes way for it, the way dropping a
+    /// thing on a thing works everywhere else.
+    pub fn place(&mut self, pattern: u16, step: u32, length: u32) -> bool {
+        let Some(steps) = self.pattern(pattern).map(|p| p.steps.max(1)) else {
+            return false;
+        };
+        let length = if length == 0 { steps } else { length };
+        let placed = Placement {
+            step,
+            pattern,
+            length: length.min(MAX_SONG_STEPS as u32),
+        };
+        if placed.end() > MAX_SONG_STEPS as u32 || self.song.len() >= MAX_PLACEMENTS {
             return false;
         }
-        if !on {
-            if index < self.song.len() {
-                self.song[index].retain(|id| *id != pattern);
-                self.trim_song();
+        self.song
+            .retain(|one| one.pattern != pattern || !one.overlaps(&placed));
+        self.song.push(placed);
+        self.song.sort_unstable();
+        true
+    }
+
+    /// Take out the placement of a pattern that starts here.
+    pub fn unplace(&mut self, pattern: u16, step: u32) -> bool {
+        // How loud a track is, whether it is heard and whether it is an instrument all used
+        // to belong to the track, so they were the same in every pattern. Carry them into
+        // every pattern — which is what the project sounded like — and put the old fields
+        // back to their defaults so they are never read again.
+        let carried: Vec<TrackMix> = self
+            .tracks
+            .iter()
+            .filter(|track| !track.mixer_untouched())
+            .map(|track| TrackMix {
+                track: track.id,
+                gain: track.gain,
+                muted: track.muted,
+                soloed: track.soloed,
+                pitched: track.pitched,
+            })
+            .collect();
+        for pattern in &mut self.patterns {
+            // A list of instruments, from the version between the two.
+            let listed = std::mem::take(&mut pattern.pitched);
+            for track in listed {
+                pattern.set_pitched(track, true);
             }
+            for was in &carried {
+                // Whatever the pattern says for itself wins: it was written later.
+                if pattern.mix.iter().any(|one| one.track == was.track) {
+                    continue;
+                }
+                pattern.set_mix(was.track, |mix| *mix = *was);
+            }
+            // A record for a track that is gone is only in the way.
+            let live: Vec<u16> = self.tracks.iter().map(|t| t.id).collect();
+            pattern.mix.retain(|one| live.contains(&one.track));
+        }
+        for track in &mut self.tracks {
+            track.gain = DEFAULT_TRACK_GAIN;
+            track.muted = false;
+            track.soloed = false;
+            track.pitched = false;
+        }
+        let before = self.song.len();
+        self.song
+            .retain(|one| !(one.pattern == pattern && one.step == step));
+        before != self.song.len()
+    }
+
+    /// Slide a placement along. Keeps how long it is, and takes out anything of the same
+    /// pattern it lands on.
+    pub fn move_placement(&mut self, pattern: u16, from: u32, to: u32) -> bool {
+        let Some(one) = self.placement_at(pattern, from) else {
             return false;
-        }
-        if index >= MAX_SONG_BARS {
+        };
+        self.unplace(pattern, one.step);
+        if !self.place(pattern, to, one.length) {
+            // Would not fit, so put it back where it was rather than losing it.
+            self.place(pattern, one.step, one.length);
             return false;
-        }
-        while self.song.len() <= index {
-            self.song.push(Vec::new());
-        }
-        let bar = &mut self.song[index];
-        if !bar.contains(&pattern) {
-            bar.push(pattern);
-            // Sorted, so the same song is always written out the same way.
-            bar.sort_unstable();
         }
         true
     }
 
-    /// Take a bar out of the song altogether, so everything after it moves up.
-    pub fn remove_bar(&mut self, index: usize) -> bool {
-        if index >= self.song.len() {
+    /// Change how much song a placement fills. One step is the least it can be.
+    pub fn resize_placement(&mut self, pattern: u16, step: u32, length: u32) -> bool {
+        let Some(one) = self.placement_at(pattern, step) else {
+            return false;
+        };
+        self.unplace(pattern, one.step);
+        if !self.place(pattern, one.step, length.max(1)) {
+            self.place(pattern, one.step, one.length);
             return false;
         }
-        self.song.remove(index);
-        self.trim_song();
         true
     }
 
-    /// Empty bars on the end are not part of the song.
-    fn trim_song(&mut self) {
-        while self.song.last().is_some_and(|bar| bar.is_empty()) {
-            self.song.pop();
+    /// Everything that starts inside a bar, gone. What right clicking a bar does: the way
+    /// out of a mess without having to pick the pieces off one at a time.
+    pub fn clear_bar(&mut self, bar: u32) -> usize {
+        let from = bar * STEPS_PER_BAR;
+        let to = from + STEPS_PER_BAR;
+        // How loud a track is, whether it is heard and whether it is an instrument all used
+        // to belong to the track, so they were the same in every pattern. Carry them into
+        // every pattern — which is what the project sounded like — and put the old fields
+        // back to their defaults so they are never read again.
+        let carried: Vec<TrackMix> = self
+            .tracks
+            .iter()
+            .filter(|track| !track.mixer_untouched())
+            .map(|track| TrackMix {
+                track: track.id,
+                gain: track.gain,
+                muted: track.muted,
+                soloed: track.soloed,
+                pitched: track.pitched,
+            })
+            .collect();
+        for pattern in &mut self.patterns {
+            // A list of instruments, from the version between the two.
+            let listed = std::mem::take(&mut pattern.pitched);
+            for track in listed {
+                pattern.set_pitched(track, true);
+            }
+            for was in &carried {
+                // Whatever the pattern says for itself wins: it was written later.
+                if pattern.mix.iter().any(|one| one.track == was.track) {
+                    continue;
+                }
+                pattern.set_mix(was.track, |mix| *mix = *was);
+            }
+            // A record for a track that is gone is only in the way.
+            let live: Vec<u16> = self.tracks.iter().map(|t| t.id).collect();
+            pattern.mix.retain(|one| live.contains(&one.track));
         }
+        for track in &mut self.tracks {
+            track.gain = DEFAULT_TRACK_GAIN;
+            track.muted = false;
+            track.soloed = false;
+            track.pitched = false;
+        }
+        let before = self.song.len();
+        self.song.retain(|p| p.step < from || p.step >= to);
+        before - self.song.len()
     }
 
-    /// Steps in the whole song, for drawing it.
+    /// Where the song ends, rounded up to a whole bar so it loops somewhere musical.
     pub fn song_steps(&self) -> u32 {
-        self.song.len() as u32 * STEPS_PER_BAR
+        let end = self.song.iter().map(|one| one.end()).max().unwrap_or(0);
+        end.div_ceil(STEPS_PER_BAR) * STEPS_PER_BAR
+    }
+
+    pub fn song_bars(&self) -> u32 {
+        self.song_steps() / STEPS_PER_BAR
+    }
+
+    /// Change a pattern's length. Its places in the song stay where they are and stay as long
+    /// as they are: a block is its own length once it is down, and dragging its edge is how
+    /// that changes.
+    pub fn set_pattern_steps(&mut self, id: u16, steps: u32) -> u32 {
+        match self.pattern_mut(id) {
+            Some(pattern) => pattern.set_steps(steps),
+            None => 0,
+        }
+    }
+
+    /// Put right anything in a project that this version of the app could not have written.
+    ///
+    /// Deliberately *not* a tidy-up: it never moves anything that is where somebody put it.
+    /// An older version let a pattern's length change without touching its places in the
+    /// song, which left blocks the song view could not point at — those are made clickable
+    /// by hit testing the block rather than the grid, not by shoving the music about.
+    ///
+    /// Returns how many placements it had to throw away.
+    pub fn repair(&mut self) -> usize {
+        let lengths: Vec<(u16, u32)> = self
+            .patterns
+            .iter()
+            .map(|pattern| (pattern.id, pattern.steps.max(1)))
+            .collect();
+        // How loud a track is, whether it is heard and whether it is an instrument all used
+        // to belong to the track, so they were the same in every pattern. Carry them into
+        // every pattern — which is what the project sounded like — and put the old fields
+        // back to their defaults so they are never read again.
+        let carried: Vec<TrackMix> = self
+            .tracks
+            .iter()
+            .filter(|track| !track.mixer_untouched())
+            .map(|track| TrackMix {
+                track: track.id,
+                gain: track.gain,
+                muted: track.muted,
+                soloed: track.soloed,
+                pitched: track.pitched,
+            })
+            .collect();
+        for pattern in &mut self.patterns {
+            // A list of instruments, from the version between the two.
+            let listed = std::mem::take(&mut pattern.pitched);
+            for track in listed {
+                pattern.set_pitched(track, true);
+            }
+            for was in &carried {
+                // Whatever the pattern says for itself wins: it was written later.
+                if pattern.mix.iter().any(|one| one.track == was.track) {
+                    continue;
+                }
+                pattern.set_mix(was.track, |mix| *mix = *was);
+            }
+            // A record for a track that is gone is only in the way.
+            let live: Vec<u16> = self.tracks.iter().map(|t| t.id).collect();
+            pattern.mix.retain(|one| live.contains(&one.track));
+        }
+        for track in &mut self.tracks {
+            track.gain = DEFAULT_TRACK_GAIN;
+            track.muted = false;
+            track.soloed = false;
+            track.pitched = false;
+        }
+        let before = self.song.len();
+        // A placement of a pattern that is not there any more can only confuse things.
+        self.song
+            .retain(|placement| lengths.iter().any(|(id, _)| *id == placement.pattern));
+        // A placement from before blocks had a length of their own is as long as its pattern,
+        // which is what it sounded like when it was written.
+        for placement in &mut self.song {
+            if placement.length == 0 {
+                if let Some((_, steps)) = lengths.iter().find(|(id, _)| *id == placement.pattern) {
+                    placement.length = *steps;
+                }
+            }
+        }
+        self.song.sort_unstable();
+        self.song.dedup();
+        // Notes that run past the end of a shortened pattern.
+        for pattern in &mut self.patterns {
+            let steps = pattern.steps;
+            for lane in &mut pattern.lanes {
+                lane.trim_to(steps);
+            }
+            pattern.lanes.retain(|lane| !lane.notes.is_empty());
+        }
+        before - self.song.len()
     }
 }
 
@@ -440,6 +855,60 @@ mod tests {
         assert_eq!(pattern.note_count(), 0);
         // And the empty lane goes with it, so a pattern nobody drew in stays empty.
         assert!(pattern.lanes.is_empty());
+    }
+
+    #[test]
+    fn the_piano_roll_writes_into_the_same_lane_as_the_boxes() {
+        let mut pattern = Pattern::new(0, "p".into());
+        pattern.set_step(0, 0, true);
+        // A note somewhere the boxes cannot reach: another pitch, and longer than a step.
+        assert!(pattern.set_note(
+            0,
+            Note {
+                step: 4,
+                pitch: 67,
+                velocity: 90,
+                length: 3,
+            }
+        ));
+        assert_eq!(pattern.note_count(), 2);
+        // The box is still a box, and the note is not one.
+        assert!(pattern.has_step(0, 0));
+        assert!(!pattern.has_step(0, 4));
+
+        // Setting one where another already is replaces it rather than doubling up.
+        pattern.set_note(
+            0,
+            Note {
+                step: 4,
+                pitch: 67,
+                velocity: 20,
+                length: 1,
+            },
+        );
+        assert_eq!(pattern.note_count(), 2);
+        assert_eq!(pattern.lane(0).unwrap().note(4, 67).unwrap().velocity, 20);
+
+        assert!(pattern.clear_note(0, 4, 67));
+        assert!(!pattern.clear_note(0, 4, 67));
+        assert_eq!(pattern.note_count(), 1);
+    }
+
+    #[test]
+    fn a_note_that_runs_off_a_shortened_pattern_is_cut_rather_than_lost() {
+        let mut pattern = Pattern::new(0, "p".into());
+        pattern.set_note(
+            0,
+            Note {
+                step: 4,
+                pitch: 60,
+                velocity: 100,
+                length: 8,
+            },
+        );
+        pattern.set_steps(8);
+        let note = pattern.lane(0).unwrap().note(4, 60).unwrap();
+        assert_eq!(note.length, 4, "it should reach the end and no further");
     }
 
     #[test]
@@ -562,69 +1031,171 @@ mod tests {
     }
 
     #[test]
-    fn a_bar_of_the_song_holds_as_many_patterns_as_you_like() {
+    fn patterns_overlap_in_the_song_so_they_can_play_together() {
         let mut project = Project::default();
         let hats = project.add_pattern().unwrap();
         let snare = project.add_pattern().unwrap();
 
-        // A kick, a hat and a snare pattern, all sounding together in the first bar.
-        assert!(project.set_bar_pattern(0, 0, true));
-        assert!(project.set_bar_pattern(0, hats, true));
-        assert!(project.set_bar_pattern(0, snare, true));
-        assert_eq!(project.bar(0), &[0, hats, snare]);
-        assert_eq!(project.bars(), 1);
+        // A kick, a hat and a snare pattern, all starting at the top of the song.
+        assert!(project.place(0, 0, 0));
+        assert!(project.place(hats, 0, 0));
+        assert!(project.place(snare, 0, 0));
+        assert_eq!(project.song.len(), 3);
+        assert!(project.placed(hats, 0));
         assert_eq!(project.song_steps(), STEPS_PER_BAR);
 
         // Taking one out leaves the others where they are.
-        assert!(!project.set_bar_pattern(0, hats, false));
-        assert_eq!(project.bar(0), &[0, snare]);
-        assert!(project.bar_has(0, snare));
-        assert!(!project.bar_has(0, hats));
+        assert!(project.unplace(hats, 0));
+        assert!(!project.placed(hats, 0));
+        assert!(project.placed(snare, 0));
+    }
+
+    /// The point of placing by the pattern's own length: a four step pattern takes four steps
+    /// of the song, not a whole bar of it.
+    #[test]
+    fn a_block_is_as_long_as_the_pattern_in_it_until_you_say_otherwise() {
+        let mut project = Project::default();
+        let short = project.add_pattern().unwrap();
+        project.set_pattern_steps(short, 4);
+
+        // One four step pattern at the top: four steps of music, one bar of song.
+        assert!(project.place(short, 0, 0));
+        assert_eq!(project.placement_at(short, 0).unwrap().length, 4);
+        assert!(project.placement_at(short, 3).is_some());
+        assert!(
+            project.placement_at(short, 4).is_none(),
+            "one block is one play through, not a bar of them"
+        );
+        assert_eq!(
+            project.song_steps(),
+            STEPS_PER_BAR,
+            "the song still loops on the bar"
+        );
+
+        // And another one right where the first ended.
+        assert!(project.place(short, 4, 0));
+        assert_eq!(project.song.len(), 2);
+
+        // Dragging its right edge out makes it repeat rather than making a second block.
+        assert!(project.resize_placement(short, 0, 4 * 4));
+        assert_eq!(
+            project.song.len(),
+            1,
+            "growing over the next block of the same pattern swallows it"
+        );
+        assert_eq!(project.placement_at(short, 15).unwrap().step, 0);
+    }
+
+    /// The bug behind blocks nobody could click: a block is hit tested where it actually is,
+    /// not on a grid worked out from the pattern's length.
+    #[test]
+    fn a_block_off_the_patterns_grid_can_still_be_pointed_at() {
+        let mut project = Project::default();
+        project.set_pattern_steps(0, 32);
+        // Step 48 is a bar boundary but not a multiple of 32 — where the old grid lost blocks.
+        assert!(project.place(0, 48, 0));
+        assert!(project.placement_at(0, 48).is_some());
+        assert!(project.placement_at(0, 60).is_some());
+        assert!(project.unplace(0, 48));
+        assert!(project.song.is_empty());
     }
 
     #[test]
-    fn the_bar_mask_is_what_the_audio_thread_gets() {
+    fn the_song_is_as_long_as_the_last_thing_in_it_rounded_up_to_a_bar() {
         let mut project = Project::default();
-        let second = project.add_pattern().unwrap();
-        project.set_bar_pattern(0, 0, true);
-        project.set_bar_pattern(0, second, true);
-        assert_eq!(project.bar_mask(0), 0b11);
-        assert_eq!(project.bar_mask(1), 0, "a bar past the end is silent");
+        let long = project.add_pattern().unwrap();
+        project.set_pattern_steps(long, 32);
+
+        project.place(0, 32, 0); // sixteen steps, at step 32
+        assert_eq!(project.song_steps(), 48);
+        project.place(long, 64, 0); // thirty two steps, at step 64
+        assert_eq!(project.song_steps(), 96);
+        assert_eq!(project.song_bars(), 6);
     }
 
     #[test]
-    fn a_pattern_dropped_in_late_gets_silence_in_front_of_it() {
+    fn a_pattern_cannot_sound_over_the_top_of_itself() {
         let mut project = Project::default();
-        assert!(project.set_bar_pattern(3, 0, true));
-        assert_eq!(project.bars(), 4);
-        assert!(project.bar(0).is_empty());
-        assert!(project.bar_has(3, 0));
-
-        // A rest in the middle stays a rest; only empty bars on the end go.
-        project.set_bar_pattern(1, 0, true);
-        project.set_bar_pattern(1, 0, false);
-        assert_eq!(project.bars(), 4);
-        project.set_bar_pattern(3, 0, false);
-        assert_eq!(project.bars(), 0, "nothing left, so no song");
+        assert!(project.place(0, 48, 0));
+        assert!(project.place(0, 48, 0));
+        assert_eq!(project.song.len(), 1);
+        // Landing halfway across it takes the place of it rather than doubling it up.
+        assert!(project.place(0, 56, 0));
+        assert_eq!(project.song.len(), 1);
+        assert_eq!(project.song[0].step, 56);
     }
 
     #[test]
-    fn a_bar_can_be_taken_out_to_close_a_gap() {
+    fn a_block_can_be_dragged_along_the_song() {
         let mut project = Project::default();
-        let second = project.add_pattern().unwrap();
-        project.set_bar_pattern(0, 0, true);
-        project.set_bar_pattern(2, second, true);
+        project.place(0, 0, 0);
+        assert!(project.move_placement(0, 0, 5));
+        assert_eq!(project.placement_at(0, 5).unwrap().length, 16);
+        assert!(project.placement_at(0, 0).is_none());
+        // Grabbing it anywhere along its length moves the whole block.
+        assert!(project.move_placement(0, 12, 0));
+        assert!(project.placed(0, 0));
+        // Dragging past the end of the song we hold leaves it where it was.
+        assert!(!project.move_placement(0, 0, MAX_SONG_STEPS as u32 - 4));
+        assert!(project.placed(0, 0));
+    }
 
-        assert!(project.remove_bar(1));
-        assert_eq!(project.bars(), 2);
-        assert!(project.bar_has(1, second));
-        assert!(!project.remove_bar(9));
+    #[test]
+    fn a_block_is_at_least_one_step_long() {
+        let mut project = Project::default();
+        project.place(0, 0, 0);
+        assert!(project.resize_placement(0, 0, 0));
+        assert_eq!(project.placement_at(0, 0).unwrap().length, 1);
+        assert!(project.placement_at(0, 1).is_none());
+    }
+
+    #[test]
+    fn clearing_a_bar_takes_out_everything_that_starts_in_it() {
+        let mut project = Project::default();
+        let short = project.add_pattern().unwrap();
+        project.set_pattern_steps(short, 4);
+        // Four short placements across the first bar, and one in the second.
+        for step in [0, 4, 8, 12, 16] {
+            project.place(short, step, 0);
+        }
+        project.place(0, 0, 0);
+
+        assert_eq!(project.clear_bar(0), 5, "four short ones and the long one");
+        assert_eq!(project.song.len(), 1);
+        assert!(project.placed(short, 16));
+    }
+
+    #[test]
+    fn changing_a_length_leaves_the_song_alone() {
+        let mut project = Project::default();
+        project.set_pattern_steps(0, 4);
+        for step in [0, 4, 8, 12] {
+            project.place(0, step, 0);
+        }
+        assert_eq!(project.song.len(), 4);
+
+        // Four steps to sixteen. The blocks are the length they were put down at, so nothing
+        // piles up and nothing moves — the music the file describes does not change.
+        assert_eq!(project.set_pattern_steps(0, 16), 16);
+        assert_eq!(project.song.len(), 4);
+        assert!(project.placed(0, 12));
+        assert_eq!(project.placement_at(0, 12).unwrap().length, 4);
     }
 
     #[test]
     fn the_song_will_not_hold_a_pattern_that_does_not_exist() {
         let mut project = Project::default();
-        assert!(!project.set_bar_pattern(0, 7, true));
+        assert!(!project.place(7, 0, 0));
+        assert!(project.song.is_empty());
+    }
+
+    #[test]
+    fn the_song_has_an_end_to_it() {
+        let mut project = Project::default();
+        // A step way past the longest song we hold is refused rather than wrapped.
+        assert!(!project.place(0, 100_000, 0));
+        // And so is a block that would run off the end.
+        assert!(!project.place(0, MAX_SONG_STEPS as u32 - 4, 16));
         assert!(project.song.is_empty());
     }
 
@@ -632,18 +1203,97 @@ mod tests {
     fn deleting_a_pattern_takes_it_out_of_the_song() {
         let mut project = Project::default();
         let second = project.add_pattern().unwrap();
-        project.set_bar_pattern(0, 0, true);
-        project.set_bar_pattern(0, second, true);
-        project.set_bar_pattern(1, second, true);
+        project.place(0, 0, 0);
+        project.place(second, 0, 0);
+        project.place(second, 16, 0);
 
         assert!(project.remove_pattern(second));
-        assert_eq!(project.bar(0), &[0]);
-        // Bar 1 held nothing else, so the song is one bar long again.
-        assert_eq!(project.bars(), 1);
+        assert_eq!(project.song.len(), 1);
+        assert!(project.placed(0, 0));
 
         // The last pattern stays put, whatever anyone asks.
         assert!(!project.remove_pattern(0));
         assert_eq!(project.patterns.len(), 1);
+    }
+
+    /// Being an instrument is the pattern's business, so two patterns can disagree about the
+    /// same track.
+    #[test]
+    fn a_track_can_be_an_instrument_in_one_pattern_and_a_drum_in_another() {
+        let mut project = kit();
+        let second = project.add_pattern().unwrap();
+        assert!(project.pattern_mut(second).unwrap().set_pitched(0, true));
+        assert!(project.pattern(second).unwrap().is_pitched(0));
+        assert!(!project.pattern(0).unwrap().is_pitched(0));
+        assert_eq!(project.pattern(second).unwrap().pitched_mask(), 1);
+        assert_eq!(project.pattern(0).unwrap().pitched_mask(), 0);
+
+        // A copy of a pattern carries it, because it is part of the part.
+        let copy = project.duplicate_pattern(second).unwrap();
+        assert!(project.pattern(copy).unwrap().is_pitched(0));
+
+        // And deleting the track takes it out of every pattern.
+        project.remove_track(0);
+        assert!(!project.pattern(second).unwrap().is_pitched(0));
+    }
+
+    /// The mixer used to belong to the track, which meant every pattern. An old project has
+    /// to sound the way it did, so opening one writes what the track said into every pattern.
+    #[test]
+    fn an_old_project_keeps_its_mixer() {
+        let mut project = kit();
+        project.add_pattern().unwrap();
+        {
+            let track = project.track_mut(1).unwrap();
+            track.pitched = true;
+            track.gain = 0.25;
+            track.muted = true;
+        }
+
+        project.repair();
+        for pattern in &project.patterns {
+            let mix = pattern.mix_of(1);
+            assert!(mix.pitched, "pattern {} lost the instrument", pattern.id);
+            assert_eq!(mix.gain, 0.25, "pattern {} lost the level", pattern.id);
+            assert!(mix.muted, "pattern {} lost the mute", pattern.id);
+            // And a track nobody touched is left out of it entirely.
+            assert_eq!(pattern.mix_of(0), TrackMix::new(0));
+            assert!(pattern.mix.iter().all(|one| one.track != 0));
+        }
+        let track = project.track(1).unwrap();
+        assert!(
+            track.mixer_untouched(),
+            "the old fields are still set, so they would be read again"
+        );
+    }
+
+    /// Something the pattern says for itself wins: it was written by a version that already
+    /// knew the mixer belonged to the pattern.
+    #[test]
+    fn what_a_pattern_says_beats_what_the_track_used_to() {
+        let mut project = kit();
+        project.pattern_mut(0).unwrap().set_gain(1, 1.2);
+        project.track_mut(1).unwrap().gain = 0.25;
+
+        project.repair();
+        assert_eq!(project.pattern(0).unwrap().mix_of(1).gain, 1.2);
+    }
+
+    /// Turning something back to where it started leaves nothing behind.
+    #[test]
+    fn a_mixer_nobody_has_touched_is_not_written_down() {
+        let mut project = kit();
+        let pattern = project.pattern_mut(0).unwrap();
+        pattern.set_gain(0, 0.3);
+        assert_eq!(pattern.mix.len(), 1);
+        pattern.set_gain(0, DEFAULT_TRACK_GAIN);
+        assert!(pattern.mix.is_empty(), "an untouched record was kept");
+
+        // Unless something else about it is still changed.
+        pattern.set_muted(0, true);
+        pattern.set_gain(0, DEFAULT_TRACK_GAIN);
+        assert_eq!(pattern.mix.len(), 1);
+        assert!(pattern.mix_of(0).muted);
     }
 
     #[test]
@@ -681,12 +1331,12 @@ mod tests {
             }),
         ));
         let second = project.add_pattern().unwrap();
-        project.pattern_mut(second).unwrap().set_steps(32);
+        project.set_pattern_steps(second, 32);
         project.pattern_mut(0).unwrap().set_step(0, 0, true);
         project.pattern_mut(second).unwrap().set_step(0, 8, true);
-        project.set_bar_pattern(0, 0, true);
-        project.set_bar_pattern(0, second, true);
-        project.set_bar_pattern(1, second, true);
+        project.place(0, 0, 0);
+        project.place(second, 0, 0);
+        project.place(second, 32, 0);
 
         let json = serde_json::to_string(&project).unwrap();
         let back: Project = serde_json::from_str(&json).unwrap();
@@ -700,6 +1350,11 @@ mod tests {
         assert_eq!(back.patterns.len(), 2);
         assert_eq!(back.pattern(second).unwrap().steps, 32);
         assert!(back.pattern(second).unwrap().has_step(0, 8));
-        assert_eq!(back.song, vec![vec![0, second], vec![second]]);
+        assert_eq!(back.song.len(), 3);
+        assert_eq!(
+            back.placement_at(second, 40).unwrap().length,
+            32,
+            "a thirty two step pattern, and the block knows it is that long"
+        );
     }
 }
