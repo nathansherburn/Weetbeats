@@ -709,6 +709,52 @@ fn the_mixer_belongs_to_the_pattern() {
     );
 }
 
+/// Dragging a fader down while it plays takes what is already sounding with it. Not just the
+/// next hit: a note that is ringing gets quieter as you move it, which is the whole point of
+/// a fader you can reach mid-take.
+#[test]
+fn a_fader_moved_mid_note_takes_the_note_with_it() {
+    let mut rig = Rig::new(120.0, 16);
+    // One long sample, hit once, so there is something still ringing to turn down. Well
+    // under the clipper, so the levels either side can be compared as a plain ratio.
+    track_with_gain(&mut rig, 0, dc_sample(200_000), 0.2);
+    rig.send(Command::SetNote {
+        pattern: 0,
+        track: 0,
+        note: note(0),
+    });
+    rig.send(Command::SetPlaying(true));
+    let out = rig.render_chunked(3000, 256);
+    let loud = peak(&out[2000 * 2..]);
+    assert!(loud > 0.1, "nothing was ringing to turn down: {loud}");
+
+    // A quarter of the level, while the same note is still going.
+    rig.send(Command::SetPatternGain {
+        pattern: 0,
+        track: 0,
+        gain: 0.05,
+    });
+    let out = rig.render_chunked(3000, 256);
+    let quiet = peak(&out[2000 * 2..]);
+    assert!(
+        (quiet / loud - 0.25).abs() < 0.05,
+        "the note that was already sounding did not follow the fader: {loud} then {quiet}"
+    );
+
+    // And it slid there rather than stepping: no jump bigger than the ramp itself.
+    let worst = out
+        .chunks(2)
+        .map(|c| c[0])
+        .collect::<Vec<_>>()
+        .windows(2)
+        .map(|w| (w[1] - w[0]).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        worst < 0.01,
+        "the fader stepped rather than slid: jump of {worst}"
+    );
+}
+
 /// A mute has to take what is already sounding down with it, or it is not a mute. The fader
 /// slides rather than jumping while the transport is running, for the same reason.
 #[test]
