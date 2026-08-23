@@ -82,9 +82,15 @@ the note is. Press **♪** on a track and it becomes an instrument instead — t
 pitched across the keyboard, faster for higher notes and slower for lower ones, and a note
 **stops when it ends**. Press it again and it is a drum again.
 
-That switch belongs to the **pattern**, not to the track: it is a decision about the part, not
-about the sound. The same bass can hold a rhythm down as a row of boxes in one pattern and
-play a melody in the next, and turning the roll off in one says nothing about any other.
+That switch belongs to the **pattern**, not to the track — and so does the rest of the row:
+how loud, muted, soloed. All four are decisions about the part, not about the sound. The same
+bass can hold a rhythm down as a row of boxes in one pattern and play a melody in the next,
+loud in the chorus and half its level in the verse, and turning any of it off in one pattern
+says nothing about any other.
+
+Solo means "in this pattern, only the soloed tracks". Several patterns play at once in a song,
+so each applies its own — which is also a way to write "just the kick in the intro" without
+deleting anything.
 
 That one switch also changes what its row looks like. An instrument's row is a **small piano
 roll** of its own notes rather than a line of boxes, because boxes cannot say which pitch or
@@ -224,6 +230,22 @@ how a project ended up with blocks nobody could click: they were written on one 
 tested on another. Both halves of that are fixed. Blocks are hit tested over their own length,
 wherever they sit, and opening a project never moves anything — the only thing it throws away
 is a block whose pattern is gone.
+
+### The mixer belongs to the pattern
+
+How loud a track is, whether it is heard, and whether it is an instrument are all per pattern,
+kept as one record per track in each pattern — and only for the tracks somebody has actually
+touched, so a project full of patterns nobody has mixed costs nothing.
+
+A fader still slides rather than jumping, and a mute still takes what is already ringing down
+with it, which means the audio thread cannot bake a level into a note and forget it: every
+voice carries the pattern that started it, and the mixer keeps a level per pattern per track —
+a thousand floats, worked out once a block. A change made while the transport is stopped jumps
+instead, because there is nothing sounding to zipper, and because a whole project arriving at
+once would otherwise ramp every level up from the default and make the first bar loud.
+
+An audition — clicking a row, or a key in the roll — belongs to no pattern and plays at unity.
+Hearing a sound should not be quiet because some pattern has it turned down.
 
 ### Undo is a copy of the whole project
 

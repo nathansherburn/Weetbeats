@@ -29,12 +29,10 @@ pub enum Command {
     Rewind,
     SetBpm(f32),
     SetMasterGain(f32),
-    /// Claim a slot at a starting gain. A track with no sample is silent but keeps its
-    /// notes. The gain is set, not slid to: a track that has just appeared has no sound of
-    /// its own to click against, and fading it in would only make its first hit quiet.
+    /// Claim a slot. A track with no sample is silent but keeps its notes. How loud it is
+    /// belongs to each pattern, so there is nothing to say about level here.
     AddTrack {
         track: u16,
-        gain: f32,
     },
     /// Free a slot, release anything it was holding, and forget its notes in every pattern.
     RemoveTrack {
@@ -44,15 +42,22 @@ pub enum Command {
         track: u16,
         sample: Option<Arc<Sample>>,
     },
-    SetTrackGain {
+    /// How loud a track is in one pattern. Slides to its new value rather than jumping, so
+    /// a fader moved while it plays takes what is already sounding with it.
+    SetPatternGain {
+        pattern: u16,
         track: u16,
         gain: f32,
     },
-    SetTrackMuted {
+    /// Silent in this pattern. Fades out rather than cutting, for the same reason.
+    SetPatternMuted {
+        pattern: u16,
         track: u16,
         muted: bool,
     },
-    SetTrackSoloed {
+    /// Anything soloed in a pattern means only the soloed tracks are heard in it.
+    SetPatternSoloed {
+        pattern: u16,
         track: u16,
         soloed: bool,
     },
@@ -61,8 +66,8 @@ pub enum Command {
     /// is, and only its notes at the sampler's own pitch sound at all, because a row of boxes
     /// cannot show any others.
     ///
-    /// Per pattern: the same sound can hold down a rhythm in one and play a melody in the
-    /// next.
+    /// Per pattern, like the rest of the mixer: the same sound can hold down a rhythm in one
+    /// and play a melody in the next.
     SetPatternPitched {
         pattern: u16,
         track: u16,

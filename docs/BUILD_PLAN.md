@@ -185,6 +185,11 @@ Opening the piano roll on a track turns the flag on, because a roll full of pitc
 
 That one flag also decides what the row looks like in the step grid, because it is the same fact seen twice: an instrument's notes mean a pitch and a length, so its row is a small piano roll of them; a one-shot's notes mean "here", so its row is a line of boxes. There is no third state where the sound and the row disagree.
 
+The rest of the row went with it — how loud, muted, soloed — so the whole of a track's place
+in a pattern belongs to the pattern. Only the tracks somebody has touched are written down.
+The audio thread keeps a level per pattern per track and every voice remembers which pattern
+started it, so a fader still slides and a mute still catches what is already ringing.
+
 It decides what *sounds* too: a row of boxes plays only the notes a box can mean, the ones at the sampler's own pitch. A melody written in the roll goes quiet when the row goes back to boxes and comes back when it does — nothing is deleted, but nothing plays that the window is not showing.
 
 ## Stage 4 - Piano roll

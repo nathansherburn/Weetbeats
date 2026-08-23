@@ -21,8 +21,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    DEFAULT_PITCH, DEFAULT_STEPS, MAX_NOTES_PER_TRACK, MAX_PATTERNS, MAX_PLACEMENTS,
-    MAX_SONG_STEPS, MAX_STEPS, MAX_TRACKS, STEPS_PER_BAR,
+    DEFAULT_PITCH, DEFAULT_STEPS, DEFAULT_TRACK_GAIN, MAX_NOTES_PER_TRACK, MAX_PATTERNS,
+    MAX_PLACEMENTS, MAX_SONG_STEPS, MAX_STEPS, MAX_TRACKS, STEPS_PER_BAR,
 };
 
 /// Bumped whenever the on-disk shape changes. Version 1 never reached a file — stage 1 had
@@ -69,20 +69,20 @@ pub struct Track {
     pub id: u16,
     pub name: String,
     pub sample: Option<SampleRef>,
-    /// Linear, 0.0 to 1.5. 1.0 is unity.
+    /// How loud, whether it is heard, and whether it is an instrument — all left over from
+    /// when they belonged to the track rather than to each pattern.
+    ///
+    /// Read once on the way in, by [`Project::repair`], which writes them into every pattern
+    /// and then puts them back to their defaults, so a project written before the mixer moved
+    /// sounds the way it did. Never meaningful in a file this version wrote.
+    #[serde(default = "default_gain")]
     pub gain: f32,
+    #[serde(default)]
     pub muted: bool,
+    #[serde(default)]
     pub soloed: bool,
-    /// Left over from when being an instrument belonged to the track rather than to each
-    /// pattern. Only read on the way in, by [`Project::repair`], which marks every pattern
-    /// for a track that was pitched and then clears this — so an old project still sounds
-    /// the way it did. Never written by this version.
-    #[serde(default, skip_serializing_if = "not")]
+    #[serde(default)]
     pub pitched: bool,
-}
-
-fn not(flag: &bool) -> bool {
-    !*flag
 }
 
 impl Track {
@@ -91,11 +91,17 @@ impl Track {
             id,
             name,
             sample,
-            gain: 0.8,
+            gain: DEFAULT_TRACK_GAIN,
             muted: false,
             soloed: false,
             pitched: false,
         }
+    }
+
+    /// True when nothing in the old per-track mixer was ever moved, so there is nothing to
+    /// carry into the patterns.
+    fn mixer_untouched(&self) -> bool {
+        self.gain == DEFAULT_TRACK_GAIN && !self.muted && !self.soloed && !self.pitched
     }
 }
 
@@ -194,6 +200,54 @@ impl Lane {
     }
 }
 
+/// How one track sits in one pattern: how loud, whether it is heard, and whether it is
+/// played as an instrument or as a one-shot.
+///
+/// Per pattern, because all four are decisions about the part rather than about the sound.
+/// The same kick can be loud in the chorus and half its level in the verse, and the same bass
+/// can hold a rhythm down as a row of boxes in one pattern and play a melody in the next.
+///
+/// Only tracks that differ from the default get one of these, so a project full of patterns
+/// nobody has touched the mixer in costs nothing.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackMix {
+    pub track: u16,
+    /// Linear, 0.0 to 1.5. 1.0 is unity.
+    #[serde(default = "default_gain")]
+    pub gain: f32,
+    #[serde(default)]
+    pub muted: bool,
+    #[serde(default)]
+    pub soloed: bool,
+    /// A sampler instrument rather than a one-shot: pitched across the keyboard, each note
+    /// stopping when it ends, and edited as a piano roll instead of a row of boxes.
+    #[serde(default)]
+    pub pitched: bool,
+}
+
+fn default_gain() -> f32 {
+    DEFAULT_TRACK_GAIN
+}
+
+impl TrackMix {
+    pub fn new(track: u16) -> Self {
+        TrackMix {
+            track,
+            gain: DEFAULT_TRACK_GAIN,
+            muted: false,
+            soloed: false,
+            pitched: false,
+        }
+    }
+
+    /// True when nothing has been changed from how a new pattern starts, which is when the
+    /// record is not worth writing down.
+    pub fn untouched(&self) -> bool {
+        *self == TrackMix::new(self.track)
+    }
+}
+
 /// A pattern: a name, a length in steps, and the notes played in it.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -208,13 +262,12 @@ pub struct Pattern {
     /// front end picks from the pattern's id so a new pattern looks different from the last.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub colour: Option<u8>,
-    /// The tracks played as instruments *in this pattern*: pitched across the keyboard, with
-    /// each note stopping when it ends, and edited as a piano roll rather than a row of
-    /// boxes. Everything else is a one-shot here — hit it and the whole sample plays.
-    ///
-    /// Per pattern rather than per track, because it is a decision about the part, not about
-    /// the sound: the same bass can be a row of boxes holding down a rhythm in one pattern
-    /// and a melody in the next.
+    /// How each track sits in this pattern. Only the ones that differ from the default are
+    /// in here; [`Pattern::mix_of`] answers for the rest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mix: Vec<TrackMix>,
+    /// Left over from the version that kept only the instruments, as a list of track ids.
+    /// Folded into `mix` by [`Project::repair`] and then cleared. Never written.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pitched: Vec<u16>,
     pub lanes: Vec<Lane>,
@@ -227,40 +280,72 @@ impl Pattern {
             name,
             steps: DEFAULT_STEPS,
             colour: None,
+            mix: Vec::new(),
             pitched: Vec::new(),
             lanes: Vec::new(),
         }
     }
 
-    /// True if this track is an instrument in this pattern rather than a one-shot.
-    pub fn is_pitched(&self, track: u16) -> bool {
-        self.pitched.contains(&track)
+    /// How a track sits in this pattern. Every track has an answer, whether or not anybody
+    /// has touched it.
+    pub fn mix_of(&self, track: u16) -> TrackMix {
+        self.mix
+            .iter()
+            .find(|one| one.track == track)
+            .copied()
+            .unwrap_or_else(|| TrackMix::new(track))
     }
 
-    /// Make a track an instrument in this pattern, or a one-shot again. Returns what it is
-    /// now. Nothing is thrown away either way: the notes are the same notes, and turning it
-    /// back on shows them again.
-    pub fn set_pitched(&mut self, track: u16, pitched: bool) -> bool {
-        let at = self.pitched.iter().position(|&t| t == track);
-        match (pitched, at) {
-            (true, None) => {
-                self.pitched.push(track);
-                self.pitched.sort_unstable();
-            }
-            (false, Some(at)) => {
-                self.pitched.remove(at);
-            }
-            _ => {}
+    /// The same, to write into. Makes the record if there is not one yet.
+    fn mix_mut(&mut self, track: u16) -> &mut TrackMix {
+        if let Some(at) = self.mix.iter().position(|one| one.track == track) {
+            return &mut self.mix[at];
         }
+        self.mix.push(TrackMix::new(track));
+        self.mix.sort_unstable_by_key(|one| one.track);
+        let at = self.mix.iter().position(|one| one.track == track).unwrap();
+        &mut self.mix[at]
+    }
+
+    /// Change one thing about how a track sits in this pattern, and throw the record away
+    /// again if it is back to how a new pattern starts.
+    pub fn set_mix(&mut self, track: u16, change: impl FnOnce(&mut TrackMix)) {
+        change(self.mix_mut(track));
+        self.mix.retain(|one| !one.untouched());
+    }
+
+    pub fn set_gain(&mut self, track: u16, gain: f32) -> f32 {
+        let settled = gain.clamp(0.0, 1.5);
+        self.set_mix(track, |mix| mix.gain = settled);
+        settled
+    }
+
+    pub fn set_muted(&mut self, track: u16, muted: bool) {
+        self.set_mix(track, |mix| mix.muted = muted);
+    }
+
+    pub fn set_soloed(&mut self, track: u16, soloed: bool) {
+        self.set_mix(track, |mix| mix.soloed = soloed);
+    }
+
+    /// True if this track is an instrument in this pattern rather than a one-shot.
+    pub fn is_pitched(&self, track: u16) -> bool {
+        self.mix_of(track).pitched
+    }
+
+    /// Make a track an instrument in this pattern, or a one-shot again. Nothing is thrown
+    /// away either way: the notes are the same notes, and turning it back on shows them.
+    pub fn set_pitched(&mut self, track: u16, pitched: bool) -> bool {
+        self.set_mix(track, |mix| mix.pitched = pitched);
         pitched
     }
 
     /// The instruments, as one bit per track, which is how the audio thread holds them.
     pub fn pitched_mask(&self) -> u32 {
-        self.pitched
+        self.mix
             .iter()
-            .filter(|&&t| (t as usize) < MAX_TRACKS)
-            .fold(0u32, |mask, &t| mask | (1 << t))
+            .filter(|one| one.pitched && (one.track as usize) < MAX_TRACKS)
+            .fold(0u32, |mask, one| mask | (1 << one.track))
     }
 
     pub fn lane(&self, track: u16) -> Option<&Lane> {
@@ -321,6 +406,7 @@ impl Pattern {
     /// Forget a track that has been deleted from the project.
     pub fn forget_track(&mut self, track: u16) {
         self.lanes.retain(|l| l.track != track);
+        self.mix.retain(|one| one.track != track);
         self.pitched.retain(|&t| t != track);
     }
 }
@@ -523,24 +609,44 @@ impl Project {
 
     /// Take out the placement of a pattern that starts here.
     pub fn unplace(&mut self, pattern: u16, step: u32) -> bool {
-        // Being an instrument used to belong to the track, so it was the same in every
-        // pattern. Carry that into every pattern, which is what it sounded like, and clear
-        // the old flag so it is never read again.
-        let was_pitched: Vec<u16> = self
+        // How loud a track is, whether it is heard and whether it is an instrument all used
+        // to belong to the track, so they were the same in every pattern. Carry them into
+        // every pattern — which is what the project sounded like — and put the old fields
+        // back to their defaults so they are never read again.
+        let carried: Vec<TrackMix> = self
             .tracks
             .iter()
-            .filter(|track| track.pitched)
-            .map(|track| track.id)
+            .filter(|track| !track.mixer_untouched())
+            .map(|track| TrackMix {
+                track: track.id,
+                gain: track.gain,
+                muted: track.muted,
+                soloed: track.soloed,
+                pitched: track.pitched,
+            })
             .collect();
-        if !was_pitched.is_empty() {
-            for pattern in &mut self.patterns {
-                for &track in &was_pitched {
-                    pattern.set_pitched(track, true);
+        for pattern in &mut self.patterns {
+            // A list of instruments, from the version between the two.
+            let listed = std::mem::take(&mut pattern.pitched);
+            for track in listed {
+                pattern.set_pitched(track, true);
+            }
+            for was in &carried {
+                // Whatever the pattern says for itself wins: it was written later.
+                if pattern.mix.iter().any(|one| one.track == was.track) {
+                    continue;
                 }
+                pattern.set_mix(was.track, |mix| *mix = *was);
             }
-            for track in &mut self.tracks {
-                track.pitched = false;
-            }
+            // A record for a track that is gone is only in the way.
+            let live: Vec<u16> = self.tracks.iter().map(|t| t.id).collect();
+            pattern.mix.retain(|one| live.contains(&one.track));
+        }
+        for track in &mut self.tracks {
+            track.gain = DEFAULT_TRACK_GAIN;
+            track.muted = false;
+            track.soloed = false;
+            track.pitched = false;
         }
         let before = self.song.len();
         self.song
@@ -581,24 +687,44 @@ impl Project {
     pub fn clear_bar(&mut self, bar: u32) -> usize {
         let from = bar * STEPS_PER_BAR;
         let to = from + STEPS_PER_BAR;
-        // Being an instrument used to belong to the track, so it was the same in every
-        // pattern. Carry that into every pattern, which is what it sounded like, and clear
-        // the old flag so it is never read again.
-        let was_pitched: Vec<u16> = self
+        // How loud a track is, whether it is heard and whether it is an instrument all used
+        // to belong to the track, so they were the same in every pattern. Carry them into
+        // every pattern — which is what the project sounded like — and put the old fields
+        // back to their defaults so they are never read again.
+        let carried: Vec<TrackMix> = self
             .tracks
             .iter()
-            .filter(|track| track.pitched)
-            .map(|track| track.id)
+            .filter(|track| !track.mixer_untouched())
+            .map(|track| TrackMix {
+                track: track.id,
+                gain: track.gain,
+                muted: track.muted,
+                soloed: track.soloed,
+                pitched: track.pitched,
+            })
             .collect();
-        if !was_pitched.is_empty() {
-            for pattern in &mut self.patterns {
-                for &track in &was_pitched {
-                    pattern.set_pitched(track, true);
+        for pattern in &mut self.patterns {
+            // A list of instruments, from the version between the two.
+            let listed = std::mem::take(&mut pattern.pitched);
+            for track in listed {
+                pattern.set_pitched(track, true);
+            }
+            for was in &carried {
+                // Whatever the pattern says for itself wins: it was written later.
+                if pattern.mix.iter().any(|one| one.track == was.track) {
+                    continue;
                 }
+                pattern.set_mix(was.track, |mix| *mix = *was);
             }
-            for track in &mut self.tracks {
-                track.pitched = false;
-            }
+            // A record for a track that is gone is only in the way.
+            let live: Vec<u16> = self.tracks.iter().map(|t| t.id).collect();
+            pattern.mix.retain(|one| live.contains(&one.track));
+        }
+        for track in &mut self.tracks {
+            track.gain = DEFAULT_TRACK_GAIN;
+            track.muted = false;
+            track.soloed = false;
+            track.pitched = false;
         }
         let before = self.song.len();
         self.song.retain(|p| p.step < from || p.step >= to);
@@ -639,24 +765,44 @@ impl Project {
             .iter()
             .map(|pattern| (pattern.id, pattern.steps.max(1)))
             .collect();
-        // Being an instrument used to belong to the track, so it was the same in every
-        // pattern. Carry that into every pattern, which is what it sounded like, and clear
-        // the old flag so it is never read again.
-        let was_pitched: Vec<u16> = self
+        // How loud a track is, whether it is heard and whether it is an instrument all used
+        // to belong to the track, so they were the same in every pattern. Carry them into
+        // every pattern — which is what the project sounded like — and put the old fields
+        // back to their defaults so they are never read again.
+        let carried: Vec<TrackMix> = self
             .tracks
             .iter()
-            .filter(|track| track.pitched)
-            .map(|track| track.id)
+            .filter(|track| !track.mixer_untouched())
+            .map(|track| TrackMix {
+                track: track.id,
+                gain: track.gain,
+                muted: track.muted,
+                soloed: track.soloed,
+                pitched: track.pitched,
+            })
             .collect();
-        if !was_pitched.is_empty() {
-            for pattern in &mut self.patterns {
-                for &track in &was_pitched {
-                    pattern.set_pitched(track, true);
+        for pattern in &mut self.patterns {
+            // A list of instruments, from the version between the two.
+            let listed = std::mem::take(&mut pattern.pitched);
+            for track in listed {
+                pattern.set_pitched(track, true);
+            }
+            for was in &carried {
+                // Whatever the pattern says for itself wins: it was written later.
+                if pattern.mix.iter().any(|one| one.track == was.track) {
+                    continue;
                 }
+                pattern.set_mix(was.track, |mix| *mix = *was);
             }
-            for track in &mut self.tracks {
-                track.pitched = false;
-            }
+            // A record for a track that is gone is only in the way.
+            let live: Vec<u16> = self.tracks.iter().map(|t| t.id).collect();
+            pattern.mix.retain(|one| live.contains(&one.track));
+        }
+        for track in &mut self.tracks {
+            track.gain = DEFAULT_TRACK_GAIN;
+            track.muted = false;
+            track.soloed = false;
+            track.pitched = false;
         }
         let before = self.song.len();
         // A placement of a pattern that is not there any more can only confuse things.
@@ -1091,23 +1237,63 @@ mod tests {
         assert!(!project.pattern(second).unwrap().is_pitched(0));
     }
 
-    /// It used to belong to the track, which meant every pattern. An old project has to sound
-    /// the way it did, so opening one marks every pattern for a track that was pitched.
+    /// The mixer used to belong to the track, which meant every pattern. An old project has
+    /// to sound the way it did, so opening one writes what the track said into every pattern.
     #[test]
-    fn an_old_project_keeps_its_instruments() {
+    fn an_old_project_keeps_its_mixer() {
         let mut project = kit();
         project.add_pattern().unwrap();
-        project.track_mut(1).unwrap().pitched = true;
+        {
+            let track = project.track_mut(1).unwrap();
+            track.pitched = true;
+            track.gain = 0.25;
+            track.muted = true;
+        }
 
         project.repair();
         for pattern in &project.patterns {
-            assert!(pattern.is_pitched(1), "pattern {} lost it", pattern.id);
-            assert!(!pattern.is_pitched(0));
+            let mix = pattern.mix_of(1);
+            assert!(mix.pitched, "pattern {} lost the instrument", pattern.id);
+            assert_eq!(mix.gain, 0.25, "pattern {} lost the level", pattern.id);
+            assert!(mix.muted, "pattern {} lost the mute", pattern.id);
+            // And a track nobody touched is left out of it entirely.
+            assert_eq!(pattern.mix_of(0), TrackMix::new(0));
+            assert!(pattern.mix.iter().all(|one| one.track != 0));
         }
+        let track = project.track(1).unwrap();
         assert!(
-            !project.track(1).unwrap().pitched,
-            "the old flag is still set, so it would be read again"
+            track.mixer_untouched(),
+            "the old fields are still set, so they would be read again"
         );
+    }
+
+    /// Something the pattern says for itself wins: it was written by a version that already
+    /// knew the mixer belonged to the pattern.
+    #[test]
+    fn what_a_pattern_says_beats_what_the_track_used_to() {
+        let mut project = kit();
+        project.pattern_mut(0).unwrap().set_gain(1, 1.2);
+        project.track_mut(1).unwrap().gain = 0.25;
+
+        project.repair();
+        assert_eq!(project.pattern(0).unwrap().mix_of(1).gain, 1.2);
+    }
+
+    /// Turning something back to where it started leaves nothing behind.
+    #[test]
+    fn a_mixer_nobody_has_touched_is_not_written_down() {
+        let mut project = kit();
+        let pattern = project.pattern_mut(0).unwrap();
+        pattern.set_gain(0, 0.3);
+        assert_eq!(pattern.mix.len(), 1);
+        pattern.set_gain(0, DEFAULT_TRACK_GAIN);
+        assert!(pattern.mix.is_empty(), "an untouched record was kept");
+
+        // Unless something else about it is still changed.
+        pattern.set_muted(0, true);
+        pattern.set_gain(0, DEFAULT_TRACK_GAIN);
+        assert_eq!(pattern.mix.len(), 1);
+        assert!(pattern.mix_of(0).muted);
     }
 
     #[test]

@@ -22,7 +22,7 @@ const fake = {
   songMode: false,
   nextTrackId: 0,
   tracks: new Map(),
-  patterns: [{ id: 0, name: "Pattern 1", steps: 16, pitched: [], lanes: [] }],
+  patterns: [{ id: 0, name: "Pattern 1", steps: 16, mix: [], lanes: [] }],
   // { step, pattern, length }: what plays where, and for how long.
   song: [],
   name: "Untitled",
@@ -75,6 +75,27 @@ function trim(p) {
 
 const arrangement = () => ({ patterns: fake.patterns, song: fake.song });
 
+/* How a track sits in a pattern, made on the spot if nobody has touched it yet. */
+const DEFAULT_GAIN = 0.8;
+
+function setMix(id, track, change) {
+  const p = pattern(id);
+  if (!p) return null;
+  p.mix = p.mix ?? [];
+  let mix = p.mix.find((one) => one.track === track);
+  if (!mix) {
+    mix = { track, gain: DEFAULT_GAIN, muted: false, soloed: false, pitched: false };
+    p.mix.push(mix);
+    p.mix.sort((a, b) => a.track - b.track);
+  }
+  Object.assign(mix, change);
+  // Nothing worth writing down about a track nobody has touched.
+  p.mix = p.mix.filter(
+    (one) => one.gain !== DEFAULT_GAIN || one.muted || one.soloed || one.pitched,
+  );
+  return null;
+}
+
 /* The block of a pattern that covers a step, which is what the song view hit tests. */
 const covering = (id, step) =>
   fake.song.find(
@@ -116,9 +137,6 @@ function addAll(paths) {
       name,
       // Rust copies the file into the project folder and refers to it from there.
       sample: { path: `samples/${base}`, name },
-      gain: 0.8,
-      muted: false,
-      soloed: false,
     };
     fake.tracks.set(id, track);
     added.tracks.push({ track, peaks: fake.peaks });
@@ -135,7 +153,7 @@ const handlers = {
     fake.tracks.delete(id);
     for (const p of fake.patterns) {
       p.lanes = p.lanes.filter((l) => l.track !== id);
-      p.pitched = (p.pitched ?? []).filter((t) => t !== id);
+      p.mix = (p.mix ?? []).filter((one) => one.track !== id);
     }
     return null;
   },
@@ -149,18 +167,13 @@ const handlers = {
     p.lanes = p.lanes.filter((one) => one.notes.length);
     return on;
   },
-  set_track_gain: ({ id, gain }) => { fake.tracks.get(id).gain = gain; return null; },
-  set_track_muted: ({ id, muted }) => { fake.tracks.get(id).muted = muted; return null; },
-  set_track_soloed: ({ id, soloed }) => { fake.tracks.get(id).soloed = soloed; return null; },
-  // Which tracks are instruments belongs to the pattern, not to the track.
-  set_pattern_pitched: ({ pattern: id, track, pitched }) => {
-    const p = pattern(id);
-    if (!p) return null;
-    p.pitched = (p.pitched ?? []).filter((t) => t !== track);
-    if (pitched) p.pitched.push(track);
-    p.pitched.sort((a, b) => a - b);
-    return null;
-  },
+  // The whole mixer belongs to the pattern, not to the track: how loud, what is heard, and
+  // which tracks are instruments. Mirrors Pattern::set_mix, including throwing the record
+  // away again when it is back to how a new pattern starts.
+  set_pattern_gain: ({ pattern: id, track, gain }) => setMix(id, track, { gain }),
+  set_pattern_muted: ({ pattern: id, track, muted }) => setMix(id, track, { muted }),
+  set_pattern_soloed: ({ pattern: id, track, soloed }) => setMix(id, track, { soloed }),
+  set_pattern_pitched: ({ pattern: id, track, pitched }) => setMix(id, track, { pitched }),
 
   // The piano roll's three commands. A note is identified by where it is.
   set_note: ({ pattern: id, track, at, velocity, length }) => {
@@ -206,7 +219,7 @@ const handlers = {
   add_pattern: () => {
     const id = freeId(fake.patterns.map((p) => p.id));
     if (id === null) throw new Error("that is as many patterns as there is room for");
-    fake.patterns.push({ id, name: nextName(), steps: 16, pitched: [], lanes: [] });
+    fake.patterns.push({ id, name: nextName(), steps: 16, mix: [], lanes: [] });
     return arrangement();
   },
   duplicate_pattern: ({ id }) => {
@@ -382,9 +395,9 @@ const EDITS = {
   add_instruments: "tracks",
   add_dropped: "tracks",
   remove_track: "tracks",
-  set_track_gain: "gain",
-  set_track_muted: "mute",
-  set_track_soloed: "solo",
+  set_pattern_gain: "gain",
+  set_pattern_muted: "mute",
+  set_pattern_soloed: "solo",
   set_pattern_pitched: "pitched",
   set_step: "boxes",
   set_note: "notes",

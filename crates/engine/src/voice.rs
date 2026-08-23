@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::command::TrashBin;
 use crate::sample::Sample;
-use crate::{MAX_VOICES, PREVIEW_TRACK};
+use crate::{MAX_TRACKS, MAX_VOICES, PREVIEW_PATTERN, PREVIEW_TRACK};
 
 /// Fade in at the start of every note. Two hundred frames is about 4ms at 48k, enough to
 /// swallow the step in a sample that does not start at zero.
@@ -36,6 +36,9 @@ enum Stage {
 pub struct Trigger {
     pub sample: Arc<Sample>,
     pub track: u16,
+    /// Which pattern started it, because the mixer belongs to the pattern: a voice has to
+    /// know whose fader it is under. [`PREVIEW_PATTERN`] for anything played by hand.
+    pub pattern: u16,
     /// Frames of source audio per frame of output: device rate and pitch rolled together.
     pub ratio: f64,
     pub gain: f32,
@@ -52,6 +55,7 @@ struct Voice {
     ratio: f64,
     gain: f32,
     track: u16,
+    pattern: u16,
     /// Bigger is newer. Used to pick who gets stolen.
     age: u64,
     /// Frames of the note still to go. Counting to zero is the note off.
@@ -72,6 +76,7 @@ impl Voice {
             ratio: 1.0,
             gain: 1.0,
             track: PREVIEW_TRACK,
+            pattern: PREVIEW_PATTERN,
             age: 0,
             frames_left: f64::INFINITY,
             env: 0.0,
@@ -92,6 +97,7 @@ impl Voice {
         self.ratio = trigger.ratio;
         self.gain = trigger.gain;
         self.track = trigger.track;
+        self.pattern = trigger.pattern;
         self.age = age;
         self.frames_left = trigger.frames;
         self.env = 0.0;
@@ -199,9 +205,10 @@ impl VoicePool {
 
     /// Mix `frames` frames of every voice into an interleaved stereo buffer.
     ///
-    /// Track gain arrives as a value at the start of the block plus a per-frame increment,
-    /// so a moving fader slides across the block instead of stepping at its edge. Hot loop:
-    /// no allocation, no branching that could be hoisted, nothing that can block.
+    /// Gain arrives as a value at the start of the block plus a per-frame increment, one
+    /// pair per pattern and track, so a moving fader slides across the block instead of
+    /// stepping at its edge — and a mute takes what is already ringing down with it. Hot
+    /// loop: no allocation, no branching that could be hoisted, nothing that can block.
     pub fn render(
         &mut self,
         out: &mut [f32],
@@ -219,8 +226,10 @@ impl VoicePool {
                 continue;
             };
 
-            // Track gain of a preview voice is unity: it belongs to no track.
-            let slot = voice.track as usize;
+            // The fader this voice is under: its own pattern's, for its own track. A voice
+            // played by hand belongs to no pattern, so it falls off the end of the table and
+            // plays at unity, which is what auditioning a sound should do.
+            let slot = voice.pattern as usize * MAX_TRACKS + voice.track as usize;
             let gain = voice.gain * track_gain.get(slot).copied().unwrap_or(1.0);
             let gain_inc = voice.gain * track_gain_inc.get(slot).copied().unwrap_or(0.0);
             let end = sample.frames as f64;

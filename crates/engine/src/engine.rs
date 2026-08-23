@@ -31,8 +31,9 @@ use crate::sample::Sample;
 use crate::shared::Shared;
 use crate::voice::{Trigger, VoicePool};
 use crate::{
-    pitch_ratio, soft_clip, velocity_gain, DEFAULT_PITCH, MAX_BLOCK, MAX_NOTES_PER_TRACK,
-    MAX_PATTERNS, MAX_SONG_STEPS, MAX_STEPS, MAX_TRACKS, PREVIEW_TRACK,
+    pitch_ratio, soft_clip, velocity_gain, DEFAULT_PITCH, DEFAULT_TRACK_GAIN, MAX_BLOCK,
+    MAX_NOTES_PER_TRACK, MAX_PATTERNS, MAX_SONG_STEPS, MAX_STEPS, MAX_TRACKS, PREVIEW_PATTERN,
+    PREVIEW_TRACK,
 };
 
 /// How fast a gain change slides to its new value. About 10ms at 48k, which is slow enough
@@ -49,18 +50,12 @@ const METER_FALL_PER_SECOND: f32 = 1.6;
 
 /// One track's worth of audio thread state. Fixed size: no `Vec`, nothing to grow.
 ///
-/// Notes are not in here. A track is a sound and how loud it is, which is the project's
-/// business; the notes belong to whichever pattern they were drawn in.
+/// A track is a sound and nothing else. Its notes belong to whichever pattern they were drawn
+/// in, and so does how loud it is: see [`PatternState`].
 struct TrackState {
     /// False when the slot is free. Free slots are skipped entirely.
     active: bool,
     sample: Option<Arc<Sample>>,
-    /// Where the gain slider is.
-    target_gain: f32,
-    /// Where the gain actually is, chasing the target.
-    gain: f32,
-    muted: bool,
-    soloed: bool,
 }
 
 impl TrackState {
@@ -68,10 +63,6 @@ impl TrackState {
         TrackState {
             active: false,
             sample: None,
-            target_gain: 0.8,
-            gain: 0.8,
-            muted: false,
-            soloed: false,
         }
     }
 }
@@ -123,10 +114,18 @@ impl NoteList {
 }
 
 /// One pattern: how long it is, and what every track plays in it.
+/// One pattern: how long it is, its notes, and its mixer.
+///
+/// The mixer is per pattern because how loud a part is, and whether you hear it at all, is
+/// part of writing the part. Bitmasks for the flags because MAX_TRACKS is 32 and they are
+/// read on every step.
 struct PatternState {
     steps: u32,
-    /// One bit per track: the ones played as instruments in this pattern rather than as
-    /// one-shots. A bitmask because MAX_TRACKS is 32 and this is read on every step.
+    /// Where each fader is, in this pattern.
+    gains: [f32; MAX_TRACKS],
+    muted: u32,
+    soloed: u32,
+    /// The tracks played as instruments here rather than as one-shots.
     pitched: u32,
     tracks: Vec<NoteList>,
 }
@@ -137,6 +136,9 @@ impl PatternState {
     fn new(steps: u32) -> Self {
         PatternState {
             steps,
+            gains: [DEFAULT_TRACK_GAIN; MAX_TRACKS],
+            muted: 0,
+            soloed: 0,
             pitched: 0,
             tracks: (0..MAX_TRACKS).map(|_| NoteList::empty()).collect(),
         }
@@ -176,10 +178,14 @@ pub struct Engine {
     sample_rate: f64,
     /// Stereo scratch the voices mix into, before the master stage. Allocated once, here.
     mix: [f32; MAX_BLOCK * 2],
-    /// Track gain at the start of the current block, so the voice loop does not walk
-    /// `tracks`, and how much it moves per frame across the block.
-    gains: [f32; MAX_TRACKS],
-    gain_incs: [f32; MAX_TRACKS],
+    /// Where every pattern's faders actually are, chasing where they have been put. One per
+    /// pattern per track, indexed by [`Engine::fader`]: a thousand floats, allocated with
+    /// everything else in `new`.
+    faders: [f32; MAX_PATTERNS * MAX_TRACKS],
+    /// The same, at the start of the current block, plus how much each moves per frame
+    /// across it. The voice loop reads these rather than walking any state of its own.
+    gains: [f32; MAX_PATTERNS * MAX_TRACKS],
+    gain_incs: [f32; MAX_PATTERNS * MAX_TRACKS],
     rx: Consumer<Command>,
     trash: TrashBin,
     shared: Arc<Shared>,
@@ -222,8 +228,9 @@ impl Engine {
             master_gain_target: 0.9,
             sample_rate: sample_rate.max(1) as f64,
             mix: [0.0; MAX_BLOCK * 2],
-            gains: [0.0; MAX_TRACKS],
-            gain_incs: [0.0; MAX_TRACKS],
+            faders: [DEFAULT_TRACK_GAIN; MAX_PATTERNS * MAX_TRACKS],
+            gains: [0.0; MAX_PATTERNS * MAX_TRACKS],
+            gain_incs: [0.0; MAX_PATTERNS * MAX_TRACKS],
             rx,
             trash,
             shared,
@@ -292,28 +299,40 @@ impl Engine {
         let mix = &mut self.mix[..frames * 2];
         mix.fill(0.0);
 
-        // Solo beats mute: if anything is soloed, only soloed tracks are heard.
+        // Every pattern has its own faders, mutes and solos, because how loud a part is and
+        // whether you hear it at all is part of writing the part. A voice remembers which
+        // pattern started it, so this works out a level for every pattern and track pair and
+        // the voice loop picks the one it belongs to.
+        //
+        // Solo beats mute, within a pattern: if anything is soloed in it, only the soloed
+        // tracks are heard in it.
         //
         // Gain never jumps to its new value, it slides. A block is anywhere from 64 to
         // 1024 frames, so clamping the change per block would still be a step change at
-        // the block boundary — which is a zipper, or on a mute, a click. Instead each
-        // track gets a start value and a per-frame increment, and the voice loop
-        // interpolates. A full-scale change always takes GAIN_SMOOTHING_FRAMES.
-        let any_soloed = self.tracks.iter().any(|t| t.active && t.soloed);
+        // the block boundary — which is a zipper, or on a mute, a click. Instead each pair
+        // gets a start value and a per-frame increment, and the voice loop interpolates. A
+        // full-scale change always takes GAIN_SMOOTHING_FRAMES, whether it is a fader being
+        // dragged or a mute coming down on something already ringing.
         let max_change = self.gain_inc * frames as f32;
-        for (i, track) in self.tracks.iter_mut().enumerate() {
-            let audible = track.active
-                && if any_soloed {
-                    track.soloed
-                } else {
-                    !track.muted
-                };
-            let target = if audible { track.target_gain } else { 0.0 };
-            let start = track.gain;
-            let end = start + (target - start).clamp(-max_change, max_change);
-            track.gain = end;
-            self.gains[i] = start;
-            self.gain_incs[i] = (end - start) / frames as f32;
+        for pattern in 0..MAX_PATTERNS {
+            let state = &self.patterns[pattern];
+            let soloing = state.soloed != 0;
+            for track in 0..MAX_TRACKS {
+                let bit = 1u32 << track;
+                let audible = self.tracks[track].active
+                    && if soloing {
+                        state.soloed & bit != 0
+                    } else {
+                        state.muted & bit == 0
+                    };
+                let target = if audible { state.gains[track] } else { 0.0 };
+                let at = Self::fader(pattern, track);
+                let start = self.faders[at];
+                let end = start + (target - start).clamp(-max_change, max_change);
+                self.faders[at] = end;
+                self.gains[at] = start;
+                self.gain_incs[at] = (end - start) / frames as f32;
+            }
         }
 
         self.voices
@@ -374,6 +393,60 @@ impl Engine {
     /// Where in the `lengths` grid a step and a pattern meet.
     fn slot(step: u32, pattern: usize) -> usize {
         step as usize * MAX_PATTERNS + pattern
+    }
+
+    /// Where in the fader tables a pattern and a track meet.
+    #[inline]
+    fn fader(pattern: usize, track: usize) -> usize {
+        pattern * MAX_TRACKS + track
+    }
+
+    /// One pattern's mixer, if both it and the track exist. Guards every mixer command, so
+    /// one that arrives for something that has gone is ignored rather than a panic.
+    fn mixer(&mut self, pattern: u16, track: u16) -> Option<&mut PatternState> {
+        if (track as usize) >= MAX_TRACKS {
+            return None;
+        }
+        self.patterns.get_mut(pattern as usize)
+    }
+
+    /// Where one pattern's fader for one track is heading. Zero when the track is not heard
+    /// in that pattern, which is what makes a mute a fade rather than a cut.
+    ///
+    /// Solo beats mute, within the pattern: anything soloed in it and only the soloed tracks
+    /// are heard in it. The block prologue works this out for every pair in one pass rather
+    /// than calling this, so it can hold the pattern's state across the inner loop.
+    fn target_gain(&self, pattern: usize, track: usize) -> f32 {
+        let state = &self.patterns[pattern];
+        let bit = 1u32 << track;
+        let audible = self.tracks[track].active
+            && if state.soloed != 0 {
+                state.soloed & bit != 0
+            } else {
+                state.muted & bit == 0
+            };
+        if audible {
+            state.gains[track]
+        } else {
+            0.0
+        }
+    }
+
+    /// Put a fader where it is going without sliding.
+    ///
+    /// Sliding is for a fader moved while it plays, so that what is already sounding comes
+    /// with it. Nothing is sounding when the transport is stopped, so there is nothing to
+    /// zipper — and a whole project arriving at once, which is what opening one does, would
+    /// otherwise ramp every level up from the default and make the first bar loud.
+    fn settle(&mut self, pattern: u16, track: u16) {
+        if self.playing {
+            return;
+        }
+        let (pattern, track) = (pattern as usize, track as usize);
+        if pattern >= MAX_PATTERNS || track >= MAX_TRACKS {
+            return;
+        }
+        self.faders[Self::fader(pattern, track)] = self.target_gain(pattern, track);
     }
 
     /// Work out where each pattern is up to, given where the playhead is.
@@ -479,6 +552,7 @@ impl Engine {
                 let trigger = Trigger {
                     sample: Arc::clone(&sample),
                     track: track as u16,
+                    pattern: pattern as u16,
                     ratio: self.playback_ratio(&sample, note.pitch),
                     gain: velocity_gain(note.velocity),
                     frames: if held {
@@ -530,14 +604,14 @@ impl Engine {
             Command::Rewind => self.rewind_all(),
             Command::SetBpm(bpm) => self.clock.set_bpm(bpm),
             Command::SetMasterGain(gain) => self.master_gain_target = gain.clamp(0.0, 2.0),
-            Command::AddTrack { track, gain } => {
+            Command::AddTrack { track } => {
                 if let Some(t) = self.tracks.get_mut(track as usize) {
                     t.active = true;
-                    t.muted = false;
-                    t.soloed = false;
-                    t.target_gain = gain.clamp(0.0, 2.0);
-                    t.gain = t.target_gain;
                 }
+                // A slot that has been used before starts clean: no notes, and every
+                // pattern's fader for it back where a new one would be. Set rather than slid
+                // to, because a track that has just appeared has no sound of its own to
+                // click against and fading it in would only make its first hit quiet.
                 self.forget_track(track);
             }
             Command::RemoveTrack { track } => {
@@ -558,19 +632,47 @@ impl Engine {
                     }
                 }
             }
-            Command::SetTrackGain { track, gain } => {
-                if let Some(t) = self.tracks.get_mut(track as usize) {
-                    t.target_gain = gain.clamp(0.0, 2.0);
+            Command::SetPatternGain {
+                pattern,
+                track,
+                gain,
+            } => {
+                if let Some(state) = self.mixer(pattern, track) {
+                    state.gains[track as usize] = gain.clamp(0.0, 2.0);
+                    self.settle(pattern, track);
                 }
             }
-            Command::SetTrackMuted { track, muted } => {
-                if let Some(t) = self.tracks.get_mut(track as usize) {
-                    t.muted = muted;
+            Command::SetPatternMuted {
+                pattern,
+                track,
+                muted,
+            } => {
+                if let Some(state) = self.mixer(pattern, track) {
+                    let bit = 1u32 << track;
+                    if muted {
+                        state.muted |= bit;
+                    } else {
+                        state.muted &= !bit;
+                    }
+                    self.settle(pattern, track);
                 }
             }
-            Command::SetTrackSoloed { track, soloed } => {
-                if let Some(t) = self.tracks.get_mut(track as usize) {
-                    t.soloed = soloed;
+            Command::SetPatternSoloed {
+                pattern,
+                track,
+                soloed,
+            } => {
+                if let Some(state) = self.mixer(pattern, track) {
+                    let bit = 1u32 << track;
+                    if soloed {
+                        state.soloed |= bit;
+                    } else {
+                        state.soloed &= !bit;
+                    }
+                    // Solo changes what every other track in the pattern is doing too.
+                    for other in 0..MAX_TRACKS as u16 {
+                        self.settle(pattern, other);
+                    }
                 }
             }
             Command::SetPatternPitched {
@@ -578,10 +680,7 @@ impl Engine {
                 track,
                 pitched,
             } => {
-                if let (Some(state), true) = (
-                    self.patterns.get_mut(pattern as usize),
-                    (track as usize) < MAX_TRACKS,
-                ) {
+                if let Some(state) = self.mixer(pattern, track) {
                     let bit = 1u32 << track;
                     if pitched {
                         state.pitched |= bit;
@@ -701,9 +800,12 @@ impl Engine {
                 let trigger = Trigger {
                     sample: Arc::clone(sample),
                     track,
+                    // Under no pattern's fader: clicking a row is "let me hear this sound",
+                    // and it should not be quiet because some pattern has it turned down.
+                    pattern: PREVIEW_PATTERN,
                     ratio: self.playback_ratio(sample, pitch),
                     gain: velocity_gain(velocity),
-                    // Clicking a row is "let me hear it", so it plays out whatever the track is.
+                    // "Let me hear it", so it plays out whatever the track is.
                     frames: f64::INFINITY,
                 };
                 self.voices.trigger(trigger);
@@ -713,6 +815,7 @@ impl Engine {
                 self.voices.trigger(Trigger {
                     sample,
                     track: PREVIEW_TRACK,
+                    pattern: PREVIEW_PATTERN,
                     ratio,
                     gain,
                     frames: f64::INFINITY,
@@ -729,16 +832,21 @@ impl Engine {
     /// Drop a track's notes everywhere. A deleted track must not keep playing out of a
     /// pattern nobody is looking at, and a new track in a reused slot starts empty.
     fn forget_track(&mut self, track: u16) {
-        let bit = if (track as usize) < MAX_TRACKS {
-            1u32 << track
-        } else {
-            0
-        };
-        for pattern in &mut self.patterns {
+        if (track as usize) >= MAX_TRACKS {
+            return;
+        }
+        let bit = 1u32 << track;
+        for (at, pattern) in self.patterns.iter_mut().enumerate() {
             if let Some(notes) = pattern.tracks.get_mut(track as usize) {
                 notes.count = 0;
             }
+            pattern.gains[track as usize] = DEFAULT_TRACK_GAIN;
+            pattern.muted &= !bit;
+            pattern.soloed &= !bit;
             pattern.pitched &= !bit;
+            // Set, not slid to: there is nothing sounding on a slot that has just been
+            // claimed, so there is nothing to click.
+            self.faders[Self::fader(at, track as usize)] = DEFAULT_TRACK_GAIN;
         }
     }
 }

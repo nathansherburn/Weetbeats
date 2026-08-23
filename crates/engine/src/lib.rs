@@ -39,6 +39,10 @@ pub const MAX_STEPS: u16 = 256;
 /// Boxes a new pattern has.
 pub const DEFAULT_STEPS: u32 = 16;
 
+/// How loud a track is in a pattern until somebody moves it. A little under unity, so a
+/// handful of drums hitting together does not sit on the clipper.
+pub const DEFAULT_TRACK_GAIN: f32 = 0.8;
+
 /// Pattern slots the engine keeps notes for. A pattern's id in the project *is* its slot,
 /// the same trick as tracks, so the engine never has to be told a pattern has moved.
 ///
@@ -74,6 +78,12 @@ pub const DEFAULT_PITCH: u8 = 60;
 
 /// Voice slot marker for auditioned samples that belong to no track.
 pub const PREVIEW_TRACK: u16 = u16::MAX;
+
+/// And the pattern a note played by hand belongs to, which is none of them. Falls off the end
+/// of the fader table, so an audition plays at unity: clicking a sound to hear it should not
+/// be quiet because some pattern's fader is down, and should not be silent because it is muted
+/// there.
+pub const PREVIEW_PATTERN: u16 = u16::MAX;
 
 pub use command::{Command, EngineNote, Trash};
 pub use engine::Engine;

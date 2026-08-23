@@ -320,10 +320,7 @@ fn add_track_now(state: &AppState, source: PathBuf) -> Result<NewTrack, String> 
         }),
     );
 
-    state.send(Command::AddTrack {
-        track: id,
-        gain: track.gain,
-    });
+    state.send(Command::AddTrack { track: id });
     state.send(Command::SetTrackSample {
         track: id,
         sample: Some(Arc::clone(&sample)),
@@ -356,39 +353,57 @@ pub fn remove_track(id: u16, state: State<'_, Arc<AppState>>) {
     state.touch();
 }
 
+/// How loud a track is in one pattern. Per pattern, like the rest of the row: how loud a part
+/// is is part of writing the part.
 #[tauri::command]
-pub fn set_track_gain(id: u16, gain: f32, state: State<'_, Arc<AppState>>) {
+pub fn set_pattern_gain(pattern: u16, track: u16, gain: f32, state: State<'_, Arc<AppState>>) {
     state.remember("gain");
     let mut project = state.project.lock().unwrap();
-    if let Some(track) = project.track_mut(id) {
-        track.gain = gain.clamp(0.0, 1.5);
-        state.send(Command::SetTrackGain {
-            track: id,
-            gain: track.gain,
+    if let Some(target) = project.pattern_mut(pattern) {
+        let gain = target.set_gain(track, gain);
+        state.send(Command::SetPatternGain {
+            pattern,
+            track,
+            gain,
         });
     }
+    drop(project);
     state.touch();
 }
 
+/// Silent in this pattern. Fades rather than cutting, so pressing it while it plays takes
+/// what is already ringing down with it.
 #[tauri::command]
-pub fn set_track_muted(id: u16, muted: bool, state: State<'_, Arc<AppState>>) {
+pub fn set_pattern_muted(pattern: u16, track: u16, muted: bool, state: State<'_, Arc<AppState>>) {
     state.remember("mute");
     let mut project = state.project.lock().unwrap();
-    if let Some(track) = project.track_mut(id) {
-        track.muted = muted;
-        state.send(Command::SetTrackMuted { track: id, muted });
+    if let Some(target) = project.pattern_mut(pattern) {
+        target.set_muted(track, muted);
+        state.send(Command::SetPatternMuted {
+            pattern,
+            track,
+            muted,
+        });
     }
+    drop(project);
     state.touch();
 }
 
+/// Anything soloed in a pattern and only the soloed tracks are heard in it. Per pattern, so
+/// each pattern in a song applies its own.
 #[tauri::command]
-pub fn set_track_soloed(id: u16, soloed: bool, state: State<'_, Arc<AppState>>) {
+pub fn set_pattern_soloed(pattern: u16, track: u16, soloed: bool, state: State<'_, Arc<AppState>>) {
     state.remember("solo");
     let mut project = state.project.lock().unwrap();
-    if let Some(track) = project.track_mut(id) {
-        track.soloed = soloed;
-        state.send(Command::SetTrackSoloed { track: id, soloed });
+    if let Some(target) = project.pattern_mut(pattern) {
+        target.set_soloed(track, soloed);
+        state.send(Command::SetPatternSoloed {
+            pattern,
+            track,
+            soloed,
+        });
     }
+    drop(project);
     state.touch();
 }
 

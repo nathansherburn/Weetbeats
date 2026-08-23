@@ -59,6 +59,8 @@ const ROLL_CELL = 30; // one step, narrower than a box: melodies are longer than
 const MIN_ROLL_ZOOM = 0.4;
 const MAX_ROLL_ZOOM = 2.5;
 const DEFAULT_PITCH = 60; // middle C, and the sampler's unity pitch
+// How loud a track is in a pattern until somebody moves it. Must match DEFAULT_TRACK_GAIN.
+const DEFAULT_GAIN = 0.8;
 // The whole of MIDI. A sampler stretched five octaves down is a different instrument, and
 // people do that on purpose, so the roll goes as far as the note numbers do.
 const LOW_PITCH = 0;
@@ -234,10 +236,11 @@ function readPattern(pattern) {
     name: pattern.name,
     steps: pattern.steps,
     colour: pattern.colour ?? null,
-    // Which tracks are instruments in this pattern rather than one-shots. A decision about
-    // the part, not about the sound, so it belongs to the pattern: the same bass can hold
-    // down a rhythm in one and play a melody in the next.
-    pitched: new Set(pattern.pitched ?? []),
+    // How each track sits in this pattern: how loud, whether it is heard, and whether it is
+    // an instrument. All decisions about the part rather than about the sound, so they belong
+    // to the pattern — the same bass can hold a rhythm down in one and play a melody in the
+    // next, loud in one and half its level in another.
+    mix: new Map((pattern.mix ?? []).map((one) => [one.track, { ...one }])),
     notes,
   };
 }
@@ -275,9 +278,35 @@ function trackById(id) {
   return state.tracks.find((track) => track.id === id) ?? null;
 }
 
-/* True if this track is an instrument in the pattern that is open. */
+/*
+ * How a track sits in the pattern that is open. Every track has an answer, whether or not
+ * anybody has touched it, so this fills in the default for the ones nobody has.
+ */
+function mixOf(track) {
+  const open = openPatternNow();
+  return (
+    open?.mix.get(track) ?? {
+      track,
+      gain: DEFAULT_GAIN,
+      muted: false,
+      soloed: false,
+      pitched: false,
+    }
+  );
+}
+
+/* Change one thing about it, here and in Rust. */
+function setMix(track, change, command, args) {
+  const open = openPatternNow();
+  if (!open || trackById(track) === null) return;
+  const mix = { ...mixOf(track), ...change };
+  open.mix.set(track, mix);
+  invoke(command, { pattern: open.id, track, ...args });
+  state.needsDraw = true;
+}
+
 function isPitched(track) {
-  return openPatternNow()?.pitched.has(track) === true;
+  return mixOf(track).pitched;
 }
 
 // --- the two views --------------------------------------------------------
@@ -780,13 +809,14 @@ function drawTrackHeaders() {
       drawWaveform(wave, track.peaks);
       row.append(wave);
 
-      const mute = toggle("M", "mute", track.muted, (on) => {
-        track.muted = on;
-        invoke("set_track_muted", { id: track.id, muted: on });
+      // The whole row belongs to the pattern that is open: how loud, what is heard, and
+      // whether it is an instrument.
+      const mix = mixOf(track.id);
+      const mute = toggle("M", "mute", mix.muted, (on) => {
+        setMix(track.id, { muted: on }, "set_pattern_muted", { muted: on });
       });
-      const solo = toggle("S", "solo", track.soloed, (on) => {
-        track.soloed = on;
-        invoke("set_track_soloed", { id: track.id, soloed: on });
+      const solo = toggle("S", "solo", mix.soloed, (on) => {
+        setMix(track.id, { soloed: on }, "set_pattern_soloed", { soloed: on });
       });
 
       const gain = document.createElement("input");
@@ -794,11 +824,11 @@ function drawTrackHeaders() {
       gain.min = "0";
       gain.max = "120";
       gain.step = "1";
-      gain.value = String(Math.round(track.gain * 100));
-      gain.title = "Volume";
+      gain.value = String(Math.round(mix.gain * 100));
+      gain.title = "Volume in this pattern";
       gain.addEventListener("input", () => {
-        track.gain = Number(gain.value) / 100;
-        invoke("set_track_gain", { id: track.id, gain: track.gain });
+        const level = Number(gain.value) / 100;
+        setMix(track.id, { gain: level }, "set_pattern_gain", { gain: level });
       });
 
       // Turns the row into a piano roll and back. Nothing is thrown away either way: the
@@ -1050,7 +1080,7 @@ function drawGrid() {
     const y = row * ROW;
     // An instrument's row is its notes rather than a line of boxes: boxes cannot say what
     // pitch or how long, which is the whole point of turning it into one.
-    if (pattern.pitched.has(track.id)) {
+    if (pattern.mix.get(track.id)?.pitched) {
       drawMiniRoll(ctx, pattern, track, y);
       continue;
     }
@@ -1281,15 +1311,10 @@ function rollNotes() {
  * It belongs to the pattern, so turning it off here says nothing about any other pattern.
  */
 function setPitched(track, pitched) {
-  const pattern = openPatternNow();
-  if (!pattern || trackById(track) === null) return;
-  if (pitched) pattern.pitched.add(track);
-  else pattern.pitched.delete(track);
-  invoke("set_pattern_pitched", { pattern: pattern.id, track, pitched });
+  setMix(track, { pitched }, "set_pattern_pitched", { pitched });
   if (!pitched && state.roll === track) closeRoll();
   drawTrackHeaders();
   showPitched();
-  state.needsDraw = true;
 }
 
 function showPitched() {

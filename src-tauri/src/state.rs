@@ -11,8 +11,8 @@ use rtrb::{Consumer, Producer};
 use weetbeats_engine::command::{TrashBin, COMMAND_CAPACITY, TRASH_CAPACITY};
 use weetbeats_engine::sample::decode_file;
 use weetbeats_engine::{
-    folder, Command, EngineNote, Project, Sample, Shared, Trash, DEFAULT_STEPS, MAX_PATTERNS,
-    MAX_TRACKS,
+    folder, Command, EngineNote, Pattern, Project, Sample, Shared, Trash, DEFAULT_STEPS,
+    MAX_PATTERNS, MAX_TRACKS,
 };
 
 use crate::audio;
@@ -199,18 +199,7 @@ impl AppState {
 
         let mut trouble: Vec<String> = Vec::new();
         for track in &project.tracks {
-            self.send(Command::AddTrack {
-                track: track.id,
-                gain: track.gain,
-            });
-            self.send(Command::SetTrackMuted {
-                track: track.id,
-                muted: track.muted,
-            });
-            self.send(Command::SetTrackSoloed {
-                track: track.id,
-                soloed: track.soloed,
-            });
+            self.send(Command::AddTrack { track: track.id });
             if let Some(reference) = &track.sample {
                 match folder::resolve(&dir, &reference.path)
                     .and_then(|path| self.load_sample(&path))
@@ -231,13 +220,7 @@ impl AppState {
                 pattern: pattern.id,
                 steps: pattern.steps,
             });
-            for &track in &pattern.pitched {
-                self.send(Command::SetPatternPitched {
-                    pattern: pattern.id,
-                    track,
-                    pitched: true,
-                });
-            }
+            self.push_mix(pattern);
             for lane in &pattern.lanes {
                 for note in &lane.notes {
                     self.send(Command::SetNote {
@@ -290,13 +273,7 @@ impl AppState {
             pattern: id,
             steps: pattern.steps,
         });
-        for &track in &pattern.pitched {
-            self.send(Command::SetPatternPitched {
-                pattern: id,
-                track,
-                pitched: true,
-            });
-        }
+        self.push_mix(pattern);
         for lane in &pattern.lanes {
             for note in &lane.notes {
                 self.send(Command::SetNote {
@@ -310,6 +287,35 @@ impl AppState {
                     },
                 });
             }
+        }
+    }
+
+    /// One pattern's mixer: how loud each track is in it, what is muted, what is soloed, and
+    /// which tracks are instruments. Only the tracks that differ from the default are in the
+    /// project, and the audio thread starts every pattern at the default, so only those need
+    /// sending.
+    fn push_mix(&self, pattern: &Pattern) {
+        for mix in &pattern.mix {
+            self.send(Command::SetPatternGain {
+                pattern: pattern.id,
+                track: mix.track,
+                gain: mix.gain,
+            });
+            self.send(Command::SetPatternMuted {
+                pattern: pattern.id,
+                track: mix.track,
+                muted: mix.muted,
+            });
+            self.send(Command::SetPatternSoloed {
+                pattern: pattern.id,
+                track: mix.track,
+                soloed: mix.soloed,
+            });
+            self.send(Command::SetPatternPitched {
+                pattern: pattern.id,
+                track: mix.track,
+                pitched: mix.pitched,
+            });
         }
     }
 

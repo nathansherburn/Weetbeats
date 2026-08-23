@@ -85,7 +85,9 @@ fn render_does_not_allocate() {
         .collect();
 
     for id in 0..16u16 {
-        tx.push(Command::AddTrack {
+        tx.push(Command::AddTrack { track: id }).unwrap();
+        tx.push(Command::SetPatternGain {
+            pattern: 0,
             track: id,
             gain: 0.5,
         })
@@ -148,11 +150,15 @@ fn render_does_not_allocate() {
         for block in 0..400 {
             // Keep the queue busy the way a user leaning on the UI would.
             let id = (block % 16) as u16;
-            let _ = tx.push(Command::SetTrackGain {
+            // The mixer, leant on across several patterns at once, which is what makes the
+            // fader tables the biggest thing this loop touches.
+            let _ = tx.push(Command::SetPatternGain {
+                pattern: (block % 4) as u16,
                 track: id,
                 gain: 0.3 + (block % 5) as f32 * 0.1,
             });
-            let _ = tx.push(Command::SetTrackMuted {
+            let _ = tx.push(Command::SetPatternMuted {
+                pattern: (block % 4) as u16,
                 track: id,
                 muted: block % 7 == 0,
             });

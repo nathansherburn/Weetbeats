@@ -68,8 +68,14 @@ fn track_with(rig: &mut Rig, id: u16, sample: Arc<Sample>) {
     track_with_gain(rig, id, sample, 1.0);
 }
 
+/// A track at a set level in pattern nought, which is the pattern most of these play.
 fn track_with_gain(rig: &mut Rig, id: u16, sample: Arc<Sample>, gain: f32) {
-    rig.send(Command::AddTrack { track: id, gain });
+    rig.send(Command::AddTrack { track: id });
+    rig.send(Command::SetPatternGain {
+        pattern: 0,
+        track: id,
+        gain,
+    });
     rig.send(Command::SetTrackSample {
         track: id,
         sample: Some(sample),
@@ -169,8 +175,16 @@ fn mute_silences_and_solo_beats_mute() {
                 note: note(0),
             });
         }
-        rig.send(Command::SetTrackMuted { track: 1, muted });
-        rig.send(Command::SetTrackSoloed { track: 1, soloed });
+        rig.send(Command::SetPatternMuted {
+            pattern: 0,
+            track: 1,
+            muted,
+        });
+        rig.send(Command::SetPatternSoloed {
+            pattern: 0,
+            track: 1,
+            soloed,
+        });
         rig.send(Command::SetPlaying(true));
         // Gain slides rather than jumps, so read the settled level, not the 10ms of ramp
         // on the way down.
@@ -391,10 +405,7 @@ fn pitch_changes_playback_speed() {
 #[test]
 fn a_track_with_no_sample_is_harmless() {
     let mut rig = Rig::new(120.0, 16);
-    rig.send(Command::AddTrack {
-        track: 3,
-        gain: 1.0,
-    });
+    rig.send(Command::AddTrack { track: 3 });
     rig.send(Command::SetNote {
         pattern: 0,
         track: 3,
@@ -408,7 +419,8 @@ fn a_track_with_no_sample_is_harmless() {
 #[test]
 fn commands_for_slots_that_do_not_exist_are_ignored() {
     let mut rig = Rig::new(120.0, 16);
-    rig.send(Command::SetTrackGain {
+    rig.send(Command::SetPatternGain {
+        pattern: 0,
         track: 9_999,
         gain: 1.0,
     });
@@ -641,6 +653,99 @@ fn a_row_of_boxes_plays_only_what_the_boxes_show() {
         onsets(&out),
         vec![0, 8 * STEP],
         "the roll's own note did not come back"
+    );
+}
+
+/// The mixer belongs to the pattern too. The same kick can be loud in one and half its level
+/// in the next, and muting it in one says nothing about the other.
+#[test]
+fn the_mixer_belongs_to_the_pattern() {
+    let mut rig = Rig::new(120.0, 16);
+    // A short hit, so one pattern's note is over before the next pattern is asked for.
+    track_with_gain(&mut rig, 0, dc_sample(2000), 0.5);
+    // Half the level in pattern one, and the same note in both.
+    rig.send(Command::SetPatternGain {
+        pattern: 1,
+        track: 0,
+        gain: 0.25,
+    });
+    for pattern in [0u16, 1] {
+        rig.send(Command::SetNote {
+            pattern,
+            track: 0,
+            note: note(0),
+        });
+    }
+
+    // The level of one hit of the pattern that is open, past the attack and before the
+    // sample runs out.
+    let level = |rig: &mut Rig, pattern: u16| {
+        rig.send(Command::StopAll);
+        rig.send(Command::SetActivePattern(pattern));
+        rig.send(Command::SetPlaying(true));
+        let out = rig.render_chunked(3000, 256);
+        peak(&out[500 * 2..1500 * 2])
+    };
+
+    let loud = level(&mut rig, 0);
+    let quiet = level(&mut rig, 1);
+    assert!(
+        quiet > 0.0 && (quiet / loud - 0.5).abs() < 0.05,
+        "pattern one should be half of pattern nought: {loud} then {quiet}"
+    );
+
+    // Muting it in one pattern leaves the other alone.
+    rig.send(Command::SetPatternMuted {
+        pattern: 1,
+        track: 0,
+        muted: true,
+    });
+    let silent = level(&mut rig, 1);
+    assert!(silent < 0.001, "the mute did not take: {silent}");
+    let still = level(&mut rig, 0);
+    assert!(
+        (still / loud - 1.0).abs() < 0.05,
+        "muting one pattern took the other with it: {loud} then {still}"
+    );
+}
+
+/// A mute has to take what is already sounding down with it, or it is not a mute. The fader
+/// slides rather than jumping while the transport is running, for the same reason.
+#[test]
+fn a_mute_fades_what_is_already_ringing() {
+    let mut rig = Rig::new(120.0, 16);
+    // One long sample, hit once, so there is something ringing to mute.
+    track_with_gain(&mut rig, 0, dc_sample(200_000), 1.0);
+    rig.send(Command::SetNote {
+        pattern: 0,
+        track: 0,
+        note: note(0),
+    });
+    rig.send(Command::SetPlaying(true));
+    let out = rig.render_chunked(3000, 256);
+    assert!(peak(&out[2000 * 2..]) > 0.5, "nothing was ringing to mute");
+
+    rig.send(Command::SetPatternMuted {
+        pattern: 0,
+        track: 0,
+        muted: true,
+    });
+    let out = rig.render_chunked(3000, 256);
+    assert!(
+        peak(&out[2000 * 2..]) < 0.01,
+        "the mute did not reach a note that was already sounding"
+    );
+    // And it faded rather than cutting: no step bigger than the ramp itself.
+    let worst = out
+        .chunks(2)
+        .map(|c| c[0])
+        .collect::<Vec<_>>()
+        .windows(2)
+        .map(|w| (w[1] - w[0]).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        worst < 0.01,
+        "the mute cut rather than faded: jump of {worst}"
     );
 }
 

@@ -1252,14 +1252,47 @@ try {
   await clearCalls();
   await page.locator("#trackHeaders .track").first().locator(".tick.mute").click();
   await page.locator("#trackHeaders .track").first().locator(".tick.solo").click();
-  check("mute reaches the engine", (await lastCall("set_track_muted")).args.muted === true);
-  check("solo reaches the engine", (await lastCall("set_track_soloed")).args.soloed === true);
+  check("mute reaches the engine", (await lastCall("set_pattern_muted")).args.muted === true);
+  check("and it says which pattern", (await lastCall("set_pattern_muted")).args.pattern === 0,
+    JSON.stringify((await lastCall("set_pattern_muted")).args));
+  check("solo reaches the engine",
+    (await lastCall("set_pattern_soloed")).args.soloed === true);
   check("mute button shows as on", await page.locator("#trackHeaders .track").first()
     .locator(".tick.mute").evaluate((n) => n.classList.contains("on")));
 
   await page.locator("#trackHeaders .track").first().locator("input[type=range]").fill("40");
-  const gain = (await lastCall("set_track_gain")).args;
+  const gain = (await lastCall("set_pattern_gain")).args;
   check("volume reaches the engine", Math.abs(gain.gain - 0.4) < 1e-6, JSON.stringify(gain));
+  check("for this pattern", gain.pattern === 0 && gain.track === 0, JSON.stringify(gain));
+
+  // --- and the whole row belongs to the pattern, not to the track
+  const fader = () =>
+    page.locator("#trackHeaders .track").first().locator("input[type=range]").inputValue();
+  const mutedNow = () =>
+    page.locator("#trackHeaders .track").first()
+      .locator(".tick.mute").evaluate((n) => n.classList.contains("on"));
+  const turnedDown = await rows.count();
+  await clearCalls();
+  await page.locator("#addPattern").click();
+  await page.waitForFunction((was) =>
+    document.querySelectorAll("#patternList .prow").length === was + 1, turnedDown);
+  await page.waitForSelector("#editor:visible");
+  check("a new pattern's mixer starts where a new one starts", (await fader()) === "80",
+    await fader());
+  check("and nothing is muted in it", !(await mutedNow()));
+
+  // Back to the one that was turned down and muted, which still is.
+  await rows.first().click();
+  await page.waitForFunction(() =>
+    document.querySelector("#trackHeaders .track input[type=range]").value === "40");
+  check("the pattern that was turned down still is", (await fader()) === "40");
+  check("and still muted", await mutedNow());
+
+  // The spare goes again, so the counts below are what they were.
+  await rows.nth(turnedDown).hover();
+  await rows.nth(turnedDown).locator(".tick.kill").click();
+  await page.waitForFunction((was) =>
+    document.querySelectorAll("#patternList .prow").length === was, turnedDown);
 
   // --- deleting a track takes its notes out of every pattern
   await page.locator("#trackHeaders .track").first().locator(".tick.kill").click();
