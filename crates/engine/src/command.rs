@@ -84,6 +84,15 @@ pub enum Command {
         track: u16,
         muted: bool,
     },
+    /// The whole pattern silent, wherever it plays. The speaker on its row in the panel.
+    ///
+    /// A different switch from `SetPatternMuted`, which is one track inside one pattern. This
+    /// one is the pattern: every track in it goes quiet, in every block of it in the song, and
+    /// what it is already holding goes down with it.
+    MutePattern {
+        pattern: u16,
+        muted: bool,
+    },
     /// Anything soloed in a pattern means only the soloed tracks are heard in it — of the
     /// ones that are not muted, because mute wins.
     SetPatternSoloed {

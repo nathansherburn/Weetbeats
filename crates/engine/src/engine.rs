@@ -175,6 +175,9 @@ struct PatternState {
     steps: u32,
     /// Where each fader is, in this pattern.
     gains: [f32; MAX_TRACKS],
+    /// The whole pattern turned off, from the speaker on its row in the panel. Silences
+    /// every track in it, wherever it plays, whatever the per-track switches say.
+    hushed: bool,
     muted: u32,
     soloed: u32,
     /// The tracks played as instruments here rather than as one-shots.
@@ -189,6 +192,7 @@ impl PatternState {
         PatternState {
             steps,
             gains: [DEFAULT_TRACK_GAIN; MAX_TRACKS],
+            hushed: false,
             muted: 0,
             soloed: 0,
             pitched: 0,
@@ -373,7 +377,8 @@ impl Engine {
             let soloing = state.soloed != 0;
             for track in 0..MAX_TRACKS {
                 let bit = 1u32 << track;
-                let audible = self.tracks[track].active
+                let audible = !state.hushed
+                    && self.tracks[track].active
                     && state.muted & bit == 0
                     && (!soloing || state.soloed & bit != 0);
                 let target = if audible { state.gains[track] } else { 0.0 };
@@ -485,7 +490,8 @@ impl Engine {
     fn target_gain(&self, pattern: usize, track: usize) -> f32 {
         let state = &self.patterns[pattern];
         let bit = 1u32 << track;
-        let audible = self.tracks[track].active
+        let audible = !state.hushed
+            && self.tracks[track].active
             && state.muted & bit == 0
             && (state.soloed == 0 || state.soloed & bit != 0);
         if audible {
@@ -653,8 +659,10 @@ impl Engine {
     fn trigger_plugin(&mut self, pattern: usize, track: usize, step: u16) {
         let state = &self.patterns[pattern];
         let bit = 1u32 << track;
-        // Mute wins and solo narrows, exactly as it does for a sampler.
-        if state.muted & bit != 0 || (state.soloed != 0 && state.soloed & bit == 0) {
+        // A silenced pattern sends nothing at all, and mute wins and solo narrows over what
+        // is left, exactly as they do for a sampler.
+        if state.hushed || state.muted & bit != 0 || (state.soloed != 0 && state.soloed & bit == 0)
+        {
             return;
         }
         let level = state.gains[track];
@@ -703,7 +711,9 @@ impl Engine {
         for track in 0..MAX_TRACKS {
             let state = &self.patterns[pattern as usize];
             let bit = 1u32 << track;
-            let audible = state.muted & bit == 0 && (state.soloed == 0 || state.soloed & bit != 0);
+            let audible = !state.hushed
+                && state.muted & bit == 0
+                && (state.soloed == 0 || state.soloed & bit != 0);
             if audible {
                 continue;
             }
@@ -914,6 +924,18 @@ impl Engine {
                     self.hush_plugins(pattern);
                 }
             }
+            Command::MutePattern { pattern, muted } => {
+                if let Some(state) = self.patterns.get_mut(pattern as usize) {
+                    state.hushed = muted;
+                    // Every track in it is going somewhere new, and anything a plugin is
+                    // holding for this pattern has to be let go of or it hangs on through
+                    // the mute — the same two things a track's own mute does.
+                    for track in 0..MAX_TRACKS as u16 {
+                        self.settle(pattern, track);
+                    }
+                    self.hush_plugins(pattern);
+                }
+            }
             Command::SetPatternSoloed {
                 pattern,
                 track,
@@ -992,10 +1014,12 @@ impl Engine {
                     for notes in &mut p.tracks {
                         notes.count = 0;
                     }
-                    // Which tracks are instruments in it goes too: the app thread sends the
-                    // pattern again straight after, flags and all, so nothing is left over
-                    // from whatever used to be in this slot.
+                    // Which tracks are instruments in it goes too, and whether the whole
+                    // pattern was silenced: the app thread sends the pattern again straight
+                    // after, flags and all, so nothing is left over from whatever used to be
+                    // in this slot.
                     p.pitched = 0;
+                    p.hushed = false;
                 }
             }
             Command::SetActivePattern(pattern) => {

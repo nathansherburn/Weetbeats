@@ -244,6 +244,13 @@ const handlers = {
   // away again when it is back to how a new pattern starts.
   set_pattern_gain: ({ pattern: id, track, gain }) => setMix(id, track, { gain }),
   set_pattern_muted: ({ pattern: id, track, muted }) => setMix(id, track, { muted }),
+  // The pattern's own mute, which is not one of the mixer's: it belongs to the pattern
+  // rather than to a track in it, so it silences the lot wherever the pattern plays.
+  mute_pattern: ({ id, muted }) => {
+    const p = pattern(id);
+    if (p) p.muted = muted;
+    return null;
+  },
   set_pattern_soloed: ({ pattern: id, track, soloed }) => setMix(id, track, { soloed }),
   set_pattern_pitched: ({ pattern: id, track, pitched }) => setMix(id, track, { pitched }),
 
@@ -333,6 +340,39 @@ const handlers = {
     l.notes = l.notes.filter((n) => !(n.step === at.step && n.pitch === at.pitch));
     p.lanes = p.lanes.filter((one) => one.notes.length);
     return null;
+  },
+  /*
+   * Notes out and notes in, in one trip: what moving, pasting, cutting and rubbing out a
+   * whole set of them all arrive as. Out before in, which is what makes a move safe.
+   */
+  edit_notes: ({ pattern: id, track, remove, add }) => {
+    const p = pattern(id);
+    if (!p) return { fits: false, steps: 0 };
+    const wanted = add.reduce((most, n) => Math.max(most, n.step + Math.max(1, n.length)), 0);
+    if (wanted > p.steps) p.steps = Math.max(1, Math.min(MAX_STEPS, wanted));
+    const l = lane(p, track);
+    for (const at of remove) {
+      l.notes = l.notes.filter((n) => !(n.step === at.step && n.pitch === at.pitch));
+    }
+    let fits = true;
+    for (const one of add) {
+      if (one.step >= p.steps) {
+        fits = false;
+        continue;
+      }
+      const note = {
+        step: one.step,
+        pitch: one.pitch,
+        velocity: Math.max(1, Math.min(127, one.velocity)),
+        length: Math.max(1, Math.min(one.length, p.steps - one.step)),
+      };
+      const was = l.notes.findIndex((n) => n.step === note.step && n.pitch === note.pitch);
+      if (was >= 0) l.notes[was] = note;
+      else if (l.notes.length >= MAX_NOTES) fits = false;
+      else l.notes.push(note);
+    }
+    p.lanes = p.lanes.filter((one) => one.notes.length);
+    return { fits, steps: p.steps };
   },
   move_note: ({ pattern: id, track, at, to }) => {
     const p = pattern(id);
@@ -527,6 +567,7 @@ const EDITS = {
   remove_track: "tracks",
   set_pattern_gain: "gain",
   set_pattern_muted: "mute",
+  mute_pattern: "pattern mute",
   set_pattern_soloed: "solo",
   set_pattern_pitched: "pitched",
   set_voicing: "voicing",
@@ -535,6 +576,7 @@ const EDITS = {
   set_note: "notes",
   clear_note: "notes",
   move_note: "notes",
+  edit_notes: "notes",
   add_pattern: "patterns",
   duplicate_pattern: "patterns",
   remove_pattern: "patterns",

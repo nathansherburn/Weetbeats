@@ -98,6 +98,17 @@ pub struct At {
     pub pitch: u8,
 }
 
+/// A whole note, as the editors describe one. What a paste, a duplicate and the far end of a
+/// dragged selection all arrive as.
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteIn {
+    pub step: u32,
+    pub pitch: u8,
+    pub velocity: u8,
+    pub length: u32,
+}
+
 /// Polled every frame while playing. Kept small on purpose.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -544,6 +555,24 @@ pub fn set_pattern_soloed(pattern: u16, track: u16, soloed: bool, state: State<'
     state.touch();
 }
 
+/// The whole pattern silent, wherever it plays: the speaker on its row in the panel.
+///
+/// A different switch from [`set_pattern_muted`], which is one track inside one pattern. This
+/// one belongs to the pattern itself, so turning the hats off silences every block of them in
+/// the song at once — which is how you listen to a song without a part without taking the
+/// part out.
+#[tauri::command]
+pub fn mute_pattern(id: u16, muted: bool, state: State<'_, Arc<AppState>>) {
+    state.remember("pattern mute");
+    let mut project = state.project.lock().unwrap();
+    if let Some(target) = project.pattern_mut(id) {
+        target.muted = muted;
+        state.send(Command::MutePattern { pattern: id, muted });
+    }
+    drop(project);
+    state.touch();
+}
+
 /// How the track's sound is played: its envelope, where it sits between the speakers, how it
 /// is tuned, its level and how much of the file a note reads.
 ///
@@ -782,6 +811,92 @@ pub fn move_note(
     drop(project);
     state.touch();
     fits
+}
+
+/// Take some notes out and put some in, in that order and in one go.
+///
+/// Every edit to more than one note at a time is one of these: moving a selection is the old
+/// positions out and the new notes in, a paste or a duplicate is notes in, and a delete is
+/// notes out. One command rather than a stream of them is what makes a move safe — a note
+/// landing where another one has just left cannot be rubbed out by the one that left — and
+/// it makes the whole edit one step of the history rather than one step per note.
+#[tauri::command]
+pub fn edit_notes(
+    pattern: u16,
+    track: u16,
+    remove: Vec<At>,
+    add: Vec<NoteIn>,
+    state: State<'_, Arc<AppState>>,
+) -> NotePut {
+    state.remember("notes");
+    let mut project = state.project.lock().unwrap();
+    let Some(target) = project.pattern_mut(pattern) else {
+        return NotePut::nowhere();
+    };
+    // A note past the end grows the pattern rather than being refused, exactly as drawing
+    // one there does: pasting a two bar phrase into a one bar pattern makes it two bars.
+    let was = target.steps;
+    let wanted = add
+        .iter()
+        .map(|note| note.step.saturating_add(note.length.max(1)))
+        .max()
+        .unwrap_or(0);
+    if wanted > was {
+        target.set_steps(wanted);
+    }
+    let grew = target.steps != was;
+
+    for at in &remove {
+        target.clear_note(track, at.step, at.pitch);
+    }
+    let mut fits = true;
+    let mut put: Vec<Note> = Vec::with_capacity(add.len());
+    for one in &add {
+        if one.step >= target.steps {
+            fits = false;
+            continue;
+        }
+        let note = Note {
+            step: one.step,
+            pitch: one.pitch,
+            velocity: one.velocity.clamp(1, 127),
+            // A note cannot run off the end of its pattern.
+            length: one.length.clamp(1, target.steps - one.step),
+        };
+        if target.set_note(track, note) {
+            put.push(note);
+        } else {
+            fits = false;
+        }
+    }
+    let steps = target.steps;
+    drop(project);
+
+    for at in &remove {
+        state.send(Command::ClearNote {
+            pattern,
+            track,
+            step: at.step as u16,
+            pitch: at.pitch,
+        });
+    }
+    for note in &put {
+        state.send(Command::SetNote {
+            pattern,
+            track,
+            note: EngineNote {
+                step: note.step as u16,
+                pitch: note.pitch,
+                velocity: note.velocity,
+                length: note.length as u16,
+            },
+        });
+    }
+    if grew {
+        state.send(Command::SetPatternSteps { pattern, steps });
+    }
+    state.touch();
+    NotePut { fits, steps }
 }
 
 #[tauri::command]

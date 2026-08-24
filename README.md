@@ -19,12 +19,16 @@ with. Stage 6 has started early: CLAP instruments play alongside the sampler, wi
 - Click or drag across the boxes to paint a beat; right click rubs one out
 - Set how many boxes a pattern has, one step at a time
 - Patterns down the left: click one to pick it out, double click a block to edit it
+- A speaker on a pattern's row silences it wherever it plays, without deleting anything
 - Song view: draw a pattern anywhere, drag it about, drag its ends to say how long it plays
 - Snap, zoom (buttons or a trackpad pinch) in the song and in the piano roll
+- Drag a note or a block into the edge of the window and the view follows
 - A colour per pattern, lighter while it sounds
 - Undo and redo, with a drag counted as one step
 - Any track can be a pitched instrument instead of a drum, with a piano roll to write in
 - An instrument's row in a pattern shows its notes instead of boxes; click it for the roll
+- Shift drag a box round notes in either editor, then move them, copy them or rub them out
+- Copy a part off one instrument and paste it onto another, in the same pattern or another
 - Click a track's name to hear it, or a key in the roll to hear that note
 - Play, stop, tempo, and a playhead you can drag whether or not it is playing
 - Per track: volume, mute, solo, delete
@@ -45,6 +49,12 @@ of a four step pattern, thirty two of a thirty two step one, nothing padded out 
 it did not ask for — and then it is its own length: drag its right hand end out and the
 pattern **repeats** to fill it, drag it in and the pattern is **cut off** part way through.
 Drag the middle to slide it along, drag the left hand end to change where it comes in.
+
+The speaker on a pattern's row in the panel **silences that pattern**, wherever it plays: turn
+the hats off and every block of them in the song goes quiet at once, and its blocks go faint
+rather than away so you can still see where the part is. That is a different switch from the
+mute on a track's row inside a pattern, which is one track in one pattern. Nothing is deleted
+either way, which is the point: it is how you listen to a song without a part.
 
 A block starts wherever the **snap** puts it, which is a bar by default and anything from one
 step up. It is not tied to its pattern's own grid, so a thirty two step pattern can start on
@@ -111,6 +121,38 @@ right click to rub it out. Everything you touch plays as you touch it. How hard 
 hit is the lane underneath — drag it. Drawing **past the end** of the pattern makes the
 pattern longer, which is how one bar becomes two.
 
+Drag either kind of thing — a note's end, a block's end — into the edge of the window and the
+view **scrolls to follow**. Stretching is the case that needs it: what you are dragging is the
+right hand end, so the moment it reaches the edge there is nowhere left to pull it to.
+
+### Picking notes out
+
+**Shift and drag a box** round some notes, in the roll or in the step grid, and they are
+picked out. Shift clicking one note puts it in or takes it out. Then:
+
+- Drag any one of them and they all move, keeping the shape they were picked out in
+- Hold alt and drag to leave the originals and pull copies off them
+- `c` copies, `x` cuts, `v` pastes, `a` takes the lot, delete rubs them out
+- Escape lets go of them
+
+Plain letters, not cmd-C and cmd-V, and that is not laziness: on a Mac the menu bar's own Copy
+and Paste are handled before the window sees those keys — the same trap cmd-Z falls into,
+which is why undo is a menu item — and taking them off the menu would break copying and
+pasting in the one text field in the app.
+
+Pasting is how a part gets from one instrument to another. What is copied is the notes and
+how far down the rows they sat, not which instrument they came out of, so **v drops them on
+whichever row you are pointing at**: copy a drum pattern, point at the bass and paste, and the
+bass plays that rhythm at middle C. It works into another pattern too, since the clipboard
+outlives the pattern it came from. Pasting straight back where it came from would do nothing
+at all, so there it lands after itself instead — copy a bar, press v, and there is the next
+one.
+
+Notes only show where they can be seen, and picking them out follows the same rule: a box
+dragged over a row of boxes takes the notes a box can mean, and one dragged over a piano roll
+row takes whatever is in it. Paste a melody onto a row of boxes and it says how many of the
+notes it put there are only visible in the roll.
+
 A box in the step grid *is* a note in the roll: middle C, one step long. There is no
 converting between them and nothing to keep in step.
 
@@ -154,19 +196,24 @@ Weetbeats looks in the standard places — `~/Library/Audio/Plug-Ins/CLAP` and
 anything in `$CLAP_PATH`. Effects are listed but greyed out: instruments first, effects with
 stage 5.
 
-Clicking a plugin track's plug opens the sound editor onto **the plugin's own controls**
-rather than ours. A synth has an envelope, a tuning and a panning inside it already, and a
-second set of ours beside them would be two things fighting over one sound. What stays ours
-is how loud the track is. Surge XT has more controls than fit on a screen, so there is a
-filter above them.
+Clicking a plugin track's plug opens **the plugin's own window** — Surge XT as its own
+designers drew it — and leaves you where you were. That is the thing you came for, and a
+screen of ours whose whole job was a button that opens it was a step in the way. The plug is
+lit while the window is up, and the same press puts it away again.
 
-**Open its window** gives you the plugin's real interface — Surge XT as its own designers drew
-it. Which window that is depends on the plugin. A few make their own, and then all we do is
+Shift click it for what *we* have to say about a plugin track: how loud the track is, and the
+plugin's parameters as a list. A synth has an envelope, a tuning and a panning inside it
+already, and a second set of ours beside them would be two things fighting over one sound, so
+what stays ours is the level. Surge XT has more controls than fit on a screen, so there is a
+filter above them. A plugin with **no window of its own** lands you there anyway, because then
+that list is the only way in.
+
+Which window a plugin gets depends on the plugin. A few make their own, and then all we do is
 say which window it should stay above and what to call itself. Most, Surge XT among them, have
 a view and no window: everything built with JUCE is one. Those get a window of ours, made the
 size the plugin asks for, resized when its own zoom control asks again, and taken down when
-either end closes it. Either way the button says whether it is up. Not every plugin has an
-interface at all, and the only way to find out is to ask, so the button is always there and
+either end closes it. Either way the plug says whether it is up. Not every plugin has an
+interface at all, and the only way to find out is to ask, so the plug is always there and
 tells you when the answer is no.
 
 What a plugin is set to is the plugin's business: it is asked for its settings when the

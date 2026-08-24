@@ -612,6 +612,21 @@ body.drop-target::after {
   opacity: 1;
 }
 
+/*
+ * Except a mute that is on, which has to be visible from across the room: a pattern you
+ * cannot hear and cannot see the reason for is a bug report waiting to happen.
+ */
+.prow .tick.mute.on {
+  opacity: 1;
+}
+
+/* And the row it is on goes quiet too, the way its blocks in the song do. */
+.prow.muted .pname,
+.prow.muted .plen,
+.prow.muted .swatch {
+  opacity: 0.45;
+}
+
 /* --- the song --- */
 
 .song {
@@ -1311,6 +1326,12 @@ input.number.small-number {
 
 .track .wave.plugged:hover {
   color: var(--text);
+}
+
+/* And lit while the plugin's own window is up, because the same press puts it away again. */
+.track .wave.plugged.on {
+  color: var(--accent);
+  border-color: var(--accent);
 }
 
 /*

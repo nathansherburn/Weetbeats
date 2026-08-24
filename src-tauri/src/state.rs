@@ -549,6 +549,13 @@ impl AppState {
     /// project, and the audio thread starts every pattern at the default, so only those need
     /// sending.
     fn push_mix(&self, pattern: &Pattern) {
+        // Whether the whole pattern is silenced belongs to the pattern rather than to any
+        // track in it, and it is sent either way: a slot that has been used before starts
+        // clean only because this says so.
+        self.send(Command::MutePattern {
+            pattern: pattern.id,
+            muted: pattern.muted,
+        });
         for mix in &pattern.mix {
             self.send(Command::SetPatternGain {
                 pattern: pattern.id,

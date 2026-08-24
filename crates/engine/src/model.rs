@@ -392,6 +392,11 @@ fn default_gain() -> f32 {
     DEFAULT_TRACK_GAIN
 }
 
+/// A pattern nobody has silenced, which is nearly all of them: not worth writing down.
+fn not_muted(muted: &bool) -> bool {
+    !*muted
+}
+
 impl TrackMix {
     pub fn new(track: u16) -> Self {
         TrackMix {
@@ -424,6 +429,14 @@ pub struct Pattern {
     /// front end picks from the pattern's id so a new pattern looks different from the last.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub colour: Option<u8>,
+    /// Silent, wherever it plays. The speaker on its row in the panel.
+    ///
+    /// A different switch from the mute on a track's row, which is one track inside one
+    /// pattern. This one is the pattern itself: turn the hats pattern off and every block of
+    /// it in the song goes quiet at once, which is how you listen to a song without a part
+    /// without taking the part out.
+    #[serde(default, skip_serializing_if = "not_muted")]
+    pub muted: bool,
     /// How each track sits in this pattern. Only the ones that differ from the default are
     /// in here; [`Pattern::mix_of`] answers for the rest.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -442,6 +455,7 @@ impl Pattern {
             name,
             steps: DEFAULT_STEPS,
             colour: None,
+            muted: false,
             mix: Vec::new(),
             pitched: Vec::new(),
             lanes: Vec::new(),
@@ -997,6 +1011,21 @@ mod tests {
         project.tracks.push(Track::new(0, "kick".into(), None));
         project.tracks.push(Track::new(1, "snare".into(), None));
         project
+    }
+
+    /// The pattern's own mute is the pattern's, so it is written down with it — but only
+    /// when it is on, because nearly every pattern is one nobody has silenced.
+    #[test]
+    fn a_silenced_pattern_is_still_silenced_when_it_is_opened_again() {
+        let mut project = kit();
+        // A pattern nobody has silenced does not carry the word at all.
+        assert!(!serde_json::to_string(&project.patterns[0])
+            .unwrap()
+            .contains("muted"));
+        project.patterns[0].muted = true;
+        let text = serde_json::to_string(&project).unwrap();
+        let back: Project = serde_json::from_str(&text).unwrap();
+        assert!(back.patterns[0].muted);
     }
 
     #[test]

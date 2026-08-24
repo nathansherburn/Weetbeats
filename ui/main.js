@@ -52,6 +52,7 @@ const HEAD_LINE = 3;
 const STEPS_PER_BEAT = 4; // sixteenth notes
 const STEPS_PER_BAR = 16; // a bar of the song, and the length of a new pattern
 const MAX_STEPS = 256; // as far as the engine will play
+const MAX_NOTES = 256; // notes one track can hold in one pattern: must match MAX_NOTES_PER_TRACK
 
 // The sound editor's two pictures. Must match .sound-wave and .sound-env in the stylesheet.
 const SOUND_WAVE_HEIGHT = 96;
@@ -167,6 +168,10 @@ const state = {
   sound: null, // the track the sound editor has, or null for the music
   trimming: null, // which end of the sound is being dragged: "start", "end", or null
   drawLength: 1, // how long the last note drawn was, so the next one matches
+  picked: [], // the notes picked out, as { track, note }: what a drag, a copy or a delete has
+  marquee: null, // the box being dragged round some notes: { where, from, to }
+  clip: null, // what was copied: { rows: [{ down, notes }], base }
+  overRow: null, // the row the pointer is over in the step grid, which is where a paste goes
   snap: STEPS_PER_BAR, // what blocks in the song snap to, in steps
   zoom: 1, // how wide a step of the song is drawn, as a multiple of SONG_STEP
   rollZoom: 1, // how big a step and a semitone are drawn in the roll
@@ -237,6 +242,9 @@ async function boot() {
  * to the song — unless what it was looking at has gone.
  */
 function applyProject(startup) {
+  // Everything underneath is about to be replaced, and a note picked out is the note
+  // itself, not the place it was in.
+  forgetPicked();
   const project = startup.project;
   state.bpm = project.bpm;
   const waveforms = new Map((startup.waveforms ?? []).map((w) => [w.track, w.peaks]));
@@ -307,6 +315,9 @@ function readPattern(pattern) {
     name: pattern.name,
     steps: pattern.steps,
     colour: pattern.colour ?? null,
+    // Silent wherever it plays, from the speaker on its row. The pattern's own switch, not
+    // one of the row of switches below, which are about one track inside it.
+    muted: pattern.muted ?? false,
     // How each track sits in this pattern: how loud, whether it is heard, and whether it is
     // an instrument. All decisions about the part rather than about the sound, so they belong
     // to the pattern — the same bass can hold a rhythm down in one and play a melody in the
@@ -414,6 +425,7 @@ function showPatternColour() {
 
 function openPattern(id) {
   if (patternById(id) === null) return;
+  forgetPicked();
   state.open = id;
   state.selected = id;
   state.roll = null;
@@ -430,6 +442,7 @@ function openPattern(id) {
 }
 
 function closePattern() {
+  forgetPicked();
   // The pattern you were in stays picked out, so the song shows you where it plays.
   if (state.open !== null) state.selected = state.open;
   state.open = null;
@@ -539,6 +552,21 @@ function drawPatternPanel() {
       len.title = `${pattern.steps} steps`;
       row.append(len);
 
+      // The pattern's own mute. Not the one on a track's row, which is one track inside
+      // one pattern: this one is the pattern itself, so every block of it in the song goes
+      // quiet at once. Which is how you listen to a song without the hats without taking
+      // the hats out.
+      const hush = document.createElement("button");
+      hush.className = `tick mute${pattern.muted ? " on" : ""}`;
+      hush.replaceChildren(icon("mute"));
+      hush.title = mutingSays(pattern.muted);
+      hush.setAttribute("aria-label", hush.title);
+      hush.addEventListener("click", (e) => {
+        e.stopPropagation();
+        mutePattern(pattern, !pattern.muted);
+      });
+      row.append(hush);
+
       const copy = document.createElement("button");
       copy.className = "tick dup";
       copy.textContent = "⧉";
@@ -591,10 +619,31 @@ function markPatternRows() {
   el.songMode.classList.toggle("on", state.open === null);
   for (const row of el.patternList.children) {
     const id = Number(row.dataset.id);
+    const muted = patternById(id)?.muted ?? false;
     row.classList.toggle("open", state.open === id);
     row.classList.toggle("picked", state.open !== id && state.selected === id);
     row.classList.toggle("playing", state.playing && isSounding(id));
+    // A silenced pattern says so without the panel being rebuilt, so the speaker can be
+    // pressed while the song runs and the row goes faint under your finger.
+    row.classList.toggle("muted", muted);
+    const hush = row.querySelector(".tick.mute");
+    if (hush) {
+      hush.classList.toggle("on", muted);
+      hush.title = mutingSays(muted);
+      hush.setAttribute("aria-label", hush.title);
+    }
   }
+}
+
+const mutingSays = (muted) =>
+  muted ? "Silent — click to hear this pattern again" : "Silence this pattern, wherever it plays";
+
+/* Turn a whole pattern off, or on again. Rust holds it; the audio thread fades it out. */
+function mutePattern(pattern, muted) {
+  pattern.muted = muted;
+  invoke("mute_pattern", { id: pattern.id, muted });
+  markPatternRows();
+  state.needsDraw = true;
 }
 
 /* The engine reports what is sounding as one bit per pattern. */
@@ -696,6 +745,7 @@ el.addPattern.addEventListener("click", () => {
  * whole. Cheaper to redraw from that than to work out what moved.
  */
 async function rearrange(command, args, then) {
+  forgetPicked();
   try {
     const after = await invoke(command, args);
     state.patterns = after.patterns.map(readPattern);
@@ -814,6 +864,7 @@ async function setSteps(steps) {
   // Rust hands back the length it settled on and the whole arrangement: notes that no
   // longer fit are shortened or dropped, and there is no telling which from here. The song
   // is left alone — a block in it is as long as it was drawn, whatever its pattern does.
+  forgetPicked();
   const [actual, after] = await invoke("set_pattern_steps", { id: open.id, steps: asked });
   state.patterns = after.patterns.map(readPattern);
   state.song = after.song.map((one) => ({ ...one }));
@@ -890,11 +941,13 @@ function drawTrackHeaders() {
       const wave = document.createElement("button");
       wave.className = "wave";
       wave.title = track.plugin
-        ? `${track.plugin.name} — click for its controls`
+        ? `${track.plugin.name} — click for its own window, shift click for our controls`
         : `${track.name} — click to shape this sound`;
       wave.setAttribute("aria-label", wave.title);
       if (track.plugin) {
         wave.classList.add("plugged");
+        // Lit while its window is up, so the plug says which way the next press goes.
+        wave.classList.toggle("on", plugins.windows.has(track.id));
         wave.append(icon("plug"));
       } else {
         const drawing = document.createElement("canvas");
@@ -903,7 +956,17 @@ function drawTrackHeaders() {
         drawWaveform(drawing, track.peaks);
         wave.append(drawing);
       }
-      wave.addEventListener("click", () => openSound(track.id));
+      wave.addEventListener("click", (e) => {
+        // A plug goes to the plugin's own window: Surge XT as its own designers drew it,
+        // which is the thing you came for. What we have to say about a plugin track is a
+        // shift click away — the track's level, and the plugin's parameters — and is where
+        // a plugin with no window of its own lands you anyway.
+        if (track.plugin && !e.shiftKey) {
+          togglePluginWindow(track.id);
+          return;
+        }
+        openSound(track.id);
+      });
       row.append(wave);
 
       // The whole row belongs to the pattern that is open: how loud, what is heard, and
@@ -985,6 +1048,7 @@ function beaten(solo, muted) {
 
 /* Deleting a track takes its notes out of every pattern, and its sample out of the folder. */
 function removeTrack(id) {
+  forgetPicked();
   invoke("remove_track", { id });
   state.tracks = state.tracks.filter((track) => track.id !== id);
   for (const pattern of state.patterns) {
@@ -1176,6 +1240,69 @@ function songChanged() {
 
 window.addEventListener("resize", resize);
 
+// --- dragging past the edge -----------------------------------------------
+
+/*
+ * A drag that reaches the edge of the window scrolls the view to follow it.
+ *
+ * Stretching a note or a block is the case that needs it: the thing you are dragging is the
+ * right hand end, so the moment it reaches the edge there is nowhere left to pull it to and
+ * you have to let go, scroll, and pick it up again. The view moves instead.
+ *
+ * Nothing here knows what is being dragged. It scrolls, and then hands the drag the last
+ * place the pointer was — which is now over a different step — so whatever was following the
+ * pointer carries on following it. One scroll per frame, from the same loop that draws.
+ */
+const EDGE_SCROLL = 32; // how close to an edge the pointer has to get to start it
+const EDGE_SCROLL_MAX = 26; // and how fast it goes hard against it, in pixels a frame
+
+let edgeScroll = null; // { scroller, axes, point, apply }
+
+/*
+ * Follow this drag. Called on every move rather than once at the start, because the whole
+ * job is knowing where the pointer is now.
+ */
+function followEdge(scroller, event, axes, apply) {
+  edgeScroll = {
+    scroller,
+    axes,
+    point: { clientX: event.clientX, clientY: event.clientY },
+    apply,
+  };
+}
+
+function stopFollowing() {
+  edgeScroll = null;
+}
+
+/* How fast to scroll for a pointer this far into an edge: nothing until it is close. */
+function edgePush(at, low, high) {
+  if (at < low + EDGE_SCROLL) {
+    return -Math.min(1, (low + EDGE_SCROLL - at) / EDGE_SCROLL) * EDGE_SCROLL_MAX;
+  }
+  if (at > high - EDGE_SCROLL) {
+    return Math.min(1, (at - (high - EDGE_SCROLL)) / EDGE_SCROLL) * EDGE_SCROLL_MAX;
+  }
+  return 0;
+}
+
+/* One frame of it. Does nothing at all unless a drag has asked to be followed. */
+function runEdgeScroll() {
+  const drag = edgeScroll;
+  if (!drag) return;
+  const box = drag.scroller.getBoundingClientRect();
+  const dx = drag.axes.includes("x") ? edgePush(drag.point.clientX, box.left, box.right) : 0;
+  const dy = drag.axes.includes("y") ? edgePush(drag.point.clientY, box.top, box.bottom) : 0;
+  if (!dx && !dy) return;
+  const wasX = drag.scroller.scrollLeft;
+  const wasY = drag.scroller.scrollTop;
+  drag.scroller.scrollLeft = Math.max(0, wasX + dx);
+  drag.scroller.scrollTop = Math.max(0, wasY + dy);
+  // Already at the end of what there is to scroll, so the drag has nothing new to hear.
+  if (drag.scroller.scrollLeft === wasX && drag.scroller.scrollTop === wasY) return;
+  drag.apply(drag.point);
+}
+
 // --- the pattern editor ---------------------------------------------------
 
 function drawRuler() {
@@ -1225,8 +1352,11 @@ function drawGrid() {
     // Only the notes a box can mean: the sampler's own pitch. Anything drawn in the piano
     // roll lives in the same lane and is left to the roll to show.
     const ticked = new Set();
+    const picked = new Set();
     for (const note of pattern.notes.get(track.id) ?? []) {
-      if (note.pitch === DEFAULT_PITCH) ticked.add(note.step);
+      if (note.pitch !== DEFAULT_PITCH) continue;
+      ticked.add(note.step);
+      if (isPicked(track.id, note)) picked.add(note.step);
     }
 
     for (let step = 0; step < pattern.steps; step++) {
@@ -1244,8 +1374,13 @@ function drawGrid() {
       }
       roundRect(ctx, x, y + BOX_INSET, w, h, 4);
       ctx.fill();
+      if (on && picked.has(step)) {
+        outlinePicked(ctx, () => roundRect(ctx, x, y + BOX_INSET, w, h, 4));
+      }
     }
   }
+
+  if (state.marquee && state.marquee.where === "grid") drawMarquee(ctx, state.marquee);
 }
 
 /*
@@ -1305,6 +1440,12 @@ function drawMiniRoll(ctx, pattern, track, y) {
       state.step < note.step + Math.max(1, note.length);
     ctx.fillStyle = live ? PALETTE.lit : ink;
     ctx.fillRect(x, top + height - 2 - bar - up, w, bar);
+    if (isPicked(track.id, note)) {
+      outlinePicked(ctx, () => {
+        ctx.beginPath();
+        ctx.rect(x - 0.5, top + height - 2.5 - bar - up, w + 1, bar + 1);
+      });
+    }
   }
   ctx.restore();
 }
@@ -1369,9 +1510,72 @@ function erasing(event) {
   return event.button === 2 || (event.buttons & 2) === 2;
 }
 
+/*
+ * Where a pointer is in the grid as a plain point, clamped to it. What the box you drag
+ * round some notes is measured in, the same as in the roll.
+ */
+function gridPoint(event) {
+  const rect = el.grid.getBoundingClientRect();
+  return {
+    x: Math.max(0, Math.min(gridWidth(), event.clientX - rect.left)),
+    y: Math.max(0, Math.min(gridHeight(), event.clientY - rect.top)),
+  };
+}
+
+/* Which row of the grid a pointer is over, or null for none. Where a paste lands. */
+function rowAt(event) {
+  const row = Math.floor((event.clientY - el.grid.getBoundingClientRect().top) / ROW);
+  return row >= 0 && row < state.tracks.length ? row : null;
+}
+
+/*
+ * Every note a box dragged over the grid touches. It runs across rows, which is the point:
+ * a set picked out here can be copied out of one instrument and pasted into another.
+ */
+function notesInGridBox(box) {
+  const pattern = openPatternNow();
+  if (!pattern) return [];
+  const left = Math.min(box.from.x, box.to.x);
+  const right = Math.max(box.from.x, box.to.x);
+  const top = Math.min(box.from.y, box.to.y);
+  const bottom = Math.max(box.from.y, box.to.y);
+  const found = [];
+  for (let row = 0; row < state.tracks.length; row++) {
+    if (row * ROW + ROW < top || row * ROW > bottom) continue;
+    const track = state.tracks[row].id;
+    const pitched = Boolean(pattern.mix.get(track)?.pitched);
+    for (const note of pattern.notes.get(track) ?? []) {
+      // What plays is what you can see, and what a box takes is the same: a row of boxes
+      // only shows the notes a box can mean.
+      if (!pitched && note.pitch !== DEFAULT_PITCH) continue;
+      const x = note.step * CELL;
+      const w = (pitched ? Math.max(1, note.length) : 1) * CELL;
+      if (x + w < left || x > right) continue;
+      found.push({ track, note });
+    }
+  }
+  return found;
+}
+
+let gridBox = false; // a box being dragged round some notes rather than a run of painting
+
 el.grid.addEventListener("pointerdown", (e) => {
+  /*
+   * Shift drags a box round notes instead of painting. It has to be a modifier: pressing on
+   * a box already means "tick it and keep painting", which is the whole way you write a
+   * beat and not something to give up for a selection box.
+   */
+  if (e.shiftKey) {
+    const corner = gridPoint(e);
+    el.grid.setPointerCapture(e.pointerId);
+    gridBox = true;
+    state.marquee = { where: "grid", from: corner, to: corner };
+    state.needsDraw = true;
+    return;
+  }
   const cell = cellAt(e);
   if (!cell) return;
+  clearPicked();
   // An instrument's row is a piano roll, and a piano roll opens rather than being ticked.
   if (isPitched(cell.track)) {
     openRoll(cell.track);
@@ -1388,20 +1592,52 @@ el.grid.addEventListener("pointerdown", (e) => {
 });
 
 el.grid.addEventListener("pointermove", (e) => {
+  if (gridBox) {
+    followEdge(el.editorScroll, e, "xy", gridDragTo);
+    gridDragTo(e);
+    return;
+  }
   if (painting === null) {
+    // Which row the pointer is over is where a paste goes, so it is worth keeping even
+    // when nothing is being dragged.
+    state.overRow = rowAt(e);
     const cell = cellAt(e);
-    const cursor = !cell ? "default" : isPitched(cell.track) ? "pointer" : "cell";
+    const cursor = e.shiftKey
+      ? "crosshair"
+      : !cell
+        ? "default"
+        : isPitched(cell.track)
+          ? "pointer"
+          : "cell";
     if (el.grid.style.cursor !== cursor) el.grid.style.cursor = cursor;
     return;
   }
   paint(cellAt(e), painting);
 });
 
+/* Where the box has got to, taken apart so a scroll under a still hand can put it through. */
+function gridDragTo(point) {
+  if (!gridBox || !state.marquee) return;
+  state.marquee.to = gridPoint(point);
+  state.overRow = rowAt(point);
+  pickNotes(notesInGridBox(state.marquee), true);
+}
+
 const stopPainting = () => {
   painting = null;
+  stopFollowing();
+  if (gridBox) {
+    gridBox = false;
+    state.marquee = null;
+    state.needsDraw = true;
+    sayPicked();
+  }
 };
 el.grid.addEventListener("pointerup", stopPainting);
 el.grid.addEventListener("pointercancel", stopPainting);
+el.grid.addEventListener("pointerleave", () => {
+  if (!gridBox) state.overRow = null;
+});
 
 // --- the piano roll -------------------------------------------------------
 
@@ -1413,6 +1649,8 @@ el.grid.addEventListener("pointercancel", stopPainting);
  */
 function openRoll(track) {
   if (state.open === null || trackById(track) === null) return;
+  // The grid and the roll each pick their own notes out; going between them starts again.
+  forgetPicked();
   state.roll = track;
   showView();
   // Notes only mean pitch and length on an instrument, so opening the roll makes it one in
@@ -1428,6 +1666,7 @@ function openRoll(track) {
 }
 
 function closeRoll() {
+  forgetPicked();
   state.roll = null;
   showView();
   resize();
@@ -1449,6 +1688,9 @@ function rollNotes() {
  * It belongs to the pattern, so turning it off here says nothing about any other pattern.
  */
 function setPitched(track, pitched) {
+  // The row is about to show a different set of notes, and what is picked out is the notes
+  // themselves.
+  forgetPicked();
   setMix(track, { pitched }, "set_pattern_pitched", { pitched });
   if (!pitched && state.roll === track) closeRoll();
   drawTrackHeaders();
@@ -1592,7 +1834,14 @@ function drawNotes() {
     // The right hand edge is the handle for how long it is, so it says so.
     ctx.fillStyle = "rgba(0,0,0,0.25)";
     ctx.fillRect(x + w - 2, y + 1, 2, semitone() - 3);
+    // And an outline for one that has been picked out, because the next thing you press
+    // happens to all of them.
+    if (isPicked(state.roll, note)) {
+      outlinePicked(ctx, () => roundRect(ctx, x + 1, y + 1, w, semitone() - 3, 3));
+    }
   }
+
+  if (state.marquee && state.marquee.where === "roll") drawMarquee(ctx, state.marquee);
 }
 
 function drawVelocity() {
@@ -1636,6 +1885,37 @@ function noteUnder(at) {
   return null;
 }
 
+/*
+ * Where a pointer is in the roll as a plain point, clamped to the canvas. What the box you
+ * drag round a set of notes is measured in: a box has to keep a corner where you started it
+ * even once your hand has gone off the end of the notes.
+ */
+function rollPoint(event) {
+  const rect = el.notes.getBoundingClientRect();
+  return {
+    x: Math.max(0, Math.min(rollSteps() * rollCell(), event.clientX - rect.left)),
+    y: Math.max(0, Math.min(PITCHES * semitone(), event.clientY - rect.top)),
+  };
+}
+
+/* Every note the box drawn in the roll touches. Touching counts, the way it does anywhere. */
+function notesInBox(box) {
+  const left = Math.min(box.from.x, box.to.x);
+  const right = Math.max(box.from.x, box.to.x);
+  const top = Math.min(box.from.y, box.to.y);
+  const bottom = Math.max(box.from.y, box.to.y);
+  const found = [];
+  for (const note of rollNotes()) {
+    const x = note.step * rollCell();
+    const w = Math.max(1, note.length) * rollCell();
+    const y = pitchRow(note.pitch) * semitone();
+    if (x + w < left || x > right) continue;
+    if (y + semitone() < top || y > bottom) continue;
+    found.push({ track: state.roll, note });
+  }
+  return found;
+}
+
 let dragging = null;
 
 el.notes.addEventListener("pointerdown", (e) => {
@@ -1645,31 +1925,63 @@ el.notes.addEventListener("pointerdown", (e) => {
   const under = noteUnder(at);
 
   if (erasing(e)) {
-    if (under) {
-      remove(under.note);
-    }
+    // The right button rubs out. A note that is one of a set picked out takes the whole set
+    // with it, which is what picking them out was for.
+    if (under && isPicked(state.roll, under.note)) removePicked();
+    else if (under) remove(under.note);
     return;
   }
 
   el.notes.setPointerCapture(e.pointerId);
+
+  /*
+   * Shift drags a box round notes rather than drawing one. It has to be shift: pressing on
+   * an empty square already means "put a note there and drag out how long it is", which is
+   * the best gesture in the roll and not one to give up for a selection box.
+   */
+  if (e.shiftKey) {
+    if (under) {
+      togglePicked(state.roll, under.note);
+      return;
+    }
+    const corner = rollPoint(e);
+    dragging = { mode: "box" };
+    state.marquee = { where: "roll", from: corner, to: corner };
+    state.needsDraw = true;
+    return;
+  }
+
   if (under && under.edge) {
     // Grabbed by the end: this is how long it is.
     dragging = { mode: "length", note: under.note, was: { ...under.note } };
     return;
   }
   if (under) {
+    // A note out of a picked set moves the whole set; one that is not clears the set, so a
+    // plain press is always about the note you pressed on.
+    if (!isPicked(state.roll, under.note)) clearPicked();
+    // Alt leaves the originals where they are and drags copies away, which is how one bar
+    // becomes two without going near the clipboard.
+    const copying = e.altKey;
+    const moving = state.picked.length ? state.picked.map((one) => one.note) : [under.note];
+    const held = copying ? copyNotesInPlace(pattern, state.roll, moving) : moving;
+    const grabbed = copying ? held[moving.indexOf(under.note)] ?? held[0] : under.note;
+    if (copying) pickNotes(held.map((note) => ({ track: state.roll, note })));
     dragging = {
       mode: "move",
-      note: under.note,
-      was: { ...under.note },
-      grab: { step: at.step - under.note.step, pitch: at.pitch - under.note.pitch },
+      note: grabbed,
+      was: { ...grabbed },
+      copying,
+      moving: held.map((note) => ({ note, was: { ...note } })),
+      grab: { step: at.step - grabbed.step, pitch: at.pitch - grabbed.pitch },
     };
-    invoke("audition", { id: state.roll, pitch: under.note.pitch });
+    invoke("audition", { id: state.roll, pitch: grabbed.pitch });
     return;
   }
 
   // Nothing there, so draw one — and keep hold of its end, so dragging straight on sets
   // how long it is.
+  clearPicked();
   const note = {
     step: at.step,
     pitch: at.pitch,
@@ -1688,11 +2000,31 @@ el.notes.addEventListener("pointermove", (e) => {
     // The same cursors as the song: the end of a note is a handle, the middle picks it up.
     const at = rollAt(e);
     const under = at && noteUnder(at);
-    const cursor = !under ? "cell" : under.edge ? "ew-resize" : "grab";
+    const cursor = e.shiftKey ? "crosshair" : !under ? "cell" : under.edge ? "ew-resize" : "grab";
     if (el.notes.style.cursor !== cursor) el.notes.style.cursor = cursor;
     return;
   }
-  const at = rollAt(e);
+  // Stretching a note into the edge of the window scrolls the roll along under it, so the
+  // drag never runs out of room. Moving one does it both ways, because it can go anywhere.
+  followEdge(el.rollScroll, e, dragging.mode === "length" ? "x" : "xy", rollDragTo);
+  rollDragTo(e);
+});
+
+/*
+ * Where the drag has got to. Taken apart from the event so that scrolling the view under a
+ * still hand can put the drag through again: the pointer has not moved, but what it is over
+ * has.
+ */
+function rollDragTo(point) {
+  if (!dragging) return;
+
+  if (dragging.mode === "box") {
+    state.marquee.to = rollPoint(point);
+    pickNotes(notesInBox(state.marquee), true);
+    return;
+  }
+
+  const at = rollAt(point);
   if (!at) return;
   const note = dragging.note;
 
@@ -1705,25 +2037,72 @@ el.notes.addEventListener("pointermove", (e) => {
     return;
   }
 
-  const step = Math.max(0, Math.min(at.step - dragging.grab.step, MAX_STEPS - note.length));
-  const pitch = Math.max(LOW_PITCH, Math.min(HIGH_PITCH, at.pitch - dragging.grab.pitch));
-  if (step === note.step && pitch === note.pitch) return;
-  if (pitch !== note.pitch) invoke("audition", { id: state.roll, pitch });
-  note.step = step;
-  note.pitch = pitch;
+  // Moving, one note or a whole set of them: the one you grabbed follows the pointer and
+  // the rest keep their places around it, so the shape of what you picked out is kept.
+  const held = dragging.moving ?? [{ note, was: dragging.was }];
+  let step = Math.max(0, Math.min(at.step - dragging.grab.step, MAX_STEPS - note.length));
+  let pitch = Math.max(LOW_PITCH, Math.min(HIGH_PITCH, at.pitch - dragging.grab.pitch));
+  let byStep = step - dragging.was.step;
+  let byPitch = pitch - dragging.was.pitch;
+  // No note in the set may be pushed off an end, so the whole set stops where the first of
+  // them would have.
+  for (const one of held) {
+    byStep = Math.max(byStep, -one.was.step);
+    byStep = Math.min(byStep, MAX_STEPS - one.was.length - one.was.step);
+    byPitch = Math.max(byPitch, LOW_PITCH - one.was.pitch);
+    byPitch = Math.min(byPitch, HIGH_PITCH - one.was.pitch);
+  }
+  if (byStep === note.step - dragging.was.step && byPitch === note.pitch - dragging.was.pitch) {
+    return;
+  }
+  const heard = dragging.was.pitch + byPitch;
+  if (heard !== note.pitch) invoke("audition", { id: state.roll, pitch: heard });
+  for (const one of held) {
+    one.note.step = one.was.step + byStep;
+    one.note.pitch = one.was.pitch + byPitch;
+  }
   state.needsDraw = true;
-});
+}
 
 const dropNote = () => {
   if (!dragging) return;
-  const { note, was, mode } = dragging;
+  const drag = dragging;
   dragging = null;
+  stopFollowing();
+  const { note, was, mode } = drag;
+
+  if (mode === "box") {
+    state.marquee = null;
+    state.needsDraw = true;
+    sayPicked();
+    return;
+  }
   if (mode === "length") {
     state.drawLength = note.length;
     send(note);
     return;
   }
-  if (note.step === was.step && note.pitch === was.pitch) return;
+  const held = drag.moving ?? [{ note, was }];
+  // Copies dropped where they were made are the notes that are already there, so nothing
+  // has happened and the copies go away again.
+  if (note.step === was.step && note.pitch === was.pitch) {
+    if (drag.copying) undoCopyInPlace(held);
+    return;
+  }
+  const landed = held.map((one) => one.note);
+  // A note dropped on top of another takes its place, which is what Rust does with it too.
+  tidyLane(state.roll, landed);
+  if (drag.copying) {
+    // Nothing to take out: the originals are still where they were, and these are new.
+    sendNoteEdit(state.roll, [], landed);
+    return;
+  }
+  if (held.length > 1) {
+    // The old places out and the new notes in, in one go, so a note landing where another
+    // has just left cannot be rubbed out by the one that left.
+    sendNoteEdit(state.roll, held.map((one) => placeOf(one.was)), landed);
+    return;
+  }
   // One trip rather than two, so the note is never briefly nowhere.
   invoke("move_note", {
     pattern: state.open,
@@ -1758,15 +2137,7 @@ function send(note) {
       showError("that track is as full of notes as the engine will hold");
       return;
     }
-    // A note past the end made the pattern longer, so everything that is drawn from its
-    // length has to be drawn again: the roll, the boxes, and the count in the panel.
-    const grew = patternById(pattern);
-    if (grew && grew.steps !== put.steps) {
-      grew.steps = put.steps;
-      if (state.open === pattern) el.steps.value = String(put.steps);
-      drawPatternPanel();
-      resize();
-    }
+    grewTo(pattern, put.steps);
   });
 }
 
@@ -1825,6 +2196,346 @@ el.keys.addEventListener("pointerdown", (e) => {
   if (row < 0 || row >= PITCHES) return;
   invoke("audition", { id: state.roll, pitch: rowPitch(row) });
 });
+
+// --- picking notes out ----------------------------------------------------
+
+/*
+ * A set of notes, picked out by dragging a box round them, and the four things worth doing
+ * to a set: moving it, copying it, pasting it somewhere else, rubbing it out.
+ *
+ * It is held as the note objects themselves rather than as places, so a note that has been
+ * dragged is still the same note afterwards. Which also means a set cannot outlive the
+ * project it was picked out of: an undo hands over a whole new one, and everything picked
+ * out is dropped along with the notes it pointed at.
+ *
+ * The same set works in both editors. In the roll it is the notes of the one instrument you
+ * are looking at; in the step grid it can run across as many rows as the box covers, and
+ * that is how a part gets from one instrument to another.
+ */
+
+function isPicked(track, note) {
+  return state.picked.some((one) => one.track === track && one.note === note);
+}
+
+/* Pick out this set instead of whatever was picked out before. */
+function pickNotes(picked, quietly) {
+  state.picked = picked;
+  state.needsDraw = true;
+  if (!quietly) sayPicked();
+}
+
+/* Nothing picked out, and nothing part way through being picked out. */
+function forgetPicked() {
+  state.marquee = null;
+  clearPicked();
+}
+
+function clearPicked() {
+  if (!state.picked.length) return;
+  state.picked = [];
+  state.needsDraw = true;
+}
+
+/* Shift clicking one note puts it in the set, or takes it back out. */
+function togglePicked(track, note) {
+  const at = state.picked.findIndex((one) => one.track === track && one.note === note);
+  if (at >= 0) state.picked.splice(at, 1);
+  else state.picked.push({ track, note });
+  state.needsDraw = true;
+  sayPicked();
+}
+
+/*
+ * What can be done with them now, said in the one place this app says anything.
+ *
+ * Plain letters rather than cmd-C and cmd-V, and that is not laziness: on a Mac the menu
+ * bar's own Copy and Paste are handled before the window ever sees those keys — the same
+ * trap cmd-Z falls into, which is why undo is a menu item — and taking them off the menu
+ * would break copying and pasting in the one text field in the app.
+ */
+function sayPicked() {
+  if (!state.picked.length) return;
+  showNote(
+    `${count(state.picked.length, "note")} picked out — c to copy, v to paste, delete to rub out`,
+  );
+}
+
+const count = (many, thing) => `${many} ${thing}${many === 1 ? "" : "s"}`;
+
+/* Where a note is: the two things that say which note it is inside a lane. */
+const placeOf = (note) => ({ step: note.step, pitch: note.pitch });
+
+/* The picked notes, gathered by the track they are in. */
+function pickedByTrack() {
+  const rows = new Map();
+  for (const one of state.picked) {
+    if (!rows.has(one.track)) rows.set(one.track, []);
+    rows.get(one.track).push(one.note);
+  }
+  return rows;
+}
+
+/* Everything in the editor you are looking at, picked out at once. */
+function pickEverything() {
+  const pattern = openPatternNow();
+  if (!pattern) return;
+  if (state.roll !== null) {
+    pickNotes(rollNotes().map((note) => ({ track: state.roll, note })));
+    return;
+  }
+  const all = [];
+  for (const track of state.tracks) {
+    const pitched = pattern.mix.get(track.id)?.pitched;
+    for (const note of pattern.notes.get(track.id) ?? []) {
+      // What plays is what you can see, and what a box round them takes is the same: a row
+      // of boxes only shows the notes a box can mean.
+      if (!pitched && note.pitch !== DEFAULT_PITCH) continue;
+      all.push({ track: track.id, note });
+    }
+  }
+  pickNotes(all);
+}
+
+/* Rub the lot out, a lane at a time. */
+function removePicked() {
+  const open = openPatternNow();
+  if (!open || !state.picked.length) return;
+  const many = state.picked.length;
+  for (const [track, notes] of pickedByTrack()) {
+    const lane = notesFor(open, track);
+    for (const gone of notes) {
+      const at = lane.indexOf(gone);
+      if (at >= 0) lane.splice(at, 1);
+    }
+    sendNoteEdit(track, notes.map(placeOf), []);
+  }
+  state.picked = [];
+  state.needsDraw = true;
+  showNote(`${count(many, "note")} rubbed out`);
+}
+
+/*
+ * Copy what is picked out, and cut it if asked.
+ *
+ * Kept as rows rather than as track ids, and as copies of the notes rather than the notes:
+ * what is remembered is how far down the set sat and what was in it, not which instrument it
+ * came out of. That is the whole of pasting a drum part into a bass part — and of pasting it
+ * into a different pattern, which the same clipboard does for free.
+ */
+function copyPicked(cut) {
+  const open = openPatternNow();
+  if (!open || !state.picked.length) return;
+  const rows = new Map();
+  for (const one of state.picked) {
+    const row = state.tracks.findIndex((track) => track.id === one.track);
+    if (row < 0) continue;
+    if (!rows.has(row)) rows.set(row, []);
+    rows.get(row).push({ ...one.note });
+  }
+  if (!rows.size) return;
+  const base = Math.min(...rows.keys());
+  const many = state.picked.length;
+  state.clip = {
+    pattern: open.id,
+    base,
+    rows: [...rows].map(([row, notes]) => ({ down: row - base, notes })),
+  };
+  if (cut) removePicked();
+  showNote(
+    state.roll !== null
+      ? `${count(many, "note")} copied — open another instrument's roll and press v`
+      : `${count(many, "note")} copied — point at an instrument's row and press v`,
+  );
+}
+
+/* How much room the copied notes take, from the first of them to the end of the last. */
+function clipSpan(clip) {
+  let from = Infinity;
+  let to = 0;
+  for (const row of clip.rows) {
+    for (const note of row.notes) {
+      from = Math.min(from, note.step);
+      to = Math.max(to, note.step + Math.max(1, note.length));
+    }
+  }
+  return Math.max(1, to - from);
+}
+
+/*
+ * Put the copy down. The notes keep their own steps and pitches: pasted into another
+ * instrument they land in the same places in the bar, which is what copying a rhythm from
+ * one instrument to another means.
+ *
+ * Straight back where it came from is the one case that would do nothing at all, so there it
+ * lands after itself instead — copy a bar, press v, and there is the next one.
+ */
+function pasteNotes() {
+  const open = openPatternNow();
+  if (!open || !state.clip) return;
+  // Where it lands: the instrument whose roll is open, or the row the pointer is over in the
+  // step grid, or back where it was copied from.
+  const landing =
+    state.roll !== null
+      ? state.tracks.findIndex((track) => track.id === state.roll)
+      : (state.overRow ?? state.clip.base);
+  if (landing < 0) return;
+  const home = state.clip.pattern === open.id && landing === state.clip.base;
+  const along = home ? clipSpan(state.clip) : 0;
+
+  const together = new Map();
+  for (const row of state.clip.rows) {
+    // The roll has one lane to land in, so everything copied goes into that one.
+    const at = state.roll !== null ? landing : landing + row.down;
+    const track = state.tracks[at]?.id;
+    if (track === undefined) continue;
+    if (!together.has(track)) together.set(track, []);
+    together.get(track).push(...row.notes.map((note) => ({ ...note, step: note.step + along })));
+  }
+  if (!together.size) return;
+
+  let hidden = 0;
+  const put = [];
+  for (const [track, notes] of together) {
+    const lane = notesFor(open, track);
+    const fresh = notes.filter(
+      (one) => !lane.some((note) => note.step === one.step && note.pitch === one.pitch),
+    ).length;
+    if (lane.length + fresh > MAX_NOTES) {
+      showError("that track is as full of notes as the engine will hold");
+      continue;
+    }
+    const made = [];
+    for (const one of notes) {
+      const copy = { ...one };
+      const at = lane.findIndex(
+        (note) => note.step === copy.step && note.pitch === copy.pitch,
+      );
+      // A note pasted where one already is takes its place, the same as drawing one there.
+      if (at >= 0) lane[at] = copy;
+      else lane.push(copy);
+      made.push(copy);
+      if (!isPitched(track) && copy.pitch !== DEFAULT_PITCH) hidden += 1;
+    }
+    sendNoteEdit(track, [], made);
+    put.push(...made.map((note) => ({ track, note })));
+  }
+  if (!put.length) return;
+  // What has just landed is what you are working on, so it is what is picked out: drag it
+  // somewhere, or point at the next row and press v again.
+  pickNotes(put, true);
+  showNote(
+    hidden
+      ? `${count(put.length, "note")} pasted — ${hidden} of them only show in the piano roll`
+      : `${count(put.length, "note")} pasted`,
+  );
+}
+
+/*
+ * Copies of some notes, made in the same lane on top of the originals and ready to be
+ * dragged off them. Nothing goes to Rust until they land somewhere.
+ */
+function copyNotesInPlace(pattern, track, notes) {
+  const made = notes.map((one) => ({ ...one }));
+  notesFor(pattern, track).push(...made);
+  return made;
+}
+
+/* Copies dropped exactly where they were made are the notes that are already there. */
+function undoCopyInPlace(held) {
+  const open = openPatternNow();
+  if (!open || state.roll === null) return;
+  const lane = notesFor(open, state.roll);
+  for (const one of held) {
+    const at = lane.indexOf(one.note);
+    if (at >= 0) lane.splice(at, 1);
+  }
+  state.picked = [];
+  state.needsDraw = true;
+}
+
+/*
+ * A lane holds one note per step and pitch, so notes dropped on top of others take their
+ * place. Rust does this for itself when the notes arrive; this keeps the copy in here in
+ * step with it.
+ */
+function tidyLane(track, keep) {
+  const open = openPatternNow();
+  if (!open) return;
+  const lane = notesFor(open, track);
+  const kept = new Set(keep);
+  const taken = new Set(keep.map((note) => `${note.step}:${note.pitch}`));
+  for (let at = lane.length - 1; at >= 0; at--) {
+    if (kept.has(lane[at])) continue;
+    if (taken.has(`${lane[at].step}:${lane[at].pitch}`)) lane.splice(at, 1);
+  }
+}
+
+/*
+ * Notes out and notes in, in one trip.
+ *
+ * Every edit to more than one note at a time goes through here. Rust takes the old ones out
+ * before it puts the new ones in, so a note landing where another has just left cannot be
+ * rubbed out by the one that left — and the whole thing is one step to take back rather
+ * than one per note.
+ */
+function sendNoteEdit(track, remove, add) {
+  const pattern = state.open;
+  if (pattern === null) return;
+  if (!remove.length && !add.length) return;
+  invoke("edit_notes", {
+    pattern,
+    track,
+    remove,
+    add: add.map((note) => ({
+      step: note.step,
+      pitch: note.pitch,
+      velocity: note.velocity,
+      length: note.length,
+    })),
+  }).then((put) => {
+    if (!put.fits) showError("that track is as full of notes as the engine will hold");
+    grewTo(pattern, put.steps);
+  });
+}
+
+/*
+ * A note past the end made the pattern longer, so everything drawn from its length is drawn
+ * again: the roll, the boxes, and the count in the panel.
+ */
+function grewTo(pattern, steps) {
+  const grew = patternById(pattern);
+  if (!grew || !steps || grew.steps === steps) return;
+  grew.steps = steps;
+  if (state.open === pattern) el.steps.value = String(steps);
+  drawPatternPanel();
+  resize();
+}
+
+/* The box being dragged round some notes, in either editor. */
+function drawMarquee(ctx, box) {
+  const x = Math.min(box.from.x, box.to.x);
+  const y = Math.min(box.from.y, box.to.y);
+  const w = Math.abs(box.to.x - box.from.x);
+  const h = Math.abs(box.to.y - box.from.y);
+  ctx.fillStyle = "rgba(255,255,255,0.07)";
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = "rgba(255,255,255,0.5)";
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 3]);
+  ctx.strokeRect(x + 0.5, y + 0.5, w, h);
+  ctx.setLineDash([]);
+}
+
+/*
+ * And the outline that says a note is one of the ones picked out. Takes something that lays
+ * a path down and strokes it, so the shape of the outline is the shape of what it is round.
+ */
+function outlinePicked(ctx, path) {
+  ctx.strokeStyle = "rgba(255,255,255,0.92)";
+  ctx.lineWidth = 1.5;
+  path();
+  ctx.stroke();
+}
 
 // --- the sound editor -----------------------------------------------------
 
@@ -2395,6 +3106,25 @@ function showWindowState(track, open) {
   if (state.sound === track) drawWindowButton(track);
 }
 
+/*
+ * The plug on a track's row, pressed: the plugin's own window up, or down again.
+ *
+ * Rust is asked first rather than trusted from here, because the window has a close box of
+ * its own and using it need not reach us until somebody asks. A plugin that has no window at
+ * all says so, and then our own controls are all there is, so that is where you land.
+ */
+async function togglePluginWindow(track) {
+  try {
+    const up = await invoke("plugin_window_open", { id: track });
+    showWindowState(track, await invoke("set_plugin_window", { id: track, open: !up }));
+  } catch (e) {
+    showError(e);
+    showWindowState(track, false);
+    openSound(track);
+  }
+  drawTrackHeaders();
+}
+
 function drawWindowButton(track) {
   const open = plugins.windows.has(track);
   el.pluginWindow.textContent = open ? "close its window" : "open its window";
@@ -2734,6 +3464,9 @@ function drawLanes() {
       state.step < one.step + Math.max(1, one.length);
 
     const base = blockColour(pattern, row);
+    // A silenced pattern's blocks go faint rather than away: they still say where the part
+    // would play, and pressing the speaker again brings them back.
+    ctx.globalAlpha = pattern.muted ? 0.3 : 1;
     ctx.fillStyle = live ? lighten(base, 0.5) : base;
     roundRect(ctx, x + 1, y + 3, w, h, 4);
     ctx.fill();
@@ -2761,6 +3494,7 @@ function drawLanes() {
         ctx.fillRect(x + at, y + 5, 1, h - 4);
       }
     }
+    ctx.globalAlpha = 1;
   }
 
   ctx.fillStyle = state.playing ? PALETTE.lit : "rgba(139,131,153,0.6)";
@@ -2847,7 +3581,20 @@ el.lanes.addEventListener("pointermove", (e) => {
     showSongCursor(songAt(e));
     return;
   }
-  const at = songAt(e);
+  // Dragging a block's end into the edge of the window scrolls the song along under it, so
+  // stretching a block out never runs out of room to stretch it in.
+  followEdge(el.songScroll, e, "x", songDragTo);
+  songDragTo(e);
+});
+
+/*
+ * Where the drag has got to. Taken apart from the event so that scrolling the song under a
+ * still hand can put the drag through again: the pointer has not moved, but the step it is
+ * over has.
+ */
+function songDragTo(point) {
+  if (!songDrag) return;
+  const at = songAt(point);
   if (!at) return;
 
   if (songDrag.mode === "erase") {
@@ -2891,7 +3638,7 @@ el.lanes.addEventListener("pointermove", (e) => {
     block.step = start;
     songChanged();
   }
-});
+}
 
 /* True when a block of this pattern would sit here without landing on another of its own. */
 function roomFor(pattern, step, length) {
@@ -2935,6 +3682,7 @@ function rubOut(block) {
 const dropBlock = () => {
   const drag = songDrag;
   songDrag = null;
+  stopFollowing();
   if (!drag || !drag.block) return;
   const { block, was } = drag;
   if (block.step === was.step && block.length === was.length) return;
@@ -3182,6 +3930,41 @@ window.addEventListener("keydown", (e) => {
     return;
   }
 
+  /*
+   * What to do with the notes picked out. Plain letters, and the cmd or ctrl versions as
+   * well for wherever those arrive: on a Mac the menu bar's own Copy and Paste are handled
+   * before the window sees cmd-C and cmd-V, the same trap cmd-Z falls into, and taking them
+   * off the menu would break copying and pasting in the one text field there is.
+   */
+  if (!typing && state.open !== null && state.sound === null && !e.altKey) {
+    const key = e.key.toLowerCase();
+    if (key === "c") {
+      e.preventDefault();
+      copyPicked(false);
+      return;
+    }
+    if (key === "x") {
+      e.preventDefault();
+      copyPicked(true);
+      return;
+    }
+    if (key === "v") {
+      e.preventDefault();
+      pasteNotes();
+      return;
+    }
+    if (key === "a") {
+      e.preventDefault();
+      pickEverything();
+      return;
+    }
+    if ((e.key === "Backspace" || e.key === "Delete") && state.picked.length) {
+      e.preventDefault();
+      removePicked();
+      return;
+    }
+  }
+
   if (e.code === "Space" && !typing) {
     e.preventDefault();
     setPlaying(!state.playing);
@@ -3193,6 +3976,9 @@ window.addEventListener("keydown", (e) => {
     if (e.target instanceof HTMLElement) e.target.blur();
     if (!el.picker.classList.contains("hidden")) {
       closePicker();
+    } else if (state.picked.length) {
+      // Notes picked out are a thing to be out of, and the nearest one, so they go first.
+      clearPicked();
     } else if (state.sound !== null) {
       closeSound();
     } else if (state.roll !== null) {
@@ -3267,8 +4053,10 @@ async function tick(now) {
   requestAnimationFrame(tick);
 
   // A pinch that came in since the last frame, applied once, here, where it is about to be
-  // drawn anyway.
+  // drawn anyway. And a drag that has reached the edge of the window, which moves the view
+  // along under it.
   applyPinch();
+  runEdgeScroll();
 
   // No point asking sixty times a second when nothing is moving.
   const interval = state.playing ? 0 : 200;
@@ -3337,6 +4125,11 @@ function showWarning(text) {
 
 function showSaved(name) {
   note(`<span class="ok">saved ${escapeText(name)}</span>`, 1500);
+}
+
+/* Something that has just happened and is worth a moment. Not trouble, so it is not red. */
+function showNote(text) {
+  note(escapeText(text), 2500);
 }
 
 /* Take a notice down before its time is up, for one that has stopped being true. */
