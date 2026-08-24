@@ -4,11 +4,13 @@
 mod audio;
 mod commands;
 mod menu;
+mod plugins;
 mod state;
 
 use std::sync::Arc;
 
 use state::AppState;
+use tauri::Manager;
 
 fn main() {
     let state = match AppState::start() {
@@ -27,6 +29,11 @@ fn main() {
         .manage(state)
         .setup(|app| {
             menu::install(app.handle())?;
+            // Runs on the main thread, which is the whole point: the plugin studio has to
+            // live there, because a plugin's window can only be made there. Anything the
+            // project was already using is loaded now, since until this moment there was
+            // nowhere to put it.
+            app.state::<Arc<AppState>>().attach(app.handle().clone());
             Ok(())
         })
         .on_menu_event(menu::handle)
@@ -48,6 +55,13 @@ fn main() {
             commands::set_pattern_soloed,
             commands::audition,
             commands::set_pattern_pitched,
+            commands::set_voicing,
+            commands::list_plugins,
+            commands::add_plugin,
+            commands::plugin_params,
+            commands::set_plugin_param,
+            commands::set_plugin_window,
+            commands::plugin_window_open,
             commands::set_note,
             commands::clear_note,
             commands::move_note,

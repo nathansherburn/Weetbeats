@@ -162,7 +162,7 @@ fn tempo_decides_the_spacing() {
 }
 
 #[test]
-fn mute_silences_and_solo_beats_mute() {
+fn mute_silences_and_beats_solo() {
     // Quiet tracks on purpose: at full tilt the soft clipper flattens both cases to 1.0
     // and the test would pass no matter what mute did.
     fn rig_with(muted: bool, soloed: bool) -> f32 {
@@ -194,18 +194,25 @@ fn mute_silences_and_solo_beats_mute() {
 
     let both = rig_with(false, false);
     let muted = rig_with(true, false);
-    let soloed = rig_with(true, true);
+    let soloed = rig_with(false, true);
+    let both_switches = rig_with(true, true);
 
     assert!(both > 0.1, "two tracks should be audible");
     assert!(
         muted < both * 0.7,
         "mute did not quieten anything: {muted} vs {both}"
     );
-    // Solo wins over the track's own mute, and silences the track that is not soloed.
+    // Solo silences the track that is not soloed, and leaves the one that is.
     assert!(soloed > 0.1, "soloed track was silent");
     assert!(
         soloed < both * 0.7,
         "the unsoloed track was still audible: {soloed} vs {both}"
+    );
+    // Mute wins. Track 1 is muted so it is silent however it is soloed, and track 0 is not
+    // soloed so the solo shuts it up: the pattern goes quiet altogether.
+    assert!(
+        both_switches < both * 0.1,
+        "a track that is muted and soloed was still heard: {both_switches} vs {both}"
     );
 }
 
@@ -1302,5 +1309,323 @@ fn the_meter_holds_a_hit_long_enough_to_be_seen() {
     assert!(
         rig.shared.playhead().peak < 0.05,
         "the meter never came back down"
+    );
+}
+
+// --- shaping the sound ------------------------------------------------------
+
+/// A track with a voicing, playing one note on the first step of pattern nought.
+fn voiced_rig(voicing: weetbeats_engine::Voicing, length: u16) -> Rig {
+    let mut rig = Rig::new(120.0, 16);
+    // Quiet enough that the soft clipper is nowhere near, so levels can be compared.
+    track_with_gain(&mut rig, 0, dc_sample(48_000), 0.25);
+    rig.send(Command::SetTrackVoicing { track: 0, voicing });
+    // Held, so the note actually ends and its release can be heard.
+    rig.send(Command::SetPatternPitched {
+        pattern: 0,
+        track: 0,
+        pitched: true,
+    });
+    rig.send(Command::SetNote {
+        pattern: 0,
+        track: 0,
+        note: EngineNote {
+            step: 0,
+            pitch: 60,
+            velocity: 127,
+            length,
+        },
+    });
+    rig.send(Command::SetPlaying(true));
+    rig
+}
+
+/// The level of one channel at a frame, as a magnitude.
+fn at(out: &[f32], frame: usize, channel: usize) -> f32 {
+    out[frame * 2 + channel].abs()
+}
+
+#[test]
+fn the_attack_takes_the_time_it_is_given() {
+    // A tenth of a second to come up, against the two milliseconds a sound nobody has
+    // shaped gets.
+    let mut slow = voiced_rig(
+        weetbeats_engine::Voicing {
+            attack: 0.1,
+            ..Default::default()
+        },
+        16,
+    );
+    let mut sharp = voiced_rig(weetbeats_engine::Voicing::default(), 16);
+
+    let slow_out = slow.render(4800);
+    let sharp_out = sharp.render(4800);
+
+    // A millisecond in, one is barely started and the other is already up.
+    assert!(
+        at(&slow_out, 48, 0) < at(&sharp_out, 48, 0) * 0.2,
+        "a tenth of a second attack came up as fast as a two millisecond one: {} vs {}",
+        at(&slow_out, 48, 0),
+        at(&sharp_out, 48, 0)
+    );
+    // And by the end of the tenth of a second it has caught up.
+    assert!(
+        at(&slow_out, 4700, 0) > at(&sharp_out, 4700, 0) * 0.9,
+        "the slow attack never reached full: {} vs {}",
+        at(&slow_out, 4700, 0),
+        at(&sharp_out, 4700, 0)
+    );
+}
+
+#[test]
+fn decay_falls_to_the_sustain_level_and_stays_there() {
+    let mut rig = voiced_rig(
+        weetbeats_engine::Voicing {
+            attack: 0.001,
+            decay: 0.05,
+            sustain: 0.25,
+            ..Default::default()
+        },
+        16,
+    );
+    let out = rig.render(24_000);
+    let top = at(&out, 100, 0);
+    let settled = at(&out, 10_000, 0);
+    assert!(top > 0.1, "the note never reached full: {top}");
+    // A quarter of full, give or take the fader still sliding into place.
+    assert!(
+        (settled / top - 0.25).abs() < 0.05,
+        "sustain landed at {} of full rather than a quarter",
+        settled / top
+    );
+    // And it holds there rather than carrying on down.
+    let later = at(&out, 20_000, 0);
+    assert!(
+        (later - settled).abs() < settled * 0.1,
+        "the sustain kept falling: {settled} then {later}"
+    );
+}
+
+#[test]
+fn release_outlives_the_note_by_the_time_it_is_given() {
+    // Half a second of tail on a note one step long. At 120bpm a step is 6000 frames.
+    let mut long = voiced_rig(
+        weetbeats_engine::Voicing {
+            release: 0.5,
+            ..Default::default()
+        },
+        1,
+    );
+    let mut short = voiced_rig(weetbeats_engine::Voicing::default(), 1);
+
+    // The note ends 6000 frames in, and half a second of release is 24000 more.
+    let long_out = long.render(36_000);
+    let short_out = short.render(36_000);
+
+    // A thousand frames after the note ended: one is long gone, the other is still ringing.
+    assert!(
+        at(&short_out, 7000, 0) < 1e-4,
+        "the default release rang on: {}",
+        at(&short_out, 7000, 0)
+    );
+    assert!(
+        at(&long_out, 7000, 0) > 0.05,
+        "half a second of release was over in twenty milliseconds: {}",
+        at(&long_out, 7000, 0)
+    );
+    // Half way down it is on its way down, and by the end of the half second it has gone.
+    assert!(
+        at(&long_out, 18_000, 0) < at(&long_out, 7000, 0) * 0.75,
+        "the release was not coming down: {} then {}",
+        at(&long_out, 7000, 0),
+        at(&long_out, 18_000, 0)
+    );
+    assert!(
+        at(&long_out, 32_000, 0) < 1e-4,
+        "the release never ended: {}",
+        at(&long_out, 32_000, 0)
+    );
+}
+
+#[test]
+fn pan_moves_the_sound_between_the_speakers() {
+    let mut left = voiced_rig(
+        weetbeats_engine::Voicing {
+            pan: -1.0,
+            ..Default::default()
+        },
+        16,
+    );
+    let mut middle = voiced_rig(weetbeats_engine::Voicing::default(), 16);
+    let left_out = left.render(4800);
+    let middle_out = middle.render(4800);
+
+    assert!(
+        at(&left_out, 4000, 1) < 1e-4,
+        "hard left still came out of the right speaker: {}",
+        at(&left_out, 4000, 1)
+    );
+    assert!(at(&left_out, 4000, 0) > 0.1, "hard left was silent");
+    // Constant power, so hard over is louder on its own side than the middle is on either.
+    assert!(
+        at(&left_out, 4000, 0) > at(&middle_out, 4000, 0) * 1.2,
+        "panning hard over did not lift its own side: {} vs {}",
+        at(&left_out, 4000, 0),
+        at(&middle_out, 4000, 0)
+    );
+    // And the middle is the same on both sides.
+    assert!(
+        (at(&middle_out, 4000, 0) - at(&middle_out, 4000, 1)).abs() < 1e-5,
+        "dead centre was not even"
+    );
+}
+
+#[test]
+fn tuning_changes_how_fast_the_sample_is_read() {
+    // A ramp, so where the read head is can be read straight off the level.
+    let ramp: Vec<f32> = (0..48_000).map(|i| i as f32 / 48_000.0).collect();
+    fn rig_at(tune: f32, data: Vec<f32>) -> Rig {
+        let mut rig = Rig::new(120.0, 16);
+        rig.send(Command::AddTrack { track: 0 });
+        rig.send(Command::SetPatternGain {
+            pattern: 0,
+            track: 0,
+            gain: 1.0,
+        });
+        rig.send(Command::SetTrackSample {
+            track: 0,
+            sample: Some(Arc::new(Sample::from_data("ramp", RATE, 1, data))),
+        });
+        rig.send(Command::SetTrackVoicing {
+            track: 0,
+            voicing: weetbeats_engine::Voicing {
+                tune,
+                ..Default::default()
+            },
+        });
+        rig.send(Command::SetNote {
+            pattern: 0,
+            track: 0,
+            note: note(0),
+        });
+        rig.send(Command::SetPlaying(true));
+        rig
+    }
+
+    let plain = rig_at(0.0, ramp.clone()).render(4800);
+    let octave = rig_at(12.0, ramp).render(4800);
+    // An octave up reads the file twice as fast, so it is twice as far in.
+    let ratio = at(&octave, 4000, 0) / at(&plain, 4000, 0);
+    assert!(
+        (ratio - 2.0).abs() < 0.05,
+        "an octave up read the sample {ratio} times as fast"
+    );
+}
+
+#[test]
+fn trimming_a_sound_moves_where_a_note_starts_and_stops() {
+    // A ramp, so where the read head is can be read straight off the level — but read
+    // against an untrimmed copy of the same sound rather than against a number, because the
+    // master stage sits between the mixer and the buffer and it is not a straight line.
+    fn rig_between(start: f32, end: f32) -> Rig {
+        let ramp: Vec<f32> = (0..48_000).map(|i| i as f32 / 48_000.0).collect();
+        let mut rig = Rig::new(120.0, 16);
+        rig.send(Command::AddTrack { track: 0 });
+        rig.send(Command::SetPatternGain {
+            pattern: 0,
+            track: 0,
+            gain: 1.0,
+        });
+        rig.send(Command::SetTrackSample {
+            track: 0,
+            sample: Some(Arc::new(Sample::from_data("ramp", RATE, 1, ramp))),
+        });
+        rig.send(Command::SetTrackVoicing {
+            track: 0,
+            voicing: weetbeats_engine::Voicing {
+                start,
+                end,
+                ..Default::default()
+            },
+        });
+        rig.send(Command::SetNote {
+            pattern: 0,
+            track: 0,
+            note: note(0),
+        });
+        rig.send(Command::SetPlaying(true));
+        rig
+    }
+
+    let trimmed = rig_between(0.5, 0.6).render(12_000);
+    let whole = rig_between(0.0, 1.0).render(36_000);
+
+    // Two hundred frames in, a note that starts half way through the file is exactly where
+    // the untrimmed one is twenty four thousand frames later.
+    assert!(
+        (at(&trimmed, 200, 0) - at(&whole, 24_200, 0)).abs() < 1e-3,
+        "a note starting half way in was at {} rather than {}",
+        at(&trimmed, 200, 0),
+        at(&whole, 24_200, 0)
+    );
+    // And it stops at six tenths, which is 4800 frames later, not at the end of the file.
+    assert!(
+        at(&trimmed, 5200, 0) < 1e-4,
+        "a note trimmed to a tenth of the file played on: {}",
+        at(&trimmed, 5200, 0)
+    );
+    assert!(
+        at(&whole, 5200, 0) > 1e-3,
+        "the untrimmed copy stopped too, so the check above proves nothing"
+    );
+}
+
+#[test]
+fn a_stolen_voice_gets_out_of_the_way_however_long_its_release_is() {
+    // Every voice on one track, all with a two second tail, and then one more note. The new
+    // note must not have to wait two seconds for a slot.
+    let mut rig = Rig::new(480.0, 64);
+    track_with_gain(&mut rig, 0, dc_sample(48_000), 0.2);
+    rig.send(Command::SetTrackVoicing {
+        track: 0,
+        voicing: weetbeats_engine::Voicing {
+            release: 2.0,
+            ..Default::default()
+        },
+    });
+    rig.send(Command::SetPatternPitched {
+        pattern: 0,
+        track: 0,
+        pitched: true,
+    });
+    for step in 0..(MAX_VOICES as u16 + 4) {
+        rig.send(Command::SetNote {
+            pattern: 0,
+            track: 0,
+            note: EngineNote {
+                step,
+                pitch: 60,
+                velocity: 100,
+                length: 1,
+            },
+        });
+    }
+    rig.send(Command::SetPlaying(true));
+    // 480bpm at 48k is 1500 frames a step, so this is every note plus a little.
+    let out = rig.render_chunked(1500 * (MAX_VOICES + 8), 256);
+    assert!(out.iter().any(|s| s.abs() > 1e-4), "nothing played at all");
+    // Nothing ever went silent for a whole step, which is what a stolen voice sitting on its
+    // two second release would have caused.
+    let quiet_run = out
+        .chunks(2)
+        .map(|c| c[0].abs() < 1e-5)
+        .fold((0usize, 0usize), |(run, worst), quiet| {
+            let run = if quiet { run + 1 } else { 0 };
+            (run, worst.max(run))
+        })
+        .1;
+    assert!(
+        quiet_run < 1500,
+        "the pool went quiet for {quiet_run} frames waiting on a long release"
     );
 }

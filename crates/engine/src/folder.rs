@@ -34,8 +34,36 @@ pub const PROJECT_FILE: &str = "project.json";
 /// The folder samples are copied into, inside the project folder.
 pub const SAMPLES_DIR: &str = "samples";
 
+/// And the one a plugin's own settings go in. Not the plugin itself: a plugin is installed
+/// software and stays where it was installed. This is the blob it hands us when asked what
+/// it is set to, one file per track.
+pub const PLUGINS_DIR: &str = "plugins";
+
 pub fn project_file(dir: &Path) -> PathBuf {
     dir.join(PROJECT_FILE)
+}
+
+pub fn plugins_dir(dir: &Path) -> PathBuf {
+    dir.join(PLUGINS_DIR)
+}
+
+/// Where one track's plugin settings live, relative to the project folder.
+pub fn plugin_state_path(track: u16) -> String {
+    format!("{PLUGINS_DIR}/{track}.clapstate")
+}
+
+/// Write a plugin's settings into the project folder. Makes the folder if it is not there.
+pub fn save_plugin_state(dir: &Path, relative: &str, blob: &[u8]) -> Result<(), String> {
+    let full = resolve(dir, relative)?;
+    if let Some(parent) = full.parent() {
+        fs::create_dir_all(parent).map_err(|e| whined(parent, "make", e))?;
+    }
+    fs::write(&full, blob).map_err(|e| whined(&full, "write", e))
+}
+
+/// Read them back. `None` when there are none, which is a plugin at its own defaults.
+pub fn load_plugin_state(dir: &Path, relative: &str) -> Option<Vec<u8>> {
+    fs::read(resolve(dir, relative).ok()?).ok()
 }
 
 pub fn samples_dir(dir: &Path) -> PathBuf {

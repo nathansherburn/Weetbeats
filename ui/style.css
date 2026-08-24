@@ -335,6 +335,31 @@ body.drop-target::after {
   color: #241c00;
 }
 
+/*
+ * A solo a mute is overruling. Mute wins, so the track is silent whatever the solo says;
+ * the button stays lit because turning the mute off brings it straight back, and goes faint
+ * to say it is not what you are hearing.
+ */
+.tick.solo.beaten {
+  opacity: 0.4;
+}
+
+/*
+ * The drawings on a track's row. Sized here rather than in the markup so one number moves
+ * all three, and painted in `currentColor` so a button lighting up takes its icon with it.
+ */
+.tick .icon {
+  display: block;
+  width: 13px;
+  height: 13px;
+}
+
+.tick .icon svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
 .tick.kill:hover {
   border-color: var(--accent);
   color: var(--accent);
@@ -744,14 +769,24 @@ input.number.small-number {
   grid-template-columns: var(--keys) max-content;
   grid-template-rows: var(--head) max-content var(--velocity);
   min-width: 100%;
-  /* A line under each semitone, all the way across. Same trick as the song lanes. */
-  background-image: linear-gradient(
-    to bottom,
-    transparent calc(var(--semitone) - 1px),
-    var(--line) calc(var(--semitone) - 1px)
-  );
-  background-size: 100% var(--semitone);
-  background-position: 0 var(--head);
+  /* The same two layers the step grid has: the head strip with the pattern's colour along
+     its bottom edge, and a line under each semitone all the way across. */
+  background-image:
+    linear-gradient(
+      to bottom,
+      var(--panel) calc(var(--head) - 3px),
+      var(--pattern) calc(var(--head) - 3px),
+      var(--pattern) var(--head),
+      transparent var(--head)
+    ),
+    linear-gradient(
+      to bottom,
+      transparent calc(var(--semitone) - 1px),
+      var(--line) calc(var(--semitone) - 1px)
+    );
+  background-size: 100% 100%, 100% var(--semitone);
+  background-position: 0 0, 0 var(--head);
+  background-repeat: no-repeat, repeat;
 }
 
 .keys-chip .pattern-tab {
@@ -824,14 +859,31 @@ input.number.small-number {
   grid-template-columns: var(--headers) max-content;
   grid-template-rows: var(--head) max-content;
   min-width: 100%;
-  /* A line under each track, all the way across. Same trick as the song lanes. */
-  background-image: linear-gradient(
-    to bottom,
-    transparent calc(var(--row) - 1px),
-    var(--line) calc(var(--row) - 1px)
-  );
-  background-size: 100% var(--row);
-  background-position: 0 var(--head);
+  /*
+   * Two layers. The first is the strip along the top and the band of the pattern's colour
+   * along its bottom edge, carried across the part of the row that neither the ruler nor the
+   * corner reaches — a sixteen step pattern does not fill the window, and the band has to run
+   * the whole way to the close button at the far right rather than stopping at the last box.
+   * The second is a line under each track, all the way across, the same trick as the song
+   * lanes. Both are the stylesheet's rather than the canvas's, so they cannot land a pixel
+   * off what the cells beside them draw.
+   */
+  background-image:
+    linear-gradient(
+      to bottom,
+      var(--panel) calc(var(--head) - 3px),
+      var(--pattern) calc(var(--head) - 3px),
+      var(--pattern) var(--head),
+      transparent var(--head)
+    ),
+    linear-gradient(
+      to bottom,
+      transparent calc(var(--row) - 1px),
+      var(--line) calc(var(--row) - 1px)
+    );
+  background-size: 100% 100%, 100% var(--row);
+  background-position: 0 0, 0 var(--head);
+  background-repeat: no-repeat, repeat;
 }
 
 .corner {
@@ -911,13 +963,26 @@ input.number.small-number {
   border-color: var(--accent);
 }
 
+/*
+ * The ruler, and the band of the pattern's colour along the bottom of the strip it sits in.
+ *
+ * The colour is a border rather than something the canvas draws, because the canvas is
+ * scaled to whatever height it is given and the chip beside it is not: three pixels drawn
+ * inside the canvas landed a pixel or two off the three the chip has, and the band across
+ * the top of the editor had a visible step in it where the two met. A border on both, of
+ * the same width, in a row of the same height, cannot drift.
+ *
+ * `content-box` so the height main.js sets is the part the canvas actually draws in: the
+ * border is on top of it, and the two together are exactly one `--head`.
+ */
 .ruler {
   position: sticky;
   top: 0;
   z-index: 2;
   display: block;
+  box-sizing: content-box;
   background: var(--panel);
-  border-bottom: 1px solid var(--line);
+  border-bottom: 3px solid var(--pattern);
 }
 
 .header-col {
@@ -957,11 +1022,36 @@ input.number.small-number {
   color: var(--accent);
 }
 
-.track canvas.wave {
+/*
+ * The picture of the sound, which is also the way to the sound editor. A button, because it
+ * is one: clicking a track's name plays it, clicking its waveform asks what it is.
+ */
+.track .wave {
+  width: 40px;
+  height: 24px;
+  flex: none;
+  padding: 0 3px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  display: grid;
+  place-items: center;
+  transition: border-color 0.12s, opacity 0.12s;
+}
+
+.track .wave canvas {
   width: 34px;
   height: 18px;
   opacity: 0.45;
-  flex: none;
+  transition: opacity 0.12s;
+}
+
+.track .wave:hover {
+  border-color: var(--line);
+}
+
+.track .wave:hover canvas {
+  opacity: 0.9;
 }
 
 .track input[type="range"] {
@@ -981,18 +1071,20 @@ input.number.small-number {
 }
 
 /*
- * The pattern is a window over the song, and this shuts it. In the pattern's own colour,
- * right beside its name, at the top left of the editor.
+ * The pattern is a window over the song, and this shuts it. In the pattern's own colour, at
+ * the far right of the strip the ruler runs along — the corner a window's close button is
+ * expected in, and the one place in the editor nothing else wants.
  *
- * It used to be pinned to the far right of the workspace, which is a bad place for the one
- * control you always need: at the far edge of the window it can end up under a scrollbar or
- * clipped by the window's own corner, and it is the longest possible journey from the
- * patterns panel you just clicked in. The corner it is in now is stuck to the top left of
- * the editor, so nothing can ever cover it and it is never more than a few pixels from the
- * pattern list.
+ * Absolutely placed inside the editor rather than dropped into the grid, so it holds that
+ * corner however far the grid is scrolled and can never end up under a sticky cell. Kept a
+ * little in from the edge so an overlay scrollbar cannot sit on top of it, and short enough
+ * to clear the band of the pattern's colour that runs underneath.
  */
 .shut {
-  margin-left: auto;
+  position: absolute;
+  top: 4px;
+  right: 12px;
+  z-index: 6;
   width: 22px;
   height: 22px;
   border: none;
@@ -1027,4 +1119,382 @@ input.number.small-number {
 
 .empty p {
   margin: 0;
+}
+
+/* --- the sound editor --- */
+
+/*
+ * One track's instrument, over the top of the pattern it was opened from and wearing that
+ * pattern's colour, the same as the roll does. It is a different question from the ones the
+ * other three views ask — not what is played but what it is played with — so it gets the
+ * whole workspace rather than a corner of the row.
+ */
+.sound {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  display: flex;
+}
+
+/*
+ * The head strip, and the band of the pattern's colour along its bottom edge — the same one
+ * the step grid and the roll wear, so all three views have one band across the top with the
+ * name at one end and the way out at the other. Drawn here rather than by a grid because
+ * there is no grid in this view to hang it on.
+ */
+.sound::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: var(--head);
+  background: var(--panel);
+  border-bottom: 3px solid var(--pattern);
+  z-index: 4;
+}
+
+/* Wider than the chip in the other views: the name is the whole of it. */
+.sound-chip {
+  width: auto;
+  min-width: var(--headers);
+  gap: 12px;
+}
+
+.sound-chip .pattern-tab {
+  max-width: 220px;
+}
+
+/* Play it, from inside the editor, so you can hear what you are doing to it. */
+.hear {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--dim);
+  padding: 3px 10px;
+  font-size: 11px;
+  transition: border-color 0.12s, color 0.12s;
+}
+
+.hear:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+/* A plugin whose own window is up. */
+.hear.on {
+  background: var(--ok);
+  border-color: var(--ok);
+  color: #06301c;
+}
+
+.hear:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/*
+ * Three panels: the file, the shape, and everything about the sound that is one number. The
+ * file gets a row of its own because a waveform squeezed into a third of the window is a
+ * smudge, and trimming it means seeing it.
+ */
+/* Everything under the strip scrolls; the strip itself and the way out do not. */
+.sound-body {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+  padding: calc(var(--head) + 20px) 24px 24px;
+  align-content: start;
+}
+
+.sound-panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 16px 16px;
+  min-width: 0;
+}
+
+.sound-panel.wide {
+  grid-column: 1 / -1;
+}
+
+.sound-panel h2 {
+  margin: 0 0 10px;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.sound-wave {
+  display: block;
+  width: 100%;
+  height: 96px;
+  border-radius: 6px;
+  background: var(--bg);
+  cursor: pointer;
+}
+
+/* Over one of the ends, where a press starts a trim rather than a listen. */
+.sound-wave.grabbing {
+  cursor: ew-resize;
+}
+
+.sound-env {
+  display: block;
+  width: 100%;
+  height: 118px;
+  border-radius: 6px;
+  background: var(--bg);
+}
+
+.knobs {
+  display: grid;
+  gap: 9px;
+  margin-top: 14px;
+}
+
+/*
+ * One control: what it is, the slider, and what it says. The read-out is words rather than a
+ * field — "40 ms", "70% left" — because the number on its own says nothing and nobody types
+ * a pan. Double click the row to put that one control back where it started.
+ */
+.knob {
+  display: grid;
+  grid-template-columns: 66px 1fr 72px;
+  align-items: center;
+  gap: 10px;
+}
+
+.knob-label {
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.knob input[type="range"] {
+  width: 100%;
+}
+
+.knob-read {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* Narrow windows put the shape under the file rather than beside it. */
+@media (max-width: 880px) {
+  .sound-body {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* --- CLAP plugins --- */
+
+/* A track whose sound is a plugin: a plug where the waveform would be. */
+.track .wave.plugged {
+  color: var(--dim);
+}
+
+.track .wave.plugged .icon {
+  display: block;
+  width: 15px;
+  height: 15px;
+}
+
+.track .wave.plugged .icon svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.track .wave.plugged:hover {
+  color: var(--text);
+}
+
+/*
+ * The plugin picker, over the top of whatever you were looking at. A list rather than a file
+ * dialog: a plugin is not a file you go and find, it is installed, and a host is supposed to
+ * know where those live.
+ */
+.picker {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: grid;
+  place-items: center;
+  background: rgba(19, 17, 24, 0.75);
+}
+
+.picker-box {
+  width: min(560px, 88%);
+  max-height: 76%;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+
+.picker-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.picker-head h2 {
+  margin: 0;
+  flex: none;
+}
+
+/* The way out of the picker is not the way out of a pattern, so it does not wear its colour. */
+.picker-shut {
+  position: static;
+  background: var(--panel-2);
+  color: var(--dim);
+  width: 22px;
+  height: 22px;
+}
+
+.picker-shut:hover {
+  background: var(--accent);
+  color: #1a0b12;
+  filter: none;
+}
+
+.filter {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 4px 8px;
+  outline: none;
+}
+
+.filter:focus {
+  border-color: var(--accent);
+}
+
+.picker-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.plugin-row {
+  width: 100%;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 9px 14px;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  text-align: left;
+  transition: background 0.1s;
+}
+
+.plugin-row:hover:not(:disabled) {
+  background: var(--panel-2);
+}
+
+.plugin-name {
+  font-size: 13px;
+  flex: none;
+}
+
+.plugin-vendor {
+  font-size: 11px;
+  color: var(--dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * An effect, or anything else that is not something you play notes on. Shown rather than
+ * hidden, because "why is my plugin not in the list" deserves an answer.
+ */
+.plugin-row.not-ours {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.picker-note {
+  margin: 0;
+  padding: 10px 14px;
+  border-top: 1px solid var(--line);
+  color: var(--dim);
+}
+
+.picker-note:empty {
+  display: none;
+}
+
+/* The plugin half of the sound editor. */
+.panel-line {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.panel-line h2 {
+  margin: 0;
+  flex: none;
+}
+
+.panel-line .filter {
+  max-width: 240px;
+  margin-left: auto;
+}
+
+/* Wide enough that "open" and "close" do not shuffle everything beside them. */
+.panel-line .hear {
+  min-width: 116px;
+}
+
+/*
+ * A plugin's own controls. Surge XT has thousands, so this scrolls and the filter above it
+ * is how you get to the one you want.
+ */
+.params {
+  display: grid;
+  gap: 9px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  max-height: 46vh;
+  overflow-y: auto;
+}
+
+.params .knob-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.params p {
+  margin: 0;
+}
+
+.plugin-body .knobs {
+  margin-top: 14px;
+}
+
+/* Our one control sits apart from the plugin's, because it is not one of them. */
+.plugin-body .knob-label {
+  color: var(--text);
+}
+
+.params .knob-label {
+  color: var(--dim);
 }

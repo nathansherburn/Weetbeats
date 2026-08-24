@@ -12,7 +12,7 @@ Open source, free forever.
 
 Stages 1 to 4 of [the build plan](docs/BUILD_PLAN.md) are done: a step sequencer, patterns
 strung together into a song, samples played across the keyboard, and a piano roll to write
-with.
+with. Stage 6 has started early: CLAP instruments play alongside the sampler, windows and all.
 
 - Add instruments from the system file picker, or drop sounds on the window
 - Eight drums ship with it, and the picker opens on them the first time
@@ -28,8 +28,11 @@ with.
 - Click a track's name to hear it, or a key in the roll to hear that note
 - Play, stop, tempo, and a playhead you can drag whether or not it is playing
 - Per track: volume, mute, solo, delete
+- Click a sound's waveform to shape it: envelope, pan, tune, level, and trimming the file
+- A track's sound can be a CLAP instrument — Surge XT and friends — instead of a file, with
+  its own window
 
-Effects are stage 5, hosting CLAP plugins stage 6.
+Effects are stage 5. Plugins still run in this process rather than a child one; see below.
 
 ### Patterns and the song
 
@@ -78,7 +81,7 @@ which is a thing sticky grid items do.
 ### Instruments and the piano roll
 
 A track is a drum until you say otherwise: hit it and the whole sample plays, however short
-the note is. Press **♪** on a track and it becomes an instrument instead — the sample is
+the note is. Press the little keyboard on a track and it becomes an instrument instead — the sample is
 pitched across the keyboard, faster for higher notes and slower for lower ones, and a note
 **stops when it ends**. Press it again and it is a drum again.
 
@@ -92,10 +95,15 @@ Solo means "in this pattern, only the soloed tracks". Several patterns play at o
 so each applies its own — which is also a way to write "just the kick in the intro" without
 deleting anything.
 
+**Mute wins.** A track that is muted is silent whether or not it is also soloed, so the mute
+button always means the one thing and you never have to read it against what else is on. A
+solo sitting under a mute goes faint rather than out, because taking the mute off brings it
+straight back.
+
 That one switch also changes what its row looks like. An instrument's row is a **small piano
 roll** of its own notes rather than a line of boxes, because boxes cannot say which pitch or
-how long. Click the small one to open the roll proper, and press **♪** to go back to boxes.
-Nothing is lost either way: they are two views of one lane of notes.
+how long. Click the small one to open the roll proper, and press the keyboard button again to
+go back to boxes. Nothing is lost either way: they are two views of one lane of notes.
 
 In the roll, press to draw a note and keep dragging to set how long it is; the next one you
 draw comes out that long. Grab a note to move it, grab its right hand end to stretch it,
@@ -110,6 +118,81 @@ What plays is what you can see. A row of boxes plays only the notes a box can me
 at middle C — so a melody written in the roll goes quiet when you switch the row back to
 boxes, and comes back the moment you switch it again. Nothing is deleted either way.
 
+### Shaping a sound
+
+Click a track's name and you hear it. Click its **waveform** and you get the sound editor, a
+fourth view over the pattern:
+
+- **The file**, with the part a note actually reads picked out in the pattern's colour. Drag
+  either end to trim it — the silence off the front of somebody else's kick, the tail off a
+  crash. Click anywhere else in it to hear the result.
+- **Shape**: attack, decay, sustain and release, drawn as the shape they make. Four numbers
+  do not tell you what a sound will do, so the picture is the read-out and the sliders are how
+  you move it.
+- **The sound**: where it sits between the speakers, how it is tuned, and how loud the sound
+  itself is.
+
+Double click any control to put that one back where it started.
+
+All of this belongs to the **track**, not to the pattern — the opposite way round from the
+row of switches beside it. How loud a part is and whether you hear it at all is writing the
+part, so it belongs to the pattern; what the sound *is* is the same wherever it is played, so
+it belongs to the track. Shorten the snare's tail here and every pattern using the snare
+hears it.
+
+Nothing already sounding is re-shaped part way through. Drag the attack about while it plays
+and the next hit comes out different; the one you can hear keeps the shape it started with.
+
+## CLAP plugins
+
+A track's sound can be a **CLAP instrument** rather than a file. `+ plugin` under the
+instrument list opens a picker with everything installed on the machine; pick one and it
+becomes a track like any other, with notes drawn in the same grid and the same piano roll.
+
+Weetbeats looks in the standard places — `~/Library/Audio/Plug-Ins/CLAP` and
+`/Library/Audio/Plug-Ins/CLAP` on a Mac, `~/.clap` and `/usr/lib/clap` elsewhere — plus
+anything in `$CLAP_PATH`. Effects are listed but greyed out: instruments first, effects with
+stage 5.
+
+Clicking a plugin track's plug opens the sound editor onto **the plugin's own controls**
+rather than ours. A synth has an envelope, a tuning and a panning inside it already, and a
+second set of ours beside them would be two things fighting over one sound. What stays ours
+is how loud the track is. Surge XT has more controls than fit on a screen, so there is a
+filter above them.
+
+**Open its window** gives you the plugin's real interface — Surge XT as its own designers drew
+it. Which window that is depends on the plugin. A few make their own, and then all we do is
+say which window it should stay above and what to call itself. Most, Surge XT among them, have
+a view and no window: everything built with JUCE is one. Those get a window of ours, made the
+size the plugin asks for, resized when its own zoom control asks again, and taken down when
+either end closes it. Either way the button says whether it is up. Not every plugin has an
+interface at all, and the only way to find out is to ask, so the button is always there and
+tells you when the answer is no.
+
+What a plugin is set to is the plugin's business: it is asked for its settings when the
+project is saved, and they go in `plugins/` inside the project folder beside the samples. The
+plugin itself is not copied — it is installed software, often hundreds of megabytes, and the
+licence to hand it on is not ours to assume. A project opened on a machine without that
+plugin keeps the part you wrote and says which plugin is missing.
+
+**One thing works differently from a sampler track**, and it is worth knowing. A sampler gives
+every note its own voice, so a pattern's fader can be applied to the notes that pattern
+started even while several patterns play the same sound at once. A plugin makes one sound for
+the whole track, and there is nothing on the way out to hang a per-pattern fader on. So a
+pattern's fader and mute are applied to the notes it *sends*: a quieter fader sends quieter
+notes, a muted pattern sends none, and muting part way through lets go of what is ringing.
+Turning a fader down while a note sounds does not change that note; the next one is quieter.
+
+**Not there yet.** Plugins run in this process rather than a child one, so a plugin that
+crashes takes the app with it. Hosting them in a child process is the rest of doing this
+properly.
+
+Opening a window is also what decides where the plugin studio lives. A window is made of the
+platform's own widgets and macOS only makes those on the process's first thread, so every
+plugin is loaded, asked about and destroyed there — the same thread the window is drawn on.
+The cost is that loading a big synth is a moment when nothing repaints. The alternative was a
+thread of our own that could never open a window at all.
+
 ## Projects
 
 A project is a folder, so you can send one to a friend in one piece.
@@ -121,6 +204,8 @@ MySong.beat/
     kick.wav
     clap.wav
     .undo/        # samples a deleted track might still want back
+  plugins/
+    3.clapstate   # what the plugin on track 3 is set to, in its own format
 ```
 
 Anything the file picker will let you choose can be decoded: wav, aiff, caf, mp3, flac, ogg,

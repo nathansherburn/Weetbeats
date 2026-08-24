@@ -125,14 +125,13 @@
         <!-- The pattern editor: the step grid, and the instruments it plays. -->
         <div class="editor hidden" id="editor">
           <!--
-            The pattern's own titlebar: the way out, the block from the song pulled open —
-            same colour, same name — and how long it is.
+            The pattern's own titlebar: the block from the song pulled open — same colour,
+            same name — and how long it is.
 
-            Outside the scrolling area on purpose. Pinned to the far right it could end up
-            under a scrollbar or clipped by the window's corner; inside the grid as a sticky
-            cell it slides away once the pattern is scrolled far enough, which is a thing
-            sticky grid items do. Absolutely placed over the top left of the editor, it
-            cannot go anywhere.
+            Outside the scrolling area on purpose. Put in the grid as a sticky cell it would
+            slide away once the pattern is scrolled far enough, which is a thing sticky grid
+            items do. Absolutely placed over the top left of the editor, it cannot go
+            anywhere.
           -->
           <div class="head-chip" id="patternChip">
             <span class="pattern-tab" id="patternTab"></span>
@@ -141,10 +140,15 @@
               <input id="steps" class="number" type="text" inputmode="numeric" value="16" />
               <button id="moreSteps" class="tick" aria-label="One box more">+</button>
             </span>
-            <button id="closePattern" class="shut" title="Close this pattern (esc)">
-              &times;
-            </button>
           </div>
+          <!--
+            The way out, at the far right of the strip the ruler runs along. Outside the
+            scrolling area like the chip, so it holds that corner however far the grid is
+            scrolled, and clear of the coloured line that runs underneath it.
+          -->
+          <button id="closePattern" class="shut" title="Close this pattern (esc)">
+            &times;
+          </button>
           <div class="editor-scroll" id="editorScroll">
             <div class="editor-grid">
               <!-- Holds the corner of the grid open. What goes in it is over the top. -->
@@ -153,7 +157,15 @@
               <!-- The instruments, and under them the way to add another. -->
               <div class="header-col">
                 <div class="track-headers" id="trackHeaders"></div>
+                <!--
+                  Two ways to add a sound: a file, or a CLAP instrument that is installed on
+                  the machine. Both end up as a track with notes in it, which is why they sit
+                  together at the bottom of the column.
+                -->
                 <button id="add" class="add-row" title="Add an instrument">+ instrument</button>
+                <button id="addPlugin" class="add-row" title="Add a CLAP instrument">
+                  + plugin
+                </button>
               </div>
               <canvas id="grid" class="grid"></canvas>
             </div>
@@ -161,6 +173,118 @@
           <div class="empty" id="empty">
             <button id="addBig" class="add-big">Add an instrument</button>
             <p class="small">Or drop a sound on the window. Then tick some boxes and hit space.</p>
+          </div>
+        </div>
+
+        <!--
+          The sound editor: one track's instrument, rather than one pattern's part.
+
+          The row in the pattern says how loud this sound is *here* and whether it is heard
+          *here*. This says what the sound is — how it starts, how long it hangs on, where it
+          sits, how it is tuned, how much of the file a note uses — and that is the same
+          wherever it is played. Opening it from the little waveform on the row is the point:
+          the waveform is the sound, so clicking it is asking about the sound.
+        -->
+        <div class="sound hidden" id="sound">
+          <div class="head-chip sound-chip" id="soundChip">
+            <span class="pattern-tab" id="soundName"></span>
+            <button id="hearSound" class="hear" title="Hear it (or click the waveform)">
+              hear it
+            </button>
+          </div>
+          <button id="closeSound" class="shut" title="Back to the pattern (esc)">
+            &times;
+          </button>
+          <div class="sound-body" id="soundBody">
+            <!--
+              The file, with the part a note actually reads picked out in the pattern's
+              colour. Drag either end to trim it; click anywhere in it to hear the result.
+            -->
+            <section class="sound-panel wide">
+              <h2 class="head-label">the file</h2>
+              <canvas
+                id="soundWave"
+                class="sound-wave"
+                title="Drag either end to trim it — click it to hear it"
+              ></canvas>
+              <div class="knobs" id="soundTrimKnobs"></div>
+            </section>
+
+            <!--
+              The envelope, drawn as the shape it is. The picture is the read-out: four
+              numbers do not tell you what a sound will do, and a shape does.
+            -->
+            <section class="sound-panel">
+              <h2 class="head-label">shape</h2>
+              <canvas id="soundEnv" class="sound-env"></canvas>
+              <div class="knobs" id="soundShapeKnobs"></div>
+            </section>
+
+            <!-- Where it sits, how it is tuned, and how loud the sound itself is. -->
+            <section class="sound-panel">
+              <h2 class="head-label">the sound</h2>
+              <div class="knobs" id="soundToneKnobs"></div>
+            </section>
+          </div>
+
+          <!--
+            And what a plugin track shows instead: the plugin's own parameters. A synth has
+            its envelope, its tuning and its panning inside it, so ours would only be a second
+            set of controls fighting the first. Surge XT has more parameters than fit on a
+            screen, hence the filter.
+          -->
+          <div class="sound-body plugin-body hidden" id="pluginBody">
+            <section class="sound-panel wide">
+              <div class="panel-line">
+                <h2 class="head-label">the plugin</h2>
+                <!--
+                  The plugin's real interface, in a window of its own: one the plugin makes if
+                  it can, and one of ours for it to draw into if it cannot, which is the usual
+                  case. Not every plugin has an interface at all, and the only way to find out
+                  is to ask, so this is always offered and says so when the answer is no.
+                -->
+                <button id="pluginWindow" class="hear" title="The plugin's own interface">
+                  open its window
+                </button>
+                <input
+                  id="paramFilter"
+                  class="filter"
+                  type="text"
+                  placeholder="find a control"
+                  autocomplete="off"
+                />
+              </div>
+              <div class="knobs" id="pluginLevelKnobs"></div>
+              <div class="params" id="pluginParams"></div>
+            </section>
+          </div>
+        </div>
+
+        <!--
+          The plugin picker: everything CLAP the machine has, over the top of whatever view
+          you were in. A list rather than a file dialog, because a plugin is not a file you go
+          and find: it is installed, and the host is supposed to know where.
+        -->
+        <div class="picker hidden" id="picker">
+          <div class="picker-box">
+            <div class="picker-head">
+              <h2 class="head-label">CLAP instruments</h2>
+              <input
+                id="pluginFilter"
+                class="filter"
+                type="text"
+                placeholder="find a plugin"
+                autocomplete="off"
+              />
+              <button id="rescan" class="add" title="Look again, for one just installed">
+                scan again
+              </button>
+              <button id="closePicker" class="shut picker-shut" title="Never mind (esc)">
+                &times;
+              </button>
+            </div>
+            <div class="picker-list" id="pluginList"></div>
+            <p class="small picker-note" id="pickerNote"></p>
           </div>
         </div>
 
@@ -173,8 +297,9 @@
           <div class="head-chip keys-chip" id="rollChip">
             <!-- The track, in the colour of the pattern it is a part of. -->
             <span class="pattern-tab" id="rollName"></span>
-            <button id="closeRoll" class="shut" title="Back to the boxes (esc)">&times;</button>
           </div>
+          <!-- And the way out, in the same far corner the pattern editor puts it. -->
+          <button id="closeRoll" class="shut" title="Back to the boxes (esc)">&times;</button>
           <div class="roll-scroll" id="rollScroll">
             <div class="roll-grid">
               <div class="corner"></div>

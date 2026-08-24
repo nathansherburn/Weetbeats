@@ -9,7 +9,7 @@ A tiny, fun, free music maker for macOS. Point it at a folder of samples, tick b
 | Language | Rust |
 | UI | Tauri, with an HTML/CSS/SVG front end |
 | Audio out | `cpal` |
-| Instruments | Sampler first. Host real plugins later |
+| Instruments | Sampler first, then CLAP instruments alongside it |
 | Plugin format | CLAP only. No VST3, no AU |
 | Pattern length | 16 steps by default, adjustable per pattern, one step at a time, up to 64 |
 | Song grid | A block is a pattern, a step and a length; blocks of different patterns overlap freely |
@@ -249,7 +249,7 @@ The payoff stage. Surge XT and friends inside your app.
 **Scope it tightly**
 
 - Instruments only at first, effects plugins later
-- Each plugin opens in its own floating window, not embedded in your UI
+- Each plugin opens in a window of its own, not embedded in your UI
 - Run plugins in a separate child process, so a crash can't kill your app
 - Scan a plugins folder plus the standard `~/Library/Audio/Plug-Ins/CLAP` path
 
@@ -260,6 +260,20 @@ The payoff stage. Surge XT and friends inside your app.
 **Project files**
 
 Plugin state is an opaque blob the plugin gives you. Store it base64 in `project.json`, or as a separate file in the project folder. Note which plugin and version made it, so you can warn instead of crash when it's missing.
+
+**Where it got to**
+
+Done: scanning the standard folders plus `$CLAP_PATH`, loading instruments, notes in and audio out, parameters shown in the sound editor, the plugin's own interface in a window — its own if it makes one, ours if it does not — state saved into `plugins/` in the project folder, and a message rather than a crash when a project asks for a plugin the machine does not have.
+
+Not done: the process boundary. Plugins run in-process, so one that crashes takes the app with it.
+
+Both kinds of window, because a plugin only gets one of them. Floating is what this plan suggested and what the host prefers — the plugin makes and owns the window, and all we say is which window it should stay above and what to call itself — but a plugin says which it supports and most support only embedding. Anything built with JUCE, Surge XT included, has a view and no window. So an embedded one gets a window of ours: a Tauri window with no webview in it, made the size the plugin asked for before it is handed over, resized when the plugin asks, and destroyed only after the plugin has let go of it. On macOS that window has to leave the title bar out of its content view, or the plugin's view — which sits at the bottom left of whatever it is given — ends up with its top inch behind the bar. Two host extensions come with the window: `gui`, to hear that somebody closed it and that the plugin wants a different size, and `timer`, which is how a GUI made of somebody else's widgets gets to repaint. Timers are fired from the same sixty-a-second poll that drives the playhead, which also sets the floor on how short a period a plugin can actually get.
+
+Where the studio lives is decided by the window and nothing else. CLAP lets a host pick which thread it calls the main thread, but a window is made of the platform's own widgets and macOS only makes those on the process's first thread — so every plugin instance lives on Tauri's main thread. The cost is that loading a big synth is a moment when the window does not repaint. `plugins::Desk` still puts a studio on a thread of its own, which is what the tests use and what anything that will never open a window should.
+
+One design decision worth writing down. A plugin makes one sound for the whole track, so there is nothing on the way out to hang a per-pattern fader on the way a sampler voice can. The pattern's fader and mute are applied to the notes going *in* instead. A note that is already ringing does not follow a fader, which is the one place a plugin track behaves differently from a sampler one. CLAP note expressions would fix it for the plugins that support them; velocity works everywhere.
+
+The tests load a real `.clap`: `tools/test-clap` is a CLAP instrument the size of a postage stamp, built as a dev dependency of the engine so `cargo test` produces one. Hosting is an agreement with somebody else's binary, and a mock on our side of the line would only ever agree with itself.
 
 ## Shipping it
 

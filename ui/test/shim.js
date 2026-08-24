@@ -29,10 +29,51 @@ const fake = {
   folder: "/tmp/Untitled.beat",
   saves: 0,
   peaks: Array.from({ length: 96 }, (_, i) => Math.abs(Math.sin(i / 7)) * 0.9),
+  // What each plugin track's controls are set to, which is the plugin's business and not
+  // the project's.
+  pluginParams: new Map(),
+  // Which plugin tracks have the plugin's own window up.
+  pluginWindows: new Set(),
+  // And which plugins have no window to open, which is the case the button has to say
+  // something useful about.
+  windowless: ["audio.vital.synth"],
 };
 
 // What the file picker "returns". A test sets this before clicking Add.
 fake.picks = ["/pack/01 kick.wav"];
+// And what a CLAP scan "finds". Two instruments and an effect, which is the case the picker
+// has to get right: effects are shown but cannot be added.
+fake.plugins = [
+  {
+    path: "/Library/Audio/Plug-Ins/CLAP/Surge XT.clap",
+    id: "org.surge-synth-team.surge-xt",
+    name: "Surge XT",
+    vendor: "Surge Synth Team",
+    instrument: true,
+  },
+  {
+    path: "/Library/Audio/Plug-Ins/CLAP/Vital.clap",
+    id: "audio.vital.synth",
+    name: "Vital",
+    vendor: "Vital Audio",
+    instrument: true,
+  },
+  {
+    path: "/Library/Audio/Plug-Ins/CLAP/Surge XT Effects.clap",
+    id: "org.surge-synth-team.surge-xt-fx",
+    name: "Surge XT Effects",
+    vendor: "Surge Synth Team",
+    instrument: false,
+  },
+];
+// How many times a proper look through the plugin folders has been asked for.
+fake.scans = 0;
+/* What a plugin says its controls are. Mirrors what the params extension hands back. */
+fake.params = [
+  { id: 0, name: "Level", module: "Output", min: 0, max: 1, value: 0.5, text: "50%", stepped: false },
+  { id: 1, name: "Cutoff", module: "Filter 1", min: 0, max: 1, value: 0.8, text: "8.0 kHz", stepped: false },
+  { id: 2, name: "Wave", module: "Osc 1", min: 0, max: 3, value: 0, text: "Sine", stepped: true },
+];
 // What the save and open dialogs "return". Null stands for cancelling.
 fake.saveAs = "/elsewhere/Newer.beat";
 fake.openFolder = null;
@@ -77,6 +118,36 @@ const arrangement = () => ({ patterns: fake.patterns, song: fake.song });
 
 /* How a track sits in a pattern, made on the spot if nobody has touched it yet. */
 const DEFAULT_GAIN = 0.8;
+
+/* And how its sound is played, which belongs to the track. Mirrors Voicing::default. */
+const DEFAULT_VOICING = () => ({
+  attack: 0.002,
+  decay: 0,
+  sustain: 1,
+  release: 0.003,
+  pan: 0,
+  tune: 0,
+  level: 1,
+  start: 0,
+  end: 1,
+});
+
+/* Mirrors Voicing::settled: every control pushed back inside the range its editor offers. */
+function settleVoicing(voicing) {
+  const clamp = (v, low, high) => Math.min(high, Math.max(low, Number(v) || 0));
+  const start = clamp(voicing.start, 0, 0.99);
+  return {
+    attack: clamp(voicing.attack, 0, 10),
+    decay: clamp(voicing.decay, 0, 10),
+    sustain: clamp(voicing.sustain, 0, 1),
+    release: clamp(voicing.release, 0, 10),
+    pan: clamp(voicing.pan, -1, 1),
+    tune: clamp(voicing.tune, -24, 24),
+    level: clamp(voicing.level, 0, 2),
+    start,
+    end: clamp(voicing.end, start + 0.01, 1),
+  };
+}
 
 function setMix(id, track, change) {
   const p = pattern(id);
@@ -137,6 +208,7 @@ function addAll(paths) {
       name,
       // Rust copies the file into the project folder and refers to it from there.
       sample: { path: `samples/${base}`, name },
+      voicing: DEFAULT_VOICING(),
     };
     fake.tracks.set(id, track);
     added.tracks.push({ track, peaks: fake.peaks });
@@ -174,6 +246,64 @@ const handlers = {
   set_pattern_muted: ({ pattern: id, track, muted }) => setMix(id, track, { muted }),
   set_pattern_soloed: ({ pattern: id, track, soloed }) => setMix(id, track, { soloed }),
   set_pattern_pitched: ({ pattern: id, track, pitched }) => setMix(id, track, { pitched }),
+
+  // --- CLAP plugins. A track's sound can be an instrument that is installed on the machine
+  // rather than a file, and then the notes go to that instead.
+  list_plugins: ({ again }) => {
+    if (again) fake.scans += 1;
+    return fake.plugins;
+  },
+  add_plugin: ({ path, id }) => {
+    const found = fake.plugins.find((one) => one.id === id);
+    if (!found) throw new Error(`${id} is not in ${path}`);
+    if (!found.instrument) throw new Error(`${found.name} is not an instrument`);
+    if (fake.tracks.size >= MAX_TRACKS) {
+      throw new Error(`that is ${MAX_TRACKS} tracks, which is all of them`);
+    }
+    const track = {
+      id: fake.nextTrackId++,
+      name: found.name,
+      sample: null,
+      plugin: { path, id, name: found.name, state: null },
+      voicing: DEFAULT_VOICING(),
+    };
+    fake.tracks.set(track.id, track);
+    fake.pluginParams.set(track.id, fake.params.map((one) => ({ ...one })));
+    // A plugin has no waveform: it is an instrument, not a file.
+    return { track, peaks: [] };
+  },
+  plugin_params: ({ id }) => (fake.pluginParams.get(id) ?? []).map((one) => ({ ...one })),
+  // The plugin's own window. Rust owns whether it is up, because a floating window can be
+  // shut by its own close box; a plugin without a GUI says so rather than doing nothing.
+  set_plugin_window: ({ id, open }) => {
+    const track = fake.tracks.get(id);
+    if (!track?.plugin) throw new Error("there is no plugin on that track");
+    if (fake.windowless.includes(track.plugin.id)) {
+      throw new Error("this plugin has no window of its own");
+    }
+    if (open) fake.pluginWindows.add(id);
+    else fake.pluginWindows.delete(id);
+    return open;
+  },
+  plugin_window_open: ({ id }) => fake.pluginWindows.has(id),
+  set_plugin_param: ({ id, param, value }) => {
+    const found = (fake.pluginParams.get(id) ?? []).find((one) => one.id === param);
+    if (found) {
+      found.value = value;
+      // The plugin says what its value means, so a moved control gets a new word for it.
+      found.text = `${Math.round(value * 100)}%`;
+    }
+    return null;
+  },
+
+  // How the sound is played, which belongs to the track rather than to any pattern. Hands
+  // back what it settled on, not what it was asked for, the same as Rust does.
+  set_voicing: ({ id, voicing }) => {
+    const settled = settleVoicing(voicing);
+    const track = fake.tracks.get(id);
+    if (track) track.voicing = settled;
+    return settled;
+  },
 
   // The piano roll's three commands. A note is identified by where it is.
   set_note: ({ pattern: id, track, at, velocity, length }) => {
@@ -399,6 +529,8 @@ const EDITS = {
   set_pattern_muted: "mute",
   set_pattern_soloed: "solo",
   set_pattern_pitched: "pitched",
+  set_voicing: "voicing",
+  add_plugin: "tracks",
   set_step: "boxes",
   set_note: "notes",
   clear_note: "notes",

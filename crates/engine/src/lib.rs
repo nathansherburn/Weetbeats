@@ -19,6 +19,7 @@ pub mod command;
 pub mod engine;
 pub mod folder;
 pub mod model;
+pub mod plugins;
 pub mod sample;
 pub mod shared;
 pub mod voice;
@@ -87,7 +88,7 @@ pub const PREVIEW_PATTERN: u16 = u16::MAX;
 
 pub use command::{Command, EngineNote, Trash};
 pub use engine::Engine;
-pub use model::{Lane, Note, Pattern, Placement, Project, SampleRef, Track};
+pub use model::{Lane, Note, Pattern, Placement, PluginRef, Project, SampleRef, Track, Voicing};
 pub use sample::Sample;
 pub use shared::{Playhead, Shared};
 

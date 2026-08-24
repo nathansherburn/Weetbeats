@@ -508,6 +508,34 @@ try {
   check("the roll spans the whole of MIDI",
     (await canvasSize("keys")).h === 128 * SEMITONE, `${(await canvasSize("keys")).h}px`);
 
+  // The roll wears the same titlebar the boxes do: one band of the pattern's colour across
+  // the top, and the way out at the far right of it.
+  check("the roll's ruler is underlined in the pattern's colour, level with the chip",
+    await page.evaluate(() => {
+      const line = (id) => {
+        const node = document.getElementById(id);
+        const style = getComputedStyle(node);
+        return {
+          colour: style.borderBottomColor,
+          width: parseFloat(style.borderBottomWidth),
+          bottom: node.getBoundingClientRect().bottom,
+        };
+      };
+      const ruler = line("rollRuler");
+      const chip = line("rollChip");
+      return (
+        ruler.colour === chip.colour &&
+        ruler.width === chip.width &&
+        Math.abs(ruler.bottom - chip.bottom) < 0.5
+      );
+    }));
+  check("and its way out sits at the far right too", await page.evaluate(() => {
+    const shut = document.getElementById("closeRoll").getBoundingClientRect();
+    const roll = document.getElementById("roll").getBoundingClientRect();
+    const chip = document.getElementById("rollChip").getBoundingClientRect();
+    return shut.left > chip.right && roll.right - shut.right < 20 && shut.bottom < chip.bottom;
+  }));
+
   // --- drawing a note
   await clearCalls();
   const c4 = await noteAt(2, MIDDLE_C);
@@ -794,10 +822,13 @@ try {
   check("and so is the button that closes it",
     rgb(await cssColour("closePattern", "backgroundColor")) === blockColour(0),
     await cssColour("closePattern", "backgroundColor"));
-  check("the way out sits with the name, not out at the window's edge", await page.evaluate(() => {
+  check("the way out sits at the far right, clear of the instruments", await page.evaluate(() => {
     const shut = document.getElementById("closePattern").getBoundingClientRect();
-    const corner = document.querySelector("#editor .corner").getBoundingClientRect();
-    return shut.left >= corner.left && shut.right <= corner.right;
+    const editor = document.getElementById("editor").getBoundingClientRect();
+    const chip = document.getElementById("patternChip").getBoundingClientRect();
+    // Past the instrument column, hard up against the right hand edge, and inside the strip
+    // the ruler runs along rather than down over the grid.
+    return shut.left > chip.right && editor.right - shut.right < 20 && shut.bottom < chip.bottom;
   }));
 
   // Scrolled a long way along, it is still exactly where it was: the corner is stuck to the
@@ -823,15 +854,25 @@ try {
   await page.locator("#steps").press("Enter");
   await page.waitForFunction(() => document.getElementById("steps").value === "16");
 
-  check("the ruler is underlined in it", await page.evaluate(
-    ([head]) => {
-      const dpr = window.devicePixelRatio || 1;
-      const ctx = document.getElementById("ruler").getContext("2d");
-      const [r, g, b] = ctx.getImageData(20 * dpr, Math.round((head - 3) * dpr), 1, 1).data;
-      return `${r},${g},${b}`;
-    },
-    [34],
-  ) === blockColour(0));
+  const underline = (id) =>
+    page.evaluate((id) => {
+      const node = document.getElementById(id);
+      const style = getComputedStyle(node);
+      const box = node.getBoundingClientRect();
+      return {
+        colour: (style.borderBottomColor.match(/\d+/g) ?? []).slice(0, 3).join(","),
+        width: parseFloat(style.borderBottomWidth),
+        bottom: box.bottom,
+      };
+    }, id);
+  const rulerLine = await underline("ruler");
+  const chipLine = await underline("patternChip");
+  check("the ruler is underlined in it", rulerLine.colour === blockColour(0), rulerLine.colour);
+  // One band across the whole top of the editor, so the two halves of it cannot show a step
+  // where the instrument column ends and the grid begins.
+  check("and the line beside it starts at the same height",
+    rulerLine.width === chipLine.width && Math.abs(rulerLine.bottom - chipLine.bottom) < 0.5,
+    `${rulerLine.width}px ending ${rulerLine.bottom} vs ${chipLine.width}px ending ${chipLine.bottom}`);
 
   // --- closing a pattern: the X, and escape
   await page.locator("#closePattern").click();
@@ -1259,6 +1300,31 @@ try {
     (await lastCall("set_pattern_soloed")).args.soloed === true);
   check("mute button shows as on", await page.locator("#trackHeaders .track").first()
     .locator(".tick.mute").evaluate((n) => n.classList.contains("on")));
+  // Mute wins, so a solo underneath one is showing something that is not happening.
+  check("and the solo under it goes faint, because mute wins",
+    await page.locator("#trackHeaders .track").first()
+      .locator(".tick.solo").evaluate((n) => n.classList.contains("beaten")));
+  await page.locator("#trackHeaders .track").first().locator(".tick.mute").click();
+  check("and comes back when the mute goes",
+    !(await page.locator("#trackHeaders .track").first()
+      .locator(".tick.solo").evaluate((n) => n.classList.contains("beaten"))));
+  // Muted again, which is how the checks further down expect to find it.
+  await page.locator("#trackHeaders .track").first().locator(".tick.mute").click();
+
+  // The three switches on a row are drawings, not letters: M and S say nothing unless you
+  // already know the words, and ♪ was body text pretending to be an icon.
+  check("mute, solo and the piano roll are drawn, not spelled out", await page.evaluate(() => {
+    const row = document.querySelector("#trackHeaders .track");
+    return ["mute", "solo", "keys-on"].every((name) => {
+      const button = row.querySelector(`.tick.${name}`);
+      return button && button.querySelector("svg") && !button.textContent.trim();
+    });
+  }));
+  check("and they say what they are for anyone not looking at them", await page.evaluate(() => {
+    const row = document.querySelector("#trackHeaders .track");
+    return ["mute", "solo", "keys-on"].every((name) =>
+      (row.querySelector(`.tick.${name}`).getAttribute("aria-label") ?? "").length > 3);
+  }));
 
   await page.locator("#trackHeaders .track").first().locator("input[type=range]").fill("40");
   const gain = (await lastCall("set_pattern_gain")).args;
@@ -1293,6 +1359,229 @@ try {
   await rows.nth(turnedDown).locator(".tick.kill").click();
   await page.waitForFunction((was) =>
     document.querySelectorAll("#patternList .prow").length === was, turnedDown);
+
+  // --- the sound editor: one track's instrument, rather than one pattern's part
+  await clearCalls();
+  await page.locator("#trackHeaders .track").first().locator(".wave").click();
+  await page.waitForSelector("#sound:visible");
+  check("clicking a track's waveform opens the sound editor",
+    await page.locator("#sound").isVisible());
+  check("and the boxes step aside", !(await page.locator("#editor").isVisible()));
+  check("it says which sound it is",
+    (await page.locator("#soundName").textContent()).includes("kick"),
+    await page.locator("#soundName").textContent());
+  // The same band across the top the other views have, in the colour of the pattern it was
+  // opened over, with the way out at the far right of it.
+  check("and wears the open pattern's colour", await page.evaluate(() => {
+    const chip = getComputedStyle(document.getElementById("soundChip")).borderBottomColor;
+    const shut = getComputedStyle(document.getElementById("closeSound")).backgroundColor;
+    return chip === shut;
+  }));
+  check("with the way out at the far right", await page.evaluate(() => {
+    const shut = document.getElementById("closeSound").getBoundingClientRect();
+    const view = document.getElementById("sound").getBoundingClientRect();
+    return view.right - shut.right < 20;
+  }));
+
+  // Every control is there, and each one starts where an unshaped sound starts.
+  const knob = (key) => page.locator(`#sound input[data-key="${key}"]`);
+  const reads = (key) => page.locator(`#sound [data-read="${key}"]`).textContent();
+  for (const key of ["attack", "decay", "sustain", "release", "pan", "tune", "level",
+    "start", "end"]) {
+    check(`the sound editor has a ${key}`, (await knob(key).count()) === 1);
+  }
+  check("a sound nobody has shaped sits in the middle", (await reads("pan")) === "middle");
+  check("and is tuned as it was recorded", (await reads("tune")) === "as recorded");
+  check("and uses the whole file", (await reads("end")) === "100%");
+
+  // Moving one reaches Rust, whole, and says which track.
+  const setKnob = (key, value) =>
+    page.evaluate(([key, value]) => {
+      const slider = document.querySelector(`#sound input[data-key="${key}"]`);
+      slider.value = String(value);
+      slider.dispatchEvent(new Event("input", { bubbles: true }));
+    }, [key, value]);
+  await setKnob("release", 500);
+  await page.waitForFunction(() =>
+    window.__weetbeats_calls.some((c) => c.name === "set_voicing"));
+  const voiced = (await lastCall("set_voicing")).args;
+  check("a control reaches Rust", voiced.id === 0, JSON.stringify(voiced.id));
+  check("as a whole voicing, not a field", Object.keys(voiced.voicing).length === 9,
+    Object.keys(voiced.voicing).join(","));
+  // Half way along a squared slider is a quarter of the way up the range, not half: the
+  // difference between nought and thirty milliseconds matters far more often than the one
+  // between three seconds and four.
+  check("with the value the slider means, not the slider's own number",
+    Math.abs(voiced.voicing.release - 0.5 * 0.5 * 4) < 1e-6,
+    String(voiced.voicing.release));
+  check("and the read-out says it in units", (await reads("release")) === "1.00 s",
+    await reads("release"));
+
+  // It belongs to the track, so it is the same wherever the sound is played.
+  check("the sound belongs to the track, not the pattern", await page.evaluate(() =>
+    Math.abs(window.__weetbeats_state.tracks.get(0).voicing.release - 1) < 1e-6));
+
+  // Rust pushes the ends of a trim apart rather than letting them cross, and the editor
+  // shows where they really ended up.
+  await setKnob("start", 900);
+  await setKnob("end", 100);
+  await page.waitForFunction(() =>
+    window.__weetbeats_state.tracks.get(0).voicing.end > 0.9);
+  check("the end of a trim cannot be dragged past its start",
+    await page.evaluate(() => {
+      const v = window.__weetbeats_state.tracks.get(0).voicing;
+      return v.end > v.start;
+    }));
+  check("and the control shows where it really landed",
+    (await knob("end").inputValue()) !== "100", await knob("end").inputValue());
+
+  // Double click puts one control back, which is the only way to "none of this".
+  await page.locator("#sound .knob").filter({ hasText: "release" }).dblclick();
+  await page.waitForFunction(() =>
+    window.__weetbeats_state.tracks.get(0).voicing.release < 0.01);
+  check("double clicking a control puts it back where it started",
+    (await reads("release")) === "3 ms", await reads("release"));
+
+  // Escape walks back out to the pattern, not all the way to the song.
+  await page.locator("body").press("Escape");
+  await page.waitForSelector("#editor:visible");
+  check("escape comes back out to the pattern", await page.locator("#editor").isVisible());
+  check("and not all the way to the song", !(await page.locator("#song").isVisible()));
+
+  // --- a track whose sound is a CLAP instrument rather than a file
+  await clearCalls();
+  await page.locator("#addPlugin").click();
+  await page.waitForSelector("#picker:visible");
+  check("the plugin button opens the picker", await page.locator("#picker").isVisible());
+  await page.waitForFunction(() => document.querySelectorAll(".plugin-row").length > 0);
+  check("with what the scan found", (await page.locator(".plugin-row").count()) === 3);
+  // An effect is shown rather than hidden, because "why is my plugin not here" deserves an
+  // answer — but it cannot be added, because effects are a later stage.
+  check("an effect is shown but cannot be picked", await page.evaluate(() => {
+    const rows = [...document.querySelectorAll(".plugin-row")];
+    const effect = rows.find((r) => r.textContent.includes("not an instrument"));
+    return Boolean(effect) && effect.disabled;
+  }));
+  await page.locator("#pluginFilter").fill("vital");
+  await page.waitForFunction(() => document.querySelectorAll(".plugin-row").length === 1);
+  check("the filter narrows it down", (await page.locator(".plugin-row").count()) === 1);
+  await page.locator("#pluginFilter").fill("");
+  await page.waitForFunction(() => document.querySelectorAll(".plugin-row").length === 3);
+
+  const pluggedRows = () => page.locator("#trackHeaders .track").count();
+  const rowsBefore = await pluggedRows();
+  await page.locator(".plugin-row", { hasText: "Surge XT" }).first().click();
+  await page.waitForFunction((was) =>
+    document.querySelectorAll("#trackHeaders .track").length === was + 1, rowsBefore);
+  check("picking one adds a track", (await pluggedRows()) === rowsBefore + 1);
+  check("and says which plugin, from where",
+    (await lastCall("add_plugin")).args.id === "org.surge-synth-team.surge-xt",
+    JSON.stringify((await lastCall("add_plugin")).args));
+  check("and the picker goes away", !(await page.locator("#picker").isVisible()));
+
+  const plugRow = page.locator("#trackHeaders .track").last();
+  check("its row wears a plug instead of a waveform", await plugRow
+    .locator(".wave").evaluate((n) => n.classList.contains("plugged") && !!n.querySelector("svg")));
+
+  // Clicking it opens the sound editor, showing the plugin's own controls rather than ours.
+  await plugRow.locator(".wave").click();
+  await page.waitForSelector("#sound:visible");
+  check("clicking it opens the plugin's controls",
+    await page.locator("#pluginBody").isVisible());
+  check("and the sampler's are put away, because a synth has its own",
+    !(await page.locator("#soundBody").isVisible()));
+  check("it says which plugin it is",
+    (await page.locator("#soundName").textContent()) === "Surge XT",
+    await page.locator("#soundName").textContent());
+  await page.waitForFunction(() => document.querySelectorAll("#pluginParams .knob").length > 0);
+  check("with the parameters the plugin says it has",
+    (await page.locator("#pluginParams .knob").count()) === 3);
+  check("and how loud the track is, which is still ours",
+    (await page.locator("#pluginLevelKnobs .knob").count()) === 1);
+
+  // Moving one goes straight to the audio thread: what a plugin is set to is the plugin's.
+  await clearCalls();
+  await page.evaluate(() => {
+    const slider = document.querySelector("#pluginParams input");
+    slider.value = "1000";
+    slider.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await page.waitForFunction(() =>
+    window.__weetbeats_calls.some((c) => c.name === "set_plugin_param"));
+  const turned = (await lastCall("set_plugin_param")).args;
+  check("moving a control reaches the plugin", turned.param === 0 && turned.value === 1,
+    JSON.stringify(turned));
+
+  // The plugin's own window: Surge XT's real interface, floating above ours.
+  await clearCalls();
+  check("the plugin's window starts shut",
+    (await page.locator("#pluginWindow").textContent()).trim() === "open its window",
+    await page.locator("#pluginWindow").textContent());
+  await page.locator("#pluginWindow").click();
+  await page.waitForFunction(() =>
+    document.getElementById("pluginWindow").textContent.includes("close"));
+  check("clicking it asks Rust to open one",
+    (await lastCall("set_plugin_window")).args.open === true,
+    JSON.stringify((await lastCall("set_plugin_window")).args));
+  check("and the button becomes the way to shut it",
+    await page.locator("#pluginWindow").evaluate((n) => n.classList.contains("on")));
+  await page.locator("#pluginWindow").click();
+  await page.waitForFunction(() =>
+    document.getElementById("pluginWindow").textContent.includes("open"));
+  check("and clicking again shuts it",
+    (await lastCall("set_plugin_window")).args.open === false);
+
+  // Rust is asked rather than remembered, because a floating window can be shut by its own
+  // close box without anything reaching us.
+  const pluggedTrack = (await lastCall("set_plugin_window")).args.id;
+  await page.evaluate((id) => window.__weetbeats_state.pluginWindows.add(id), pluggedTrack);
+  await page.locator("body").press("Escape");
+  await page.waitForSelector("#editor:visible");
+  await page.locator("#trackHeaders .track").last().locator(".wave").click();
+  await page.waitForFunction(() =>
+    document.getElementById("pluginWindow").textContent.includes("close"));
+  check("re-opening the editor asks Rust whether the window is still up",
+    await page.locator("#pluginWindow").evaluate((n) => n.classList.contains("on")));
+  await page.evaluate(() => window.__weetbeats_state.pluginWindows.clear());
+
+  await page.locator("#paramFilter").fill("cutoff");
+  await page.waitForFunction(() =>
+    document.querySelectorAll("#pluginParams .knob").length === 1);
+  check("the parameter filter narrows it down",
+    (await page.locator("#pluginParams .knob").count()) === 1);
+  await page.locator("#paramFilter").fill("");
+
+  await page.locator("body").press("Escape");
+  await page.waitForSelector("#editor:visible");
+
+  // --- a plugin with no window of its own says so, rather than doing nothing
+  await page.locator("#addPlugin").click();
+  await page.waitForSelector("#picker:visible");
+  await page.locator(".plugin-row", { hasText: "Vital" }).first().click();
+  await page.waitForFunction((was) =>
+    document.querySelectorAll("#trackHeaders .track").length === was + 2, rowsBefore);
+  await page.locator("#trackHeaders .track").last().locator(".wave").click();
+  await page.waitForSelector("#sound:visible");
+  await page.locator("#pluginWindow").click();
+  await page.waitForFunction(() =>
+    document.getElementById("status").textContent.includes("no window"));
+  check("a plugin with no window says so",
+    (await page.locator("#status").textContent()).includes("no window of its own"),
+    await page.locator("#status").textContent());
+  check("and the button stays the way it was",
+    (await page.locator("#pluginWindow").textContent()).trim() === "open its window");
+  // A complaint holds the status line for a few seconds, and while it is up a passing note
+  // stands aside for it. Let it lapse, or it swallows the notes the checks below wait for.
+  await page.waitForFunction(() => document.getElementById("status").textContent === "");
+  await page.locator("body").press("Escape");
+  await page.waitForSelector("#editor:visible");
+  await page.locator("#trackHeaders .track").last().locator(".tick.kill").click();
+  await page.waitForFunction((was) =>
+    document.querySelectorAll("#trackHeaders .track").length === was + 1, rowsBefore);
+
+  await page.locator("#trackHeaders .track").last().locator(".tick.kill").click();
+  await page.waitForFunction((was) =>
+    document.querySelectorAll("#trackHeaders .track").length === was, rowsBefore);
 
   // --- deleting a track takes its notes out of every pattern
   await page.locator("#trackHeaders .track").first().locator(".tick.kill").click();

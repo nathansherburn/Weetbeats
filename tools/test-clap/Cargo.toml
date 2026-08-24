@@ -1,0 +1,27 @@
+[package]
+name = "weetbeats-test-clap"
+description = "A tiny CLAP instrument, built so the host in weetbeats-engine has something real to load in its tests."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+# `cdylib` is the plugin itself: a CLAP plugin is a dynamic library with a `clap_entry` in
+# it. `rlib` as well so cargo will build this as a dev dependency of the engine, which is
+# what gets it built before the tests that load it run.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+clack-plugin = "0.1"
+clack-extensions = { version = "0.1", features = [
+    "clack-plugin",
+    "audio-ports",
+    "note-ports",
+    "params",
+    "state",
+    "timer",
+    # A window made of nothing, so the host's side of embedding one can be tested.
+    "gui",
+] }

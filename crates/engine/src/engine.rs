@@ -27,9 +27,11 @@ use rtrb::Consumer;
 
 use crate::clock::StepClock;
 use crate::command::{Command, EngineNote, TrashBin};
+use crate::model::Voicing;
+use crate::plugins::{Slot, MAX_PLUGIN_NOTES};
 use crate::sample::Sample;
 use crate::shared::Shared;
-use crate::voice::{Trigger, VoicePool};
+use crate::voice::{Envelope, Trigger, VoicePool};
 use crate::{
     pitch_ratio, soft_clip, velocity_gain, DEFAULT_PITCH, DEFAULT_TRACK_GAIN, MAX_BLOCK,
     MAX_NOTES_PER_TRACK, MAX_PATTERNS, MAX_SONG_STEPS, MAX_STEPS, MAX_TRACKS, PREVIEW_PATTERN,
@@ -50,20 +52,70 @@ const METER_FALL_PER_SECOND: f32 = 1.6;
 
 /// One track's worth of audio thread state. Fixed size: no `Vec`, nothing to grow.
 ///
-/// A track is a sound and nothing else. Its notes belong to whichever pattern they were drawn
-/// in, and so does how loud it is: see [`PatternState`].
+/// A track is a sound and how that sound is played. Its notes belong to whichever pattern
+/// they were drawn in, and so does how loud it is: see [`PatternState`]. What is here is the
+/// same wherever the sound is used.
 struct TrackState {
     /// False when the slot is free. Free slots are skipped entirely.
     active: bool,
     sample: Option<Arc<Sample>>,
+    /// A CLAP instrument, for a track whose sound is a plugin rather than a file. A track has
+    /// one or the other and never both: notes go to whichever is there.
+    ///
+    /// Boxed because everything inside it — the plugin's buffers, its event lists — is
+    /// allocated on the app thread and handed over ready to use.
+    plugin: Option<Box<Slot>>,
+    /// The sound's shape, ready to hand to a voice: seconds already turned into per-frame
+    /// steps, the pan already turned into a gain each side, the tuning already turned into a
+    /// rate multiplier. Worked out when the voicing arrives, not per note.
+    envelope: Envelope,
+    left: f32,
+    right: f32,
+    tune_ratio: f64,
+    level: f32,
+    /// Where in the file a note starts and stops, as fractions of its length.
+    start: f32,
+    end: f32,
 }
 
 impl TrackState {
-    const fn empty() -> Self {
-        TrackState {
+    fn empty(sample_rate: f64) -> Self {
+        let mut track = TrackState {
             active: false,
             sample: None,
-        }
+            plugin: None,
+            envelope: Envelope::default(),
+            left: 1.0,
+            right: 1.0,
+            tune_ratio: 1.0,
+            level: 1.0,
+            start: 0.0,
+            end: 1.0,
+        };
+        track.voice(&Voicing::default(), sample_rate);
+        track
+    }
+
+    /// Take a voicing apart into the numbers the mixing loop wants. Everything expensive
+    /// about a voicing — a sine, a cosine, an exp2, four divisions — happens here, once,
+    /// rather than on every note.
+    fn voice(&mut self, voicing: &Voicing, sample_rate: f64) {
+        let voicing = voicing.settled();
+        self.envelope = Envelope::new(&voicing, sample_rate);
+        // Constant power, so a sound swept across the middle does not dip in the middle.
+        let angle = (voicing.pan + 1.0) * (std::f32::consts::FRAC_PI_4);
+        self.left = angle.cos();
+        self.right = angle.sin();
+        // Both sides are 1/sqrt(2) in the middle, which would make everything quieter than
+        // it was before anybody panned anything. Scale back up so dead centre is unity.
+        let middle = std::f32::consts::FRAC_PI_4;
+        let centre = 1.0 / middle.cos();
+        self.left *= centre;
+        self.right *= centre;
+        self.tune_ratio = (voicing.tune as f64 / 12.0).exp2();
+        self.level = voicing.level;
+        self.start = voicing.start;
+        self.end = voicing.end;
     }
 }
 
@@ -209,7 +261,7 @@ impl Engine {
     ) -> Box<Self> {
         let steps = steps.clamp(1, MAX_STEPS as u32);
         Box::new(Engine {
-            tracks: [const { TrackState::empty() }; MAX_TRACKS],
+            tracks: std::array::from_fn(|_| TrackState::empty(sample_rate.max(1) as f64)),
             patterns: (0..MAX_PATTERNS)
                 .map(|_| PatternState::new(steps))
                 .collect(),
@@ -304,8 +356,10 @@ impl Engine {
         // pattern started it, so this works out a level for every pattern and track pair and
         // the voice loop picks the one it belongs to.
         //
-        // Solo beats mute, within a pattern: if anything is soloed in it, only the soloed
-        // tracks are heard in it.
+        // Mute wins, and solo narrows what is left: if anything is soloed in a pattern then
+        // only the soloed tracks are heard in it, and a muted track is silent either way.
+        // Mute is the one switch that always means silence, so pressing it never has to be
+        // read against what else is on.
         //
         // Gain never jumps to its new value, it slides. A block is anywhere from 64 to
         // 1024 frames, so clamping the change per block would still be a step change at
@@ -320,11 +374,8 @@ impl Engine {
             for track in 0..MAX_TRACKS {
                 let bit = 1u32 << track;
                 let audible = self.tracks[track].active
-                    && if soloing {
-                        state.soloed & bit != 0
-                    } else {
-                        state.muted & bit == 0
-                    };
+                    && state.muted & bit == 0
+                    && (!soloing || state.soloed & bit != 0);
                 let target = if audible { state.gains[track] } else { 0.0 };
                 let at = Self::fader(pattern, track);
                 let start = self.faders[at];
@@ -332,6 +383,20 @@ impl Engine {
                 self.faders[at] = end;
                 self.gains[at] = start;
                 self.gain_incs[at] = (end - start) / frames as f32;
+            }
+        }
+
+        // The plugins first, because a plugin is a whole instrument's worth of sound and the
+        // voices mix on top of whatever is already there.
+        //
+        // A plugin's level is the track's own, from the sound editor, and not any pattern's:
+        // there is one sound coming out for the whole track, so there is nothing to hang a
+        // per-pattern fader on. The pattern's fader is applied to the notes going in instead.
+        // See the `plugins` module docs.
+        let gain_inc = self.gain_inc;
+        for track in self.tracks.iter_mut() {
+            if let Some(slot) = track.plugin.as_mut() {
+                slot.render(mix, frames, gain_inc);
             }
         }
 
@@ -413,18 +478,16 @@ impl Engine {
     /// Where one pattern's fader for one track is heading. Zero when the track is not heard
     /// in that pattern, which is what makes a mute a fade rather than a cut.
     ///
-    /// Solo beats mute, within the pattern: anything soloed in it and only the soloed tracks
-    /// are heard in it. The block prologue works this out for every pair in one pass rather
-    /// than calling this, so it can hold the pattern's state across the inner loop.
+    /// Mute wins, and solo narrows what is left: anything soloed in the pattern and only the
+    /// soloed tracks are heard in it, but a muted track is silent whether or not it is one of
+    /// them. The block prologue works this out for every pair in one pass rather than calling
+    /// this, so it can hold the pattern's state across the inner loop.
     fn target_gain(&self, pattern: usize, track: usize) -> f32 {
         let state = &self.patterns[pattern];
         let bit = 1u32 << track;
         let audible = self.tracks[track].active
-            && if state.soloed != 0 {
-                state.soloed & bit != 0
-            } else {
-                state.muted & bit == 0
-            };
+            && state.muted & bit == 0
+            && (state.soloed == 0 || state.soloed & bit != 0);
         if audible {
             state.gains[track]
         } else {
@@ -497,6 +560,15 @@ impl Engine {
     ///
     /// `step` is the step of the song in song mode and the step of the pattern otherwise.
     fn trigger_step(&mut self, step: u16) {
+        // A step has gone by, so every plugin note whose length has run out ends here. First,
+        // before the notes starting on this step, so playing the same key twice in a row is a
+        // note off and then a note on rather than the other way round.
+        for track in self.tracks.iter_mut() {
+            if let Some(slot) = track.plugin.as_mut() {
+                slot.step();
+            }
+        }
+
         if !self.song_mode {
             self.sounding = 1u32 << self.active_pattern;
             self.trigger_pattern(self.active_pattern, step);
@@ -529,6 +601,10 @@ impl Engine {
             if !self.tracks[track].active {
                 continue;
             }
+            if self.tracks[track].plugin.is_some() {
+                self.trigger_plugin(pattern, track, step);
+                continue;
+            }
             // Cloning the `Arc` is one atomic increment and the track keeps its own
             // reference, so nothing can be freed here.
             let Some(sample) = self.tracks[track].sample.clone() else {
@@ -549,27 +625,144 @@ impl Engine {
                 if !held && note.pitch != DEFAULT_PITCH {
                     continue;
                 }
-                let trigger = Trigger {
-                    sample: Arc::clone(&sample),
-                    track: track as u16,
-                    pattern: pattern as u16,
-                    ratio: self.playback_ratio(&sample, note.pitch),
-                    gain: velocity_gain(note.velocity),
-                    frames: if held {
-                        note.length.max(1) as f64 * self.clock.samples_per_step()
-                    } else {
-                        f64::INFINITY
-                    },
+                let frames = if held {
+                    note.length.max(1) as f64 * self.clock.samples_per_step()
+                } else {
+                    f64::INFINITY
                 };
+                let trigger = self.note_trigger(
+                    track,
+                    pattern as u16,
+                    &sample,
+                    note.pitch,
+                    velocity_gain(note.velocity),
+                    frames,
+                );
                 self.voices.trigger(trigger);
             }
         }
     }
 
-    /// Source frames per output frame: the device rate correction and the pitch, together.
+    /// One pattern's notes at one of its own steps, on a track whose sound is a plugin.
+    ///
+    /// The pattern's mixer is applied here rather than to what comes out, because a plugin
+    /// makes one sound for the whole track and there is nothing on the way out to apply it
+    /// to. A muted pattern sends no notes; a pattern turned down sends quieter ones. That
+    /// means a fader moved while a note rings does not take that note with it, which is the
+    /// one place a plugin track behaves differently from a sampler one.
+    fn trigger_plugin(&mut self, pattern: usize, track: usize, step: u16) {
+        let state = &self.patterns[pattern];
+        let bit = 1u32 << track;
+        // Mute wins and solo narrows, exactly as it does for a sampler.
+        if state.muted & bit != 0 || (state.soloed != 0 && state.soloed & bit == 0) {
+            return;
+        }
+        let level = state.gains[track];
+        let held = state.pitched & bit != 0;
+        let notes = &state.tracks[track];
+        // Collected up front: the notes live in `self.patterns` and the slot in `self.tracks`,
+        // and both are wanted at once. Four numbers each, on the stack, never more than the
+        // notes one track has on one step.
+        let mut due = [(0u8, 0f32, 0u32); MAX_PLUGIN_NOTES];
+        let mut count = 0;
+        for i in 0..notes.count {
+            let note = notes.notes[i];
+            if note.step != step || count >= due.len() {
+                continue;
+            }
+            // A row of boxes can only show notes at the sampler's own pitch, and what plays
+            // has to be what you can see — the same rule the sampler follows.
+            if !held && note.pitch != DEFAULT_PITCH {
+                continue;
+            }
+            due[count] = (
+                note.pitch,
+                velocity_gain(note.velocity) * level,
+                note.length.max(1) as u32,
+            );
+            count += 1;
+        }
+        if count == 0 {
+            return;
+        }
+        let Some(slot) = self.tracks[track].plugin.as_mut() else {
+            return;
+        };
+        for &(pitch, velocity, length) in &due[..count] {
+            // A one-shot has no ringing out to do on a synth — there is no sample to run to
+            // the end of — so it gets the shortest note there is and the plugin's own release
+            // does the rest.
+            let steps = if held { length } else { 1 };
+            slot.note_on(pattern as u16, pitch, velocity, steps);
+        }
+    }
+
+    /// Let go of every plugin note one pattern is holding, for a pattern that has just been
+    /// muted or soloed out. Without this a note started before the mute would hang.
+    fn hush_plugins(&mut self, pattern: u16) {
+        for track in 0..MAX_TRACKS {
+            let state = &self.patterns[pattern as usize];
+            let bit = 1u32 << track;
+            let audible = state.muted & bit == 0 && (state.soloed == 0 || state.soloed & bit != 0);
+            if audible {
+                continue;
+            }
+            if let Some(slot) = self.tracks[track].plugin.as_mut() {
+                slot.release_pattern(pattern);
+            }
+        }
+    }
+
+    /// Every plugin lets go of everything. For stopping, and for the panic button.
+    fn hush_all_plugins(&mut self) {
+        for track in self.tracks.iter_mut() {
+            if let Some(slot) = track.plugin.as_mut() {
+                slot.release_all();
+            }
+        }
+    }
+
+    /// Source frames per output frame: the device rate correction, the note's pitch and the
+    /// sound's own tuning, together.
     #[inline]
-    fn playback_ratio(&self, sample: &Sample, pitch: u8) -> f64 {
-        (sample.source_rate as f64 / self.sample_rate) * pitch_ratio(pitch)
+    fn playback_ratio(&self, track: usize, sample: &Sample, pitch: u8) -> f64 {
+        (sample.source_rate as f64 / self.sample_rate)
+            * pitch_ratio(pitch)
+            * self.tracks[track].tune_ratio
+    }
+
+    /// A note on a track, with everything the track's voicing has to say about it already
+    /// worked in: the envelope, where it sits, how it is tuned, its level trim and how much
+    /// of the file it reads.
+    ///
+    /// One place, because a note from a pattern, a note played by hand and a key clicked in
+    /// the piano roll all have to sound like the same instrument — and the last two used not
+    /// to, which is how a trimmed sample could sound one way in the pattern and another when
+    /// you clicked the row.
+    fn note_trigger(
+        &self,
+        track: usize,
+        pattern: u16,
+        sample: &Arc<Sample>,
+        pitch: u8,
+        gain: f32,
+        frames: f64,
+    ) -> Trigger {
+        let voicing = &self.tracks[track];
+        let length = sample.frames as f64;
+        Trigger {
+            sample: Arc::clone(sample),
+            track: track as u16,
+            pattern,
+            ratio: self.playback_ratio(track, sample, pitch),
+            gain: gain * voicing.level,
+            frames,
+            envelope: voicing.envelope,
+            left: voicing.left,
+            right: voicing.right,
+            from: length * voicing.start as f64,
+            to: length * voicing.end as f64,
+        }
     }
 
     // --- commands ----------------------------------------------------------
@@ -597,7 +790,10 @@ impl Engine {
             Command::SetPlaying(playing) => {
                 self.playing = playing;
                 if !playing {
-                    // Stop leaves ringing voices to finish; it is not a panic button.
+                    // Stop leaves ringing voices to finish; it is not a panic button. A
+                    // plugin's notes are the exception: a synth holds a note until it is told
+                    // otherwise, so stopping has to say so or the last chord plays forever.
+                    self.hush_all_plugins();
                     self.rewind_all();
                 }
             }
@@ -617,6 +813,9 @@ impl Engine {
             Command::RemoveTrack { track } => {
                 self.voices.release_track(track);
                 if let Some(t) = self.tracks.get_mut(track as usize) {
+                    if let Some(gone) = t.plugin.take() {
+                        self.trash.put_plugin(gone);
+                    }
                     t.active = false;
                     if let Some(sample) = t.sample.take() {
                         self.trash.put(sample);
@@ -624,9 +823,64 @@ impl Engine {
                 }
                 self.forget_track(track);
             }
+            Command::SetTrackPlugin { track, slot } => {
+                if let Some(t) = self.tracks.get_mut(track as usize) {
+                    // A track plays a plugin or a sample, never both. Whichever is arriving
+                    // takes the other one's place.
+                    if slot.is_some() {
+                        if let Some(old) = t.sample.take() {
+                            self.trash.put(old);
+                        }
+                    }
+                    if let Some(mut fresh) = slot {
+                        fresh.level = t.level;
+                        fresh.settle();
+                        if let Some(gone) = t.plugin.replace(fresh) {
+                            self.trash.put_plugin(gone);
+                        }
+                    } else if let Some(gone) = t.plugin.take() {
+                        self.trash.put_plugin(gone);
+                    }
+                }
+            }
+            Command::SetPluginParam {
+                track,
+                param,
+                value,
+            } => {
+                if let Some(slot) = self
+                    .tracks
+                    .get_mut(track as usize)
+                    .and_then(|t| t.plugin.as_mut())
+                {
+                    slot.set_param(param, value);
+                }
+            }
+            Command::SetTrackVoicing { track, voicing } => {
+                let rate = self.sample_rate;
+                if let Some(t) = self.tracks.get_mut(track as usize) {
+                    t.voice(&voicing, rate);
+                    // A plugin has its own envelope, its own tuning and its own idea of where
+                    // it sits, so the only part of a voicing that means anything to one is how
+                    // loud it is.
+                    if let Some(slot) = t.plugin.as_mut() {
+                        slot.level = t.level;
+                    }
+                }
+                // Nothing already sounding is retuned or re-enveloped part way through: a
+                // voice keeps the shape it started with, so dragging the attack about while
+                // it plays changes the next hit rather than warping the one you can hear.
+            }
             Command::SetTrackSample { track, sample } => {
                 self.voices.release_track(track);
                 if let Some(t) = self.tracks.get_mut(track as usize) {
+                    // A sample arriving means the track is a sampler again, so whatever
+                    // plugin was on it goes home.
+                    if sample.is_some() {
+                        if let Some(gone) = t.plugin.take() {
+                            self.trash.put_plugin(gone);
+                        }
+                    }
                     if let Some(old) = std::mem::replace(&mut t.sample, sample) {
                         self.trash.put(old);
                     }
@@ -655,6 +909,9 @@ impl Engine {
                         state.muted &= !bit;
                     }
                     self.settle(pattern, track);
+                    // A sampler voice is faded out by its fader; a plugin note has to be let
+                    // go of, or it hangs on through the mute.
+                    self.hush_plugins(pattern);
                 }
             }
             Command::SetPatternSoloed {
@@ -673,6 +930,7 @@ impl Engine {
                     for other in 0..MAX_TRACKS as u16 {
                         self.settle(pattern, other);
                     }
+                    self.hush_plugins(pattern);
                 }
             }
             Command::SetPatternPitched {
@@ -725,6 +983,11 @@ impl Engine {
                 }
             }
             Command::ClearPattern { pattern } => {
+                for track in self.tracks.iter_mut() {
+                    if let Some(slot) = track.plugin.as_mut() {
+                        slot.release_pattern(pattern);
+                    }
+                }
                 if let Some(p) = self.patterns.get_mut(pattern as usize) {
                     for notes in &mut p.tracks {
                         notes.count = 0;
@@ -794,24 +1057,29 @@ impl Engine {
                 let Some(t) = self.tracks.get(track as usize) else {
                     return;
                 };
-                let Some(sample) = t.sample.as_ref() else {
+                let Some(sample) = t.sample.clone() else {
                     return;
                 };
-                let trigger = Trigger {
-                    sample: Arc::clone(sample),
-                    track,
-                    // Under no pattern's fader: clicking a row is "let me hear this sound",
-                    // and it should not be quiet because some pattern has it turned down.
-                    pattern: PREVIEW_PATTERN,
-                    ratio: self.playback_ratio(sample, pitch),
-                    gain: velocity_gain(velocity),
+                // Under no pattern's fader: clicking a row is "let me hear this sound", and
+                // it should not be quiet because some pattern has it turned down. The sound's
+                // own shape does apply, because that is the thing being listened to — it is
+                // how the sound editor lets you hear what you are doing.
+                let trigger = self.note_trigger(
+                    track as usize,
+                    PREVIEW_PATTERN,
+                    &sample,
+                    pitch,
+                    velocity_gain(velocity),
                     // "Let me hear it", so it plays out whatever the track is.
-                    frames: f64::INFINITY,
-                };
+                    f64::INFINITY,
+                );
                 self.voices.trigger(trigger);
             }
             Command::Preview { sample, gain } => {
-                let ratio = self.playback_ratio(&sample, crate::DEFAULT_PITCH);
+                // Belongs to no track, so there is no voicing to apply: straight off the disk.
+                let ratio = (sample.source_rate as f64 / self.sample_rate)
+                    * pitch_ratio(crate::DEFAULT_PITCH);
+                let to = sample.frames as f64;
                 self.voices.trigger(Trigger {
                     sample,
                     track: PREVIEW_TRACK,
@@ -819,12 +1087,18 @@ impl Engine {
                     ratio,
                     gain,
                     frames: f64::INFINITY,
+                    envelope: Envelope::new(&Voicing::default(), self.sample_rate),
+                    left: 1.0,
+                    right: 1.0,
+                    from: 0.0,
+                    to,
                 });
             }
             Command::StopAll => {
                 self.playing = false;
                 self.rewind_all();
                 self.voices.release_all();
+                self.hush_all_plugins();
             }
         }
     }
@@ -835,6 +1109,8 @@ impl Engine {
         if (track as usize) >= MAX_TRACKS {
             return;
         }
+        let rate = self.sample_rate;
+        self.tracks[track as usize].voice(&Voicing::default(), rate);
         let bit = 1u32 << track;
         for (at, pattern) in self.patterns.iter_mut().enumerate() {
             if let Some(notes) = pattern.tracks.get_mut(track as usize) {

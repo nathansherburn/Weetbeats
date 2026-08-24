@@ -61,6 +61,155 @@ pub struct SampleRef {
     pub name: String,
 }
 
+/// How a track's sound is played: the shape it is given, where it sits, and how much of the
+/// file is used.
+///
+/// The track's, not the pattern's, and that is the whole distinction. How loud a part is and
+/// whether you hear it at all is writing the part, so it belongs to the pattern; what the
+/// sound *is* — how sharply it starts, how long it hangs on, where it sits between the
+/// speakers, how it is tuned — is the same wherever it is played, so it belongs here. Change
+/// it and every pattern using that sound changes with it, which is what you want when the
+/// snare's tail is too long.
+///
+/// Times are in seconds and everything else is a plain fraction, because those are the units
+/// the controls are labelled in. The engine turns them into per-frame increments once, when
+/// they arrive, rather than on every note.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Voicing {
+    /// Seconds from silence up to full. Never quite zero: a sample that does not start at
+    /// zero needs a moment or it clicks.
+    #[serde(default = "default_attack")]
+    pub attack: f32,
+    /// Seconds from full down to the sustain level.
+    #[serde(default)]
+    pub decay: f32,
+    /// The level it settles at while the note is held, as a fraction of full.
+    #[serde(default = "default_sustain")]
+    pub sustain: f32,
+    /// Seconds from wherever it is down to silence, once the note ends.
+    #[serde(default = "default_release")]
+    pub release: f32,
+    /// Where it sits between the speakers: -1 hard left, 0 middle, 1 hard right.
+    #[serde(default)]
+    pub pan: f32,
+    /// Semitones up or down, fractions allowed. On top of whatever pitch the note is.
+    #[serde(default)]
+    pub tune: f32,
+    /// A trim on the sound itself, on top of the pattern's fader. 1.0 leaves it alone.
+    #[serde(default = "default_level")]
+    pub level: f32,
+    /// How far into the file a note starts, as a fraction of its length. For trimming the
+    /// silence off the front of a sample somebody else recorded.
+    #[serde(default)]
+    pub start: f32,
+    /// And where it stops. Always past `start`; the engine holds it there.
+    #[serde(default = "default_end")]
+    pub end: f32,
+}
+
+/// A moment, not nothing: enough to swallow the step in a sample that does not start at zero
+/// without softening a drum hit. About two milliseconds.
+pub const DEFAULT_ATTACK: f32 = 0.002;
+/// And about three on the way out, which is the shortest fade that does not click.
+pub const DEFAULT_RELEASE: f32 = 0.003;
+
+fn default_attack() -> f32 {
+    DEFAULT_ATTACK
+}
+
+fn default_sustain() -> f32 {
+    1.0
+}
+
+fn default_release() -> f32 {
+    DEFAULT_RELEASE
+}
+
+fn default_level() -> f32 {
+    1.0
+}
+
+fn default_end() -> f32 {
+    1.0
+}
+
+impl Default for Voicing {
+    /// The sound as it came off the disk: a fade at each end short enough not to be heard,
+    /// nothing else touched.
+    fn default() -> Self {
+        Voicing {
+            attack: DEFAULT_ATTACK,
+            decay: 0.0,
+            sustain: 1.0,
+            release: DEFAULT_RELEASE,
+            pan: 0.0,
+            tune: 0.0,
+            level: 1.0,
+            start: 0.0,
+            end: 1.0,
+        }
+    }
+}
+
+impl Voicing {
+    /// Put every control back inside the range its editor offers. Everything from outside
+    /// this crate goes through here, so the engine can trust what it is given.
+    pub fn settled(self) -> Self {
+        let start = self.start.clamp(0.0, 0.99);
+        Voicing {
+            attack: clamp_time(self.attack),
+            decay: clamp_time(self.decay),
+            sustain: self.sustain.clamp(0.0, 1.0),
+            release: clamp_time(self.release),
+            pan: self.pan.clamp(-1.0, 1.0),
+            tune: self.tune.clamp(-24.0, 24.0),
+            level: self.level.clamp(0.0, 2.0),
+            start,
+            // A note has to be allowed to make some sound, so the end never catches the start.
+            end: self.end.clamp(start + 0.01, 1.0),
+        }
+    }
+
+    /// True when nothing has been changed, which is when there is nothing worth writing down.
+    pub fn untouched(&self) -> bool {
+        *self == Voicing::default()
+    }
+}
+
+/// The longest any one stage of the envelope can be. Ten seconds is a pad's release; past
+/// that it is a loop, not a note.
+const MAX_ENVELOPE_SECS: f32 = 10.0;
+
+fn clamp_time(secs: f32) -> f32 {
+    if secs.is_finite() {
+        secs.clamp(0.0, MAX_ENVELOPE_SECS)
+    } else {
+        0.0
+    }
+}
+
+/// A CLAP instrument on a track, as the project remembers it.
+///
+/// The path and the id are how it is found again. The name is kept as well so a project that
+/// has been carried to a machine without that plugin can say *which* plugin is missing rather
+/// than only that one is.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginRef {
+    /// The `.clap` file or bundle, as an absolute path. Not copied into the project folder
+    /// the way a sample is: a plugin is installed software, often hundreds of megabytes, and
+    /// the licence to copy it is not ours to assume.
+    pub path: String,
+    /// Its id inside that file, which never changes for the life of the plugin.
+    pub id: String,
+    pub name: String,
+    /// Where its own settings live inside the project folder, e.g. `plugins/0.clapstate`.
+    /// The plugin decides what is in there; we only carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+}
+
 /// One instrument: a sound and how loud it is. Belongs to the project, not to a pattern.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -69,6 +218,17 @@ pub struct Track {
     pub id: u16,
     pub name: String,
     pub sample: Option<SampleRef>,
+    /// A CLAP instrument instead of a sample. A track has one or the other: adding a plugin
+    /// puts the sample down, and adding a sample puts the plugin down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<PluginRef>,
+    /// How the sound is played: its envelope, where it sits, how it is tuned, and how much
+    /// of the file a note uses. The track's own, so every pattern hears the same sound.
+    ///
+    /// A plugin has its own envelope, its own tuning and its own idea of where it sits, so
+    /// the only part of this that means anything on a plugin track is how loud it is.
+    #[serde(default)]
+    pub voicing: Voicing,
     /// How loud, whether it is heard, and whether it is an instrument — all left over from
     /// when they belonged to the track rather than to each pattern.
     ///
@@ -91,6 +251,8 @@ impl Track {
             id,
             name,
             sample,
+            plugin: None,
+            voicing: Voicing::default(),
             gain: DEFAULT_TRACK_GAIN,
             muted: false,
             soloed: false,
@@ -487,11 +649,6 @@ impl Project {
     /// Lowest free engine slot, or `None` when every slot is taken.
     pub fn free_track_id(&self) -> Option<u16> {
         (0..MAX_TRACKS as u16).find(|id| self.track(*id).is_none())
-    }
-
-    /// True while any track is soloed, which is when mutes stop mattering.
-    pub fn any_soloed(&self) -> bool {
-        self.tracks.iter().any(|t| t.soloed)
     }
 
     /// Delete a track, and with it every note anyone had drawn for it.
@@ -1355,6 +1512,74 @@ mod tests {
             back.placement_at(second, 40).unwrap().length,
             32,
             "a thirty two step pattern, and the block knows it is that long"
+        );
+    }
+
+    #[test]
+    fn a_shaped_sound_survives_being_written_out() {
+        let mut project = Project::default();
+        project.tracks.push(Track::new(0, "pad".into(), None));
+        project.tracks[0].voicing = Voicing {
+            attack: 0.4,
+            decay: 0.2,
+            sustain: 0.5,
+            release: 1.5,
+            pan: -0.6,
+            tune: 7.0,
+            level: 0.75,
+            start: 0.1,
+            end: 0.9,
+        };
+
+        let json = serde_json::to_string(&project).unwrap();
+        let back: Project = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.tracks[0].voicing, project.tracks[0].voicing);
+    }
+
+    #[test]
+    fn a_project_written_before_there_were_sounds_to_shape_still_opens() {
+        // Version 2 as it was: a track with no voicing at all. It has to come back as one
+        // nobody has shaped, not as silence or a panic.
+        let json = r#"{
+            "version": 2,
+            "bpm": 120.0,
+            "masterGain": 0.9,
+            "tracks": [{ "id": 0, "name": "kick", "sample": null }],
+            "patterns": [],
+            "song": []
+        }"#;
+        let back: Project = serde_json::from_str(json).unwrap();
+        assert_eq!(back.tracks[0].voicing, Voicing::default());
+        assert!(back.tracks[0].voicing.untouched());
+    }
+
+    #[test]
+    fn a_voicing_from_outside_is_pushed_back_inside_its_range() {
+        let mad = Voicing {
+            attack: -1.0,
+            decay: f32::INFINITY,
+            sustain: 4.0,
+            release: 900.0,
+            pan: -8.0,
+            tune: 100.0,
+            level: -3.0,
+            // The wrong way round, which is the one that would otherwise silence the track.
+            start: 0.8,
+            end: 0.2,
+        }
+        .settled();
+        assert_eq!(mad.attack, 0.0);
+        assert_eq!(mad.decay, 0.0, "an infinite decay is not a decay");
+        assert_eq!(mad.sustain, 1.0);
+        assert_eq!(mad.release, 10.0);
+        assert_eq!(mad.pan, -1.0);
+        assert_eq!(mad.tune, 24.0);
+        assert_eq!(mad.level, 0.0);
+        assert!(
+            mad.end > mad.start,
+            "a note has to be allowed to make some sound: {} to {}",
+            mad.start,
+            mad.end
         );
     }
 }

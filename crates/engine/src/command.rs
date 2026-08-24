@@ -5,6 +5,8 @@
 
 use std::sync::Arc;
 
+use crate::model::Voicing;
+use crate::plugins::Slot;
 use crate::sample::Sample;
 
 /// A note as the engine holds it: steps and MIDI pitch, sized down so [`Command`] stays small.
@@ -42,6 +44,32 @@ pub enum Command {
         track: u16,
         sample: Option<Arc<Sample>>,
     },
+    /// Put a CLAP instrument on a track, or take it off. Everything the audio thread needs is
+    /// inside the box and was allocated on the app thread; a slot coming off goes back there
+    /// to be dropped, because freeing it here would be a stall.
+    ///
+    /// A track plays a plugin *or* a sample. Sending one clears the other.
+    SetTrackPlugin {
+        track: u16,
+        slot: Option<Box<Slot>>,
+    },
+    /// Move one of a plugin's parameters. Goes in as an event on the next block, which is the
+    /// only way CLAP has of moving one while it plays.
+    SetPluginParam {
+        track: u16,
+        param: u32,
+        value: f64,
+    },
+    /// How the track's sound is played: its envelope, where it sits between the speakers, how
+    /// it is tuned, its level trim and how much of the file a note reads.
+    ///
+    /// The track's, not a pattern's, so this arrives once however many patterns use it. Only
+    /// the next note hears it: a voice keeps the shape it started with, so dragging the
+    /// attack about while it plays does not warp what is already sounding.
+    SetTrackVoicing {
+        track: u16,
+        voicing: Voicing,
+    },
     /// How loud a track is in one pattern. Slides to its new value rather than jumping, so
     /// a fader moved while it plays takes what is already sounding with it.
     SetPatternGain {
@@ -49,13 +77,15 @@ pub enum Command {
         track: u16,
         gain: f32,
     },
-    /// Silent in this pattern. Fades out rather than cutting, for the same reason.
+    /// Silent in this pattern. Fades out rather than cutting, for the same reason. Beats
+    /// solo: a track that is both is silent, so mute always means the one thing.
     SetPatternMuted {
         pattern: u16,
         track: u16,
         muted: bool,
     },
-    /// Anything soloed in a pattern means only the soloed tracks are heard in it.
+    /// Anything soloed in a pattern means only the soloed tracks are heard in it — of the
+    /// ones that are not muted, because mute wins.
     SetPatternSoloed {
         pattern: u16,
         track: u16,
@@ -145,6 +175,9 @@ pub enum Command {
 #[derive(Debug)]
 pub enum Trash {
     Sample(Arc<Sample>),
+    /// A plugin taken off a track. Its buffers are a good few kilobytes and letting go of it
+    /// may be letting go of the whole instance, so it goes home to be dropped.
+    Plugin(Box<Slot>),
 }
 
 /// Commands the ring buffer holds before the app thread has to wait. A callback drains the
@@ -176,6 +209,15 @@ impl TrashBin {
     #[inline]
     pub fn put(&mut self, sample: Arc<Sample>) {
         if self.tx.push(Trash::Sample(sample)).is_err() {
+            self.shared.note_dropped();
+        }
+    }
+
+    /// And a plugin. Same deal, except that dropping one here really would free memory, so
+    /// a full queue is worse than it is for a sample.
+    #[inline]
+    pub fn put_plugin(&mut self, slot: Box<Slot>) {
+        if self.tx.push(Trash::Plugin(slot)).is_err() {
             self.shared.note_dropped();
         }
     }

@@ -12,8 +12,14 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 weetbeats-engine.workspace = true
-tauri = { version = "2", features = [] }
+# `unstable` is for windows with no webview in them, which is what a plugin that draws into a
+# window of ours gets. Tauri calls the API unstable; the alternative is making an NSWindow and
+# an HWND and an X11 window by hand.
+tauri = { version = "2", features = ["unstable"] }
 tauri-plugin-dialog = "2"
 serde.workspace = true
 rtrb.workspace = true
 cpal = "0.18"
+# Only to ask our own window what it is, so a plugin's floating window can be told to stay
+# above it. Must be the version Tauri itself uses, or the handle types will not match.
+raw-window-handle = "0.6"

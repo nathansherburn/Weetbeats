@@ -11,7 +11,7 @@
  *
  * An instrument's row in a pattern is a small piano roll rather than a line of boxes, and
  * clicking it opens the roll proper. Both are the same lane of notes seen two ways, so the
- * ♪ button switches between them without anything being lost.
+ * keyboard button switches between them without anything being lost.
  *
  * It holds a copy of the project so a click can light a box up straight away, but Rust owns
  * it: every change goes there too, and the audio thread hears about it from Rust.
@@ -42,9 +42,20 @@ const ROW = 46; // must match --row in the stylesheet
 const HEADERS = 296; // the instrument column: must match --headers
 const LANE = 34; // one pattern's row, in the panel and in the song: must match --lane
 const HEAD = 34; // the strip along the top of every view: must match --head
+/*
+ * The band of the open pattern's colour along the bottom of that strip. The stylesheet
+ * draws it, as a border on the ruler and on the chip beside it, so the two cannot land a
+ * pixel apart; this is only how much of the strip the ruler has left to draw in. Must match
+ * the border-bottom on .ruler, .corner and .head-chip.
+ */
+const HEAD_LINE = 3;
 const STEPS_PER_BEAT = 4; // sixteenth notes
 const STEPS_PER_BAR = 16; // a bar of the song, and the length of a new pattern
 const MAX_STEPS = 256; // as far as the engine will play
+
+// The sound editor's two pictures. Must match .sound-wave and .sound-env in the stylesheet.
+const SOUND_WAVE_HEIGHT = 96;
+const SOUND_ENV_HEIGHT = 118;
 
 // The piano roll. Must match --keys, --semitone and --velocity in the stylesheet.
 const KEYS = 152;
@@ -92,6 +103,57 @@ const BLOCK_COLOURS = [
   "#4de3a8", "#4dc9ff", "#8f8bff", "#f07bff",
 ];
 
+/*
+ * The little pictures on a track's row: mute, solo, and the switch to the piano roll.
+ *
+ * Drawings rather than letters. M and S only read as mute and solo if you already know the
+ * words, they say nothing in the languages that do not start those words with those letters,
+ * and ♪ was a character out of the body text with the wrong weight, the wrong size and no
+ * say in either. These are one square each, drawn in `currentColor`, so a button lighting up
+ * takes its icon with it.
+ *
+ * Written out as markup because an SVG is markup, and this is the whole of it: three static
+ * strings with nothing in them from anywhere else.
+ */
+const ICONS = {
+  // A speaker with the sound crossed out.
+  mute: `<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+    <path d="M2.4 6.2h2.2L7.6 3.4v9.2L4.6 9.8H2.4z" fill="currentColor" />
+    <path d="M10.2 5.8l3.6 4.4M13.8 5.8l-3.6 4.4" fill="none" stroke="currentColor"
+      stroke-width="1.5" stroke-linecap="round" />
+  </svg>`,
+  // Headphones: the one track you have put them on to listen to.
+  solo: `<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+    <path d="M3.1 10.4V8.6a4.9 4.9 0 0 1 9.8 0v1.8" fill="none" stroke="currentColor"
+      stroke-width="1.5" stroke-linecap="round" />
+    <rect x="1.5" y="9.4" width="3" height="4.4" rx="1.5" fill="currentColor" />
+    <rect x="11.5" y="9.4" width="3" height="4.4" rx="1.5" fill="currentColor" />
+  </svg>`,
+  // A plug, for a track whose sound is a CLAP instrument rather than a file.
+  plug: `<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+    <path d="M5.4 1.8v3.4M10.6 1.8v3.4" fill="none" stroke="currentColor" stroke-width="1.5"
+      stroke-linecap="round" />
+    <rect x="3" y="5.2" width="10" height="4.6" rx="1.4" fill="currentColor" />
+    <path d="M8 9.8v4.4" fill="none" stroke="currentColor" stroke-width="1.5"
+      stroke-linecap="round" />
+  </svg>`,
+  // A keyboard, because that is what the row turns into.
+  keys: `<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+    <rect x="1.9" y="3.4" width="12.2" height="9.2" rx="1.6" fill="none" stroke="currentColor"
+      stroke-width="1.4" />
+    <path d="M6 3.4v9.2M10 3.4v9.2" fill="none" stroke="currentColor" stroke-width="1.2" />
+    <path d="M4.7 3.4h2.6v5H4.7zM8.7 3.4h2.6v5H8.7z" fill="currentColor" />
+  </svg>`,
+};
+
+/* One of them, ready to go in a button. */
+function icon(name) {
+  const holder = document.createElement("span");
+  holder.className = "icon";
+  holder.innerHTML = ICONS[name] ?? "";
+  return holder;
+}
+
 // Pixels of drag per step of a number field.
 const DRAG_PIXELS = 3;
 
@@ -102,6 +164,8 @@ const state = {
   song: [], // { pattern, step, length }, sorted: what plays where
   open: null, // the pattern the editor has, or null for the song view
   roll: null, // the track the piano roll has, or null for the boxes
+  sound: null, // the track the sound editor has, or null for the music
+  trimming: null, // which end of the sound is being dragged: "start", "end", or null
   drawLength: 1, // how long the last note drawn was, so the next one matches
   snap: STEPS_PER_BAR, // what blocks in the song snap to, in steps
   zoom: 1, // how wide a step of the song is drawn, as a multiple of SONG_STEP
@@ -124,6 +188,10 @@ for (const id of [
   "add", "addBig", "steps", "fewerSteps", "moreSteps", "trackHeaders", "grid", "ruler",
   "empty", "roll", "rollScroll", "rollName", "rollRuler", "keys", "notes", "velocity",
   "closeRoll", "rollZoomIn", "rollZoomOut", "rollZoomRead", "workspace", "patternTab",
+  "sound", "soundChip", "soundName", "closeSound", "hearSound", "soundBody", "soundWave",
+  "soundEnv", "soundTrimKnobs", "soundShapeKnobs", "soundToneKnobs",
+  "addPlugin", "picker", "closePicker", "rescan", "pluginFilter", "pluginList", "pickerNote",
+  "pluginBody", "pluginParams", "pluginLevelKnobs", "paramFilter", "pluginWindow",
 ]) {
   el[id] = document.getElementById(id);
 }
@@ -185,6 +253,9 @@ function applyProject(startup) {
 
   if (state.open !== null && patternById(state.open) === null) {
     closePattern();
+  } else if (state.sound !== null && trackById(state.sound) === null) {
+    // The sound it was showing has gone: an undo took the track back out.
+    closeSound();
   } else if (state.roll !== null && !isPitched(state.roll)) {
     // The track it was showing is a row of boxes again, or gone altogether.
     closeRoll();
@@ -311,13 +382,20 @@ function isPitched(track) {
 
 // --- the two views --------------------------------------------------------
 
-/* One of the three at a time: the song, a pattern's boxes, or a pattern's piano roll. */
+/*
+ * One of four at a time: the song, a pattern's boxes, a pattern's piano roll, or one track's
+ * sound. The first three are the same music at different magnifications; the fourth is a
+ * different question altogether — not what is played but what it is played with — which is
+ * why it sits on top of the pattern rather than beside it.
+ */
 function showView() {
   const inPattern = state.open !== null;
-  const inRoll = inPattern && state.roll !== null;
+  const inSound = inPattern && state.sound !== null;
+  const inRoll = inPattern && !inSound && state.roll !== null;
   el.song.classList.toggle("hidden", inPattern);
-  el.editor.classList.toggle("hidden", !inPattern || inRoll);
+  el.editor.classList.toggle("hidden", !inPattern || inRoll || inSound);
   el.roll.classList.toggle("hidden", !inRoll);
+  el.sound.classList.toggle("hidden", !inSound);
 }
 
 /*
@@ -339,6 +417,7 @@ function openPattern(id) {
   state.open = id;
   state.selected = id;
   state.roll = null;
+  state.sound = null;
   el.steps.value = String(stepsOf(id));
   showPatternColour();
   showView();
@@ -355,6 +434,7 @@ function closePattern() {
   if (state.open !== null) state.selected = state.open;
   state.open = null;
   state.roll = null;
+  state.sound = null;
   showView();
   invoke("close_pattern");
   drawPatternPanel();
@@ -761,6 +841,7 @@ async function addInstruments(command, args) {
   adding = true;
   el.add.disabled = true;
   el.addBig.disabled = true;
+  el.addPlugin.disabled = true;
   try {
     const added = await invoke(command, args);
     for (const item of added.tracks) {
@@ -781,6 +862,7 @@ async function addInstruments(command, args) {
     adding = false;
     el.add.disabled = false;
     el.addBig.disabled = false;
+    el.addPlugin.disabled = false;
   }
 }
 
@@ -802,22 +884,40 @@ function drawTrackHeaders() {
       name.addEventListener("click", () => invoke("audition", { id: track.id }));
       row.append(name);
 
-      const wave = document.createElement("canvas");
+      // The picture of the sound is the way to the sound: clicking a track's name plays
+      // it, clicking its picture asks what it is. A plugin has no waveform to show — it is
+      // an instrument, not a file — so it wears a plug instead.
+      const wave = document.createElement("button");
       wave.className = "wave";
-      wave.width = 68;
-      wave.height = 36;
-      drawWaveform(wave, track.peaks);
+      wave.title = track.plugin
+        ? `${track.plugin.name} — click for its controls`
+        : `${track.name} — click to shape this sound`;
+      wave.setAttribute("aria-label", wave.title);
+      if (track.plugin) {
+        wave.classList.add("plugged");
+        wave.append(icon("plug"));
+      } else {
+        const drawing = document.createElement("canvas");
+        drawing.width = 68;
+        drawing.height = 36;
+        drawWaveform(drawing, track.peaks);
+        wave.append(drawing);
+      }
+      wave.addEventListener("click", () => openSound(track.id));
       row.append(wave);
 
       // The whole row belongs to the pattern that is open: how loud, what is heard, and
       // whether it is an instrument.
       const mix = mixOf(track.id);
-      const mute = toggle("M", "mute", mix.muted, (on) => {
-        setMix(track.id, { muted: on }, "set_pattern_muted", { muted: on });
-      });
-      const solo = toggle("S", "solo", mix.soloed, (on) => {
+      const solo = toggle("solo", "Solo in this pattern", mix.soloed, (on) => {
         setMix(track.id, { soloed: on }, "set_pattern_soloed", { soloed: on });
       });
+      const mute = toggle("mute", "Mute in this pattern", mix.muted, (on) => {
+        setMix(track.id, { muted: on }, "set_pattern_muted", { muted: on });
+        // Mute wins, so a muted track's solo is showing something that is not happening.
+        beaten(solo, on);
+      });
+      beaten(solo, mix.muted);
 
       const gain = document.createElement("input");
       gain.type = "range";
@@ -836,10 +936,11 @@ function drawTrackHeaders() {
       const pitched = isPitched(track.id);
       const roll = document.createElement("button");
       roll.className = `tick keys-on${pitched ? " on" : ""}`;
-      roll.textContent = "♪";
+      roll.replaceChildren(icon("keys"));
       roll.title = pitched
         ? "Back to the boxes in this pattern, and back to a one-shot"
         : "Piano roll: in this pattern, play this one pitched and show its notes";
+      roll.setAttribute("aria-label", roll.title);
       roll.addEventListener("click", () => setPitched(track.id, !isPitched(track.id)));
 
       const kill = document.createElement("button");
@@ -854,17 +955,32 @@ function drawTrackHeaders() {
   );
 }
 
-function toggle(label, extra, on, onChange) {
+function toggle(name, title, on, onChange) {
   const button = document.createElement("button");
-  button.className = `tick ${extra}${on ? " on" : ""}`;
-  button.textContent = label;
-  button.title = extra;
+  button.className = `tick ${name}${on ? " on" : ""}`;
+  button.replaceChildren(icon(name));
+  button.title = title;
+  button.setAttribute("aria-label", title);
   button.addEventListener("click", () => {
     const next = !button.classList.contains("on");
     button.classList.toggle("on", next);
     onChange(next);
   });
   return button;
+}
+
+/*
+ * Solo, shown as something a mute is overruling. Mute is the switch that always means
+ * silence, so a track that is both is quiet however it is soloed — and a solo button lit up
+ * on a silent track would be saying the opposite. It stays lit, because turning the mute off
+ * brings it straight back, and goes faint to say it is not the one being listened to.
+ */
+function beaten(solo, muted) {
+  solo.classList.toggle("beaten", muted);
+  solo.title = muted
+    ? "Solo in this pattern — the mute wins while it is on"
+    : "Solo in this pattern";
+  solo.setAttribute("aria-label", solo.title);
 }
 
 /* Deleting a track takes its notes out of every pattern, and its sample out of the folder. */
@@ -875,6 +991,9 @@ function removeTrack(id) {
     pattern.notes.delete(id);
   }
   if (state.roll === id) closeRoll();
+  if (state.sound === id) closeSound();
+  plugins.params.delete(id);
+  plugins.windows.delete(id);
   drawTrackHeaders();
   resize();
 }
@@ -940,6 +1059,11 @@ function drawnWidth(canvas) {
   return parseInt(canvas.style.width, 10) || 0;
 }
 
+/* And how tall, for the ones whose height is the window's rather than the music's. */
+function drawnHeight(canvas) {
+  return parseInt(canvas.style.height, 10) || 0;
+}
+
 function gridWidth() {
   return stepsOf(state.open) * CELL;
 }
@@ -975,7 +1099,7 @@ function rollSteps() {
  */
 function resizeEditor() {
   size(el.grid, gridWidth(), gridHeight());
-  size(el.ruler, gridWidth(), HEAD - 1);
+  size(el.ruler, gridWidth(), HEAD - HEAD_LINE);
   state.needsDraw = true;
   drawRuler();
 }
@@ -984,7 +1108,7 @@ function resizeRoll() {
   const width = rollSteps() * rollCell();
   const height = PITCHES * semitone();
   size(el.notes, width, height);
-  size(el.rollRuler, width, HEAD - 1);
+  size(el.rollRuler, width, HEAD - HEAD_LINE);
   size(el.keys, KEYS, height);
   size(el.velocity, width, VELOCITY);
   // The stylesheet draws a line under every semitone across the whole width, so it has to
@@ -1006,10 +1130,28 @@ function resizeSong() {
   state.needsDraw = true;
 }
 
+/*
+ * The sound editor is the one view whose canvases are the shape of the window rather than
+ * the shape of the music, so it is measured off the panels it sits in.
+ */
+function resizeSound() {
+  if (state.sound === null) return;
+  if (isPlugin(state.sound)) {
+    drawSound();
+    return;
+  }
+  const wave = el.soundWave.parentElement.clientWidth;
+  size(el.soundWave, Math.max(80, wave), SOUND_WAVE_HEIGHT);
+  const shape = el.soundEnv.parentElement.clientWidth;
+  size(el.soundEnv, Math.max(80, shape), SOUND_ENV_HEIGHT);
+  drawSound();
+}
+
 function resize() {
   resizeEditor();
   resizeRoll();
   resizeSong();
+  resizeSound();
 }
 
 /*
@@ -1052,10 +1194,6 @@ function drawRuler() {
       ctx.fillRect(step * CELL + GAP, 13, 3, 1);
     }
   }
-  // The pattern's colour along the bottom of the strip, running the whole way across:
-  // the name tab at one end, the close button at the other, and this joining them.
-  ctx.fillStyle = colourOf(state.open);
-  ctx.fillRect(0, HEAD - 4, width, 3);
 }
 
 function drawGrid() {
@@ -1112,8 +1250,8 @@ function drawGrid() {
 
 /*
  * One instrument's notes, in the room a row of boxes would have taken. Click it to open the
- * roll proper; the ♪ button in the header puts the boxes back, and neither throws anything
- * away — the boxes and the roll have always been the same lane of notes.
+ * roll proper; the keyboard button on the row puts the boxes back, and neither throws
+ * anything away — the boxes and the roll have always been the same lane of notes.
  *
  * The pitches are scaled to what is actually in there, never less than an octave, so a bass
  * line that stays inside a fifth still uses the height rather than hugging the middle.
@@ -1278,7 +1416,7 @@ function openRoll(track) {
   state.roll = track;
   showView();
   // Notes only mean pitch and length on an instrument, so opening the roll makes it one in
-  // this pattern. The ♪ button on the row is there to change your mind.
+  // this pattern. The keyboard button on the row is there to change your mind.
   if (!isPitched(track)) setPitched(track, true);
   showPitched();
   resize();
@@ -1398,8 +1536,6 @@ function drawRollRuler() {
     }
   }
   ctx.globalAlpha = 1;
-  ctx.fillStyle = colourOf(state.open);
-  ctx.fillRect(0, HEAD - 4, width, 3);
 }
 
 function drawNotes() {
@@ -1688,6 +1824,718 @@ el.keys.addEventListener("pointerdown", (e) => {
   const row = Math.floor((e.clientY - rect.top) / semitone());
   if (row < 0 || row >= PITCHES) return;
   invoke("audition", { id: state.roll, pitch: rowPitch(row) });
+});
+
+// --- the sound editor -----------------------------------------------------
+
+/*
+ * One track's instrument, rather than one pattern's part.
+ *
+ * The row in a pattern says how loud this sound is *there* and whether it is heard *there*.
+ * All of that is writing the part, so it belongs to the pattern. What is in here is what the
+ * sound *is* — how sharply it starts, how long it hangs on, where it sits between the
+ * speakers, how it is tuned, how much of the file a note uses — and that is the same
+ * wherever it is played, so it belongs to the track. Change the snare's tail here and every
+ * pattern using the snare hears it.
+ *
+ * You get in through the little waveform on the row, because the waveform is the sound.
+ * Clicking a track's name plays it; clicking its picture asks about it.
+ */
+
+/*
+ * The controls, as data. Each one says what it reads and writes on the voicing, how its
+ * slider maps onto that, and how to say the value out loud.
+ *
+ * Times get a squared slider. Attack is the difference between nought and thirty
+ * milliseconds far more often than between one second and two, and a linear slider spends
+ * nine tenths of its travel on the part nobody wants.
+ */
+const SOUND_MAX_TIME = 4; // seconds, the longest any one stage of the envelope goes
+
+const squared = (max) => ({
+  toValue: (t) => t * t * max,
+  toSlider: (v) => Math.sqrt(Math.max(0, v) / max),
+});
+const straight = (min, max) => ({
+  toValue: (t) => min + t * (max - min),
+  toSlider: (v) => (v - min) / (max - min),
+});
+
+const millis = (v) => (v < 0.1 ? `${Math.round(v * 1000)} ms` : `${v.toFixed(2)} s`);
+const percent = (v) => `${Math.round(v * 100)}%`;
+
+const SOUND_CONTROLS = {
+  shape: [
+    { key: "attack", label: "attack", ...squared(SOUND_MAX_TIME), say: millis,
+      hint: "How long a note takes to come up. Nothing is instant: a hard start clicks." },
+    { key: "decay", label: "decay", ...squared(SOUND_MAX_TIME), say: millis,
+      hint: "How long it takes to fall from full to where it sits." },
+    { key: "sustain", label: "sustain", ...straight(0, 1), say: percent,
+      hint: "Where it sits while the note is held. Full means the decay does nothing." },
+    { key: "release", label: "release", ...squared(SOUND_MAX_TIME), say: millis,
+      hint: "How long the tail is once the note ends." },
+  ],
+  tone: [
+    {
+      key: "pan",
+      label: "pan",
+      ...straight(-1, 1),
+      say: (v) =>
+        Math.abs(v) < 0.02
+          ? "middle"
+          : `${Math.round(Math.abs(v) * 100)}% ${v < 0 ? "left" : "right"}`,
+      hint: "Where it sits between the speakers.",
+    },
+    {
+      key: "tune",
+      label: "tune",
+      ...straight(-24, 24),
+      say: (v) => (Math.abs(v) < 0.005 ? "as recorded" : `${v > 0 ? "+" : ""}${v.toFixed(2)} st`),
+      hint: "Semitones up or down, on top of whatever pitch a note is.",
+    },
+    { key: "level", label: "level", ...straight(0, 2), say: percent,
+      hint: "How loud the sound itself is, wherever it is played." },
+  ],
+  trim: [
+    { key: "start", label: "starts at", ...straight(0, 1), say: percent,
+      hint: "How far into the file a note starts. Drag the left hand end of the waveform too." },
+    { key: "end", label: "ends at", ...straight(0, 1), say: percent,
+      hint: "And where it stops. Drag the right hand end of the waveform too." },
+  ],
+};
+
+/*
+ * The one control of ours a plugin track keeps: how loud the track is. Everything else in a
+ * voicing — the envelope, the tuning, the panning — the plugin has its own of, and two sets
+ * of them would only fight. Named apart from the plugin's own "level", which is a different
+ * knob a few rows down.
+ */
+const TRACK_LEVEL = {
+  ...SOUND_CONTROLS.tone.find((one) => one.key === "level"),
+  label: "track level",
+  hint: "How loud this track is, wherever it is played. Not one of the plugin's own controls.",
+};
+
+/* The voicing of whichever track the editor has, or a default one when it has none. */
+function voicingOf(track) {
+  return trackById(track)?.voicing ?? DEFAULT_VOICING();
+}
+
+/* What a track that nobody has shaped sounds like. Must match Voicing::default in Rust. */
+const DEFAULT_VOICING = () => ({
+  attack: 0.002,
+  decay: 0,
+  sustain: 1,
+  release: 0.003,
+  pan: 0,
+  tune: 0,
+  level: 1,
+  start: 0,
+  end: 1,
+});
+
+function openSound(track) {
+  if (state.open === null || trackById(track) === null) return;
+  state.sound = track;
+  showView();
+  // Through resize, because the two pictures in here are the shape of the window and this
+  // is the first moment there is a window to measure.
+  resize();
+  // What a plugin's controls are is the plugin's to say, and it may have moved them since
+  // we last looked — and so is whether its window is still up.
+  if (isPlugin(track)) {
+    refreshParams(track);
+    refreshWindow(track);
+  }
+}
+
+function closeSound() {
+  state.sound = null;
+  state.trimming = null;
+  showView();
+  resize();
+}
+
+el.closeSound.addEventListener("click", closeSound);
+el.hearSound.addEventListener("click", () => {
+  if (state.sound !== null) invoke("audition", { id: state.sound });
+});
+
+/*
+ * Change one thing about the sound, here and in Rust.
+ *
+ * Rust hands back what it settled on rather than what was asked for — the ends of a trim
+ * cannot cross, the times have a ceiling — so the controls show what the sound actually is
+ * and not what you tried to make it.
+ */
+async function setVoicing(change) {
+  const track = trackById(state.sound);
+  if (!track) return;
+  const asked = { ...voicingOf(state.sound), ...change };
+  // Shown straight away, so a dragged slider is never a frame behind your hand.
+  track.voicing = asked;
+  drawSound();
+  const settled = await invoke("set_voicing", { id: track.id, voicing: asked });
+  const still = trackById(track.id);
+  if (!still) return;
+  still.voicing = settled;
+  // Only redraw for a value Rust would not have: a redraw per frame of a drag would fight
+  // the slider you are holding.
+  if (SOUND_KEYS.some((key) => Math.abs(settled[key] - asked[key]) > 1e-6)) drawSound();
+}
+
+const SOUND_KEYS = Object.keys(DEFAULT_VOICING());
+
+/* Every control, in the panel it belongs to. Built once per track the editor opens. */
+function buildSoundControls() {
+  for (const [group, where] of [
+    ["shape", el.soundShapeKnobs],
+    ["tone", el.soundToneKnobs],
+    ["trim", el.soundTrimKnobs],
+  ]) {
+    where.replaceChildren(...SOUND_CONTROLS[group].map(soundControl));
+  }
+}
+
+/*
+ * One labelled slider with its value beside it. The value is a read-out rather than a field:
+ * "40 ms" and "70% left" say what the number means, and nobody types a pan.
+ */
+function soundControl(spec) {
+  const row = document.createElement("label");
+  row.className = "knob";
+  row.title = spec.hint;
+
+  const label = document.createElement("span");
+  label.className = "knob-label";
+  label.textContent = spec.label;
+
+  const slider = document.createElement("input");
+  slider.type = "range";
+  slider.min = "0";
+  slider.max = "1000";
+  slider.step = "1";
+  slider.dataset.key = spec.key;
+
+  const read = document.createElement("span");
+  read.className = "knob-read";
+  read.dataset.read = spec.key;
+
+  slider.addEventListener("input", () => {
+    setVoicing({ [spec.key]: spec.toValue(Number(slider.value) / 1000) });
+  });
+  // Double click puts one control back where it started, which is the only way back to
+  // "exactly none of this" once you have moved it.
+  row.addEventListener("dblclick", () => {
+    setVoicing({ [spec.key]: DEFAULT_VOICING()[spec.key] });
+  });
+
+  row.append(label, slider, read);
+  return row;
+}
+
+/*
+ * The whole editor. Two halves, one at a time: a sampler's file and shape, or a plugin's own
+ * controls. A synth has an envelope, a tuning and a panning of its own, and a second set of
+ * ours next to them would only be two things fighting over one sound.
+ */
+function drawSound() {
+  const track = trackById(state.sound);
+  if (!track) return;
+  el.soundName.textContent = track.plugin ? track.plugin.name : track.name;
+  el.soundName.title = track.plugin ? `${track.plugin.name} — ${track.plugin.path}` : track.name;
+  if (el.soundShapeKnobs.childElementCount === 0) buildSoundControls();
+
+  const plugged = Boolean(track.plugin);
+  el.soundBody.classList.toggle("hidden", plugged);
+  el.pluginBody.classList.toggle("hidden", !plugged);
+  // Auditioning a plugin means playing it a note, which it has no way to refuse; the sampler
+  // it was written for is what "hear it" means. A plugin is played from the pattern instead.
+  el.hearSound.classList.toggle("hidden", plugged);
+  if (plugged) {
+    // How loud the track is still belongs to us: it is about the track, not about the synth.
+    // Named for what it is, because the plugin almost certainly has a "level" of its own a
+    // few rows below and the two are not the same knob.
+    if (el.pluginLevelKnobs.childElementCount === 0) {
+      el.pluginLevelKnobs.replaceChildren(soundControl(TRACK_LEVEL));
+    }
+    const value = voicingOf(state.sound)[TRACK_LEVEL.key];
+    const slider = el.pluginLevelKnobs.querySelector(`input[data-key="${TRACK_LEVEL.key}"]`);
+    const read = el.pluginLevelKnobs.querySelector(`[data-read="${TRACK_LEVEL.key}"]`);
+    if (slider && document.activeElement !== slider) {
+      slider.value = String(Math.round(TRACK_LEVEL.toSlider(value) * 1000));
+    }
+    if (read) read.textContent = TRACK_LEVEL.say(value);
+    drawWindowButton(state.sound);
+    drawPluginEditor(state.sound);
+    return;
+  }
+
+  const voicing = voicingOf(state.sound);
+  for (const group of Object.values(SOUND_CONTROLS)) {
+    for (const spec of group) {
+      const slider = el.soundBody.querySelector(`input[data-key="${spec.key}"]`);
+      const read = el.soundBody.querySelector(`[data-read="${spec.key}"]`);
+      if (slider && document.activeElement !== slider) {
+        slider.value = String(Math.round(spec.toSlider(voicing[spec.key]) * 1000));
+      }
+      if (read) read.textContent = spec.say(voicing[spec.key]);
+    }
+  }
+  drawSoundWave();
+  drawSoundEnvelope();
+}
+
+/*
+ * The file, with the part a note actually reads picked out in the pattern's colour and the
+ * trimmed off ends left dim. The handles are the edges of the lit part: there is nothing to
+ * find, because the thing you drag is the thing you can see.
+ */
+function drawSoundWave() {
+  const track = trackById(state.sound);
+  if (!track) return;
+  const ctx = el.soundWave.getContext("2d");
+  const w = drawnWidth(el.soundWave);
+  const h = drawnHeight(el.soundWave);
+  const voicing = voicingOf(state.sound);
+  ctx.clearRect(0, 0, w, h);
+
+  const peaks = track.peaks ?? [];
+  const from = voicing.start * w;
+  const to = voicing.end * w;
+  const colour = colourOf(state.open);
+  const step = w / Math.max(1, peaks.length);
+  for (let i = 0; i < peaks.length; i++) {
+    const x = i * step;
+    const inside = x + step / 2 >= from && x + step / 2 <= to;
+    ctx.fillStyle = inside ? colour : PALETTE.line;
+    const bar = Math.max(1, peaks[i] * (h - 16));
+    ctx.fillRect(x, (h - bar) / 2, Math.max(1, step - 1), bar);
+  }
+
+  // The two ends, as full height grips.
+  ctx.fillStyle = colour;
+  for (const x of [from, to]) {
+    ctx.fillRect(Math.min(w - 3, Math.max(0, x - 1.5)), 0, 3, h);
+  }
+}
+
+/*
+ * The envelope, drawn as the shape it is.
+ *
+ * Four numbers do not tell you what a sound will do and a shape does, so this is the real
+ * read-out and the sliders under it are how you move it. The hold in the middle is a fixed
+ * slice of the width rather than a real length, because how long a note is held is the
+ * pattern's business and this is only about the shape.
+ */
+const ENVELOPE_HOLD = 0.22; // of the width, given over to the sustain
+
+function drawSoundEnvelope() {
+  const ctx = el.soundEnv.getContext("2d");
+  const w = drawnWidth(el.soundEnv);
+  const h = drawnHeight(el.soundEnv);
+  ctx.clearRect(0, 0, w, h);
+  const voicing = voicingOf(state.sound);
+
+  const pad = 8;
+  const floor = h - pad;
+  const ceiling = pad;
+  const level = (v) => floor - v * (floor - ceiling);
+
+  // The three timed stages share what is left after the hold, in proportion to how long they
+  // are — so a long release really does look longer than a short attack.
+  const times = [voicing.attack, voicing.decay, voicing.release];
+  const total = times.reduce((a, b) => a + b, 0);
+  const room = w - pad * 2;
+  const spread = room * (1 - ENVELOPE_HOLD);
+  const widths = total > 0 ? times.map((t) => (t / total) * spread) : [0, 0, 0];
+
+  const points = [];
+  let x = pad;
+  points.push([x, level(0)]);
+  x += widths[0];
+  points.push([x, level(1)]);
+  x += widths[1];
+  points.push([x, level(voicing.sustain)]);
+  x += room * ENVELOPE_HOLD;
+  points.push([x, level(voicing.sustain)]);
+  x += widths[2];
+  points.push([x, level(0)]);
+
+  const colour = colourOf(state.open);
+  ctx.beginPath();
+  ctx.moveTo(points[0][0], floor);
+  for (const [px, py] of points) ctx.lineTo(px, py);
+  ctx.lineTo(points[points.length - 1][0], floor);
+  ctx.closePath();
+  ctx.fillStyle = tint(colour, 0.22);
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.moveTo(points[0][0], points[0][1]);
+  for (const [px, py] of points.slice(1)) ctx.lineTo(px, py);
+  ctx.strokeStyle = colour;
+  ctx.lineWidth = 2;
+  ctx.lineJoin = "round";
+  ctx.stroke();
+
+  // The line the note is let go on, which is where the release starts.
+  const releaseAt = points[3][0];
+  ctx.setLineDash([3, 3]);
+  ctx.beginPath();
+  ctx.moveTo(releaseAt, ceiling - 4);
+  ctx.lineTo(releaseAt, floor);
+  ctx.strokeStyle = PALETTE.dim;
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+/*
+ * Trimming, by dragging either end of the lit part. Anywhere else in the waveform plays the
+ * sound as it now is, because the whole point of trimming is hearing where it starts.
+ */
+const TRIM_GRAB = 8; // pixels either side of an end that count as grabbing it
+
+el.soundWave.addEventListener("pointerdown", (e) => {
+  if (state.sound === null) return;
+  const w = drawnWidth(el.soundWave);
+  const at = (e.clientX - el.soundWave.getBoundingClientRect().left) / Math.max(1, w);
+  const voicing = voicingOf(state.sound);
+  const grab = TRIM_GRAB / Math.max(1, w);
+  const ends = [
+    ["start", voicing.start],
+    ["end", voicing.end],
+  ]
+    .map(([which, value]) => [which, Math.abs(value - at)])
+    .filter(([, away]) => away <= grab)
+    .sort((a, b) => a[1] - b[1]);
+
+  if (!ends.length) {
+    invoke("audition", { id: state.sound });
+    return;
+  }
+  state.trimming = ends[0][0];
+  el.soundWave.setPointerCapture(e.pointerId);
+});
+
+el.soundWave.addEventListener("pointermove", (e) => {
+  if (!state.trimming) {
+    // A pointer near an end says so before you press, which is the only way to know the
+    // ends are draggable at all.
+    const w = drawnWidth(el.soundWave);
+    const at = (e.clientX - el.soundWave.getBoundingClientRect().left) / Math.max(1, w);
+    const voicing = voicingOf(state.sound);
+    const near =
+      Math.min(Math.abs(voicing.start - at), Math.abs(voicing.end - at)) <=
+      TRIM_GRAB / Math.max(1, w);
+    el.soundWave.classList.toggle("grabbing", near);
+    return;
+  }
+  const w = drawnWidth(el.soundWave);
+  const at = (e.clientX - el.soundWave.getBoundingClientRect().left) / Math.max(1, w);
+  setVoicing({ [state.trimming]: Math.min(1, Math.max(0, at)) });
+});
+
+const stopTrimming = () => {
+  if (!state.trimming) return;
+  state.trimming = null;
+  // Rust may have pushed an end back off the other one; show where they really are.
+  drawSound();
+};
+el.soundWave.addEventListener("pointerup", stopTrimming);
+el.soundWave.addEventListener("pointercancel", stopTrimming);
+
+// --- CLAP plugins ---------------------------------------------------------
+
+/*
+ * A track's sound can be a CLAP instrument — Surge XT, say — instead of a file.
+ *
+ * The picker is a list rather than a file dialog: a plugin is not a file you go and find,
+ * it is installed software, and a host is supposed to know where those live. Rust scans the
+ * standard folders once and remembers what it found.
+ *
+ * Everything after that is the same as any other track. Notes go in, sound comes out, and
+ * the pattern's row says how loud it is here and whether it is heard here.
+ */
+
+/* How many parameters the editor will draw at once. Surge XT has thousands. */
+const MAX_SHOWN_PARAMS = 120;
+
+/* How long after the last drag before asking the plugin what its controls now say. */
+const PARAM_SETTLE = 250;
+
+const plugins = {
+  found: null, // what the last scan turned up, or null before the first one
+  loading: false,
+  filter: "",
+  params: new Map(), // track id -> the plugin's parameters, as Rust last described them
+  windows: new Set(), // tracks whose plugin has its own window up
+  settling: null, // the timer waiting for a drag to finish
+};
+
+el.addPlugin.addEventListener("click", () => openPicker());
+el.closePicker.addEventListener("click", closePicker);
+el.rescan.addEventListener("click", () => openPicker(true));
+el.pluginFilter.addEventListener("input", () => {
+  plugins.filter = el.pluginFilter.value.trim().toLowerCase();
+  drawPluginList();
+});
+
+async function openPicker(again = false) {
+  el.picker.classList.remove("hidden");
+  el.pluginFilter.focus();
+  el.pluginFilter.select();
+  if (plugins.found !== null && !again) {
+    drawPluginList();
+    return;
+  }
+  plugins.found = null;
+  drawPluginList();
+  try {
+    plugins.found = await invoke("list_plugins", { again });
+  } catch (e) {
+    plugins.found = [];
+    showError(e);
+  }
+  drawPluginList();
+}
+
+function closePicker() {
+  el.picker.classList.add("hidden");
+}
+
+/*
+ * The list, filtered. Effects are shown greyed out rather than left out: "why is my plugin
+ * not here" deserves an answer, and "that one is an effect, and effects are stage five" is
+ * a better one than an empty list.
+ */
+function drawPluginList() {
+  if (plugins.found === null) {
+    el.pluginList.replaceChildren();
+    el.pickerNote.textContent = "Looking through the plugin folders…";
+    return;
+  }
+  const wanted = plugins.found.filter((one) =>
+    `${one.name} ${one.vendor}`.toLowerCase().includes(plugins.filter),
+  );
+  el.pluginList.replaceChildren(
+    ...wanted.map((one) => {
+      const row = document.createElement("button");
+      row.className = `plugin-row${one.instrument ? "" : " not-ours"}`;
+      row.disabled = !one.instrument || plugins.loading;
+
+      const name = document.createElement("span");
+      name.className = "plugin-name";
+      name.textContent = one.name;
+
+      const vendor = document.createElement("span");
+      vendor.className = "plugin-vendor";
+      vendor.textContent = one.instrument ? one.vendor : `${one.vendor} — not an instrument`;
+
+      row.append(name, vendor);
+      row.title = one.path;
+      row.addEventListener("click", () => addPlugin(one));
+      return row;
+    }),
+  );
+
+  if (!plugins.found.length) {
+    el.pickerNote.textContent =
+      "No CLAP plugins found. They live in ~/Library/Audio/Plug-Ins/CLAP on a Mac.";
+  } else if (!wanted.length) {
+    el.pickerNote.textContent = `Nothing matching that, out of ${plugins.found.length}.`;
+  } else {
+    el.pickerNote.textContent = "";
+  }
+}
+
+/* Load one onto a new track. Takes a moment: a big synth is a lot to read off the disk. */
+async function addPlugin(one) {
+  if (plugins.loading) return;
+  plugins.loading = true;
+  drawPluginList();
+  showWarning(`loading ${one.name}…`);
+  try {
+    const made = await invoke("add_plugin", { path: one.path, id: one.id });
+    state.tracks.push({ ...made.track, peaks: made.peaks });
+    closePicker();
+    clearStatus();
+    drawTrackHeaders();
+    resize();
+  } catch (e) {
+    showError(e);
+  } finally {
+    plugins.loading = false;
+    drawPluginList();
+  }
+}
+
+const isPlugin = (track) => Boolean(trackById(track)?.plugin);
+
+/*
+ * The plugin's own window: Surge XT's real interface, in a window of its own.
+ *
+ * Rust owns whether it is up, because the window has a close box of its own — the plugin's or
+ * ours — and clicking it need not reach us until the next time round. So this asks rather than
+ * remembers, whenever there is a reason to think the answer may have changed.
+ */
+async function refreshWindow(track) {
+  try {
+    const open = await invoke("plugin_window_open", { id: track });
+    showWindowState(track, open);
+  } catch (e) {
+    showError(e);
+  }
+}
+
+function showWindowState(track, open) {
+  if (open) plugins.windows.add(track);
+  else plugins.windows.delete(track);
+  if (state.sound === track) drawWindowButton(track);
+}
+
+function drawWindowButton(track) {
+  const open = plugins.windows.has(track);
+  el.pluginWindow.textContent = open ? "close its window" : "open its window";
+  el.pluginWindow.classList.toggle("on", open);
+}
+
+el.pluginWindow.addEventListener("click", async () => {
+  const track = state.sound;
+  if (track === null || !isPlugin(track)) return;
+  const wanted = !plugins.windows.has(track);
+  el.pluginWindow.disabled = true;
+  try {
+    showWindowState(track, await invoke("set_plugin_window", { id: track, open: wanted }));
+  } catch (e) {
+    // "This plugin has no window of its own" is the usual one, and is worth saying plainly
+    // rather than leaving a button that looks like it did nothing. The window may also be
+    // one of ours, in which case it can fail to be made, which is worth saying too.
+    showError(e);
+    await refreshWindow(track);
+  } finally {
+    el.pluginWindow.disabled = false;
+  }
+});
+
+/*
+ * A plugin's parameters, from Rust. Asked for when the editor opens and again when a drag
+ * has settled, because a plugin can move its own controls — loading a patch moves all of
+ * them at once — and what it says they are is the truth.
+ */
+async function refreshParams(track) {
+  try {
+    const params = await invoke("plugin_params", { id: track });
+    plugins.params.set(track, params);
+    if (state.sound === track) drawSound();
+  } catch (e) {
+    showError(e);
+  }
+}
+
+/*
+ * Move one. Straight to the audio thread, so you hear it as you drag; the read-out shows the
+ * plain number while you are moving it and goes back to what the plugin calls that value
+ * once you let go, because only the plugin knows how to say it.
+ */
+function setParam(track, param, value) {
+  invoke("set_plugin_param", { id: track, param, value });
+  const params = plugins.params.get(track) ?? [];
+  const found = params.find((one) => one.id === param);
+  if (found) {
+    found.value = value;
+    found.text = "";
+  }
+  clearTimeout(plugins.settling);
+  plugins.settling = setTimeout(() => {
+    refreshParams(track);
+    refreshWindow(track);
+  }, PARAM_SETTLE);
+}
+
+/* One parameter: what it is called, a slider, and what the plugin calls the value. */
+function paramControl(track, param) {
+  const row = document.createElement("label");
+  row.className = "knob";
+  row.title = param.module ? `${param.module} / ${param.name}` : param.name;
+
+  const label = document.createElement("span");
+  label.className = "knob-label";
+  label.textContent = param.name;
+
+  const slider = document.createElement("input");
+  slider.type = "range";
+  slider.min = "0";
+  slider.max = "1000";
+  slider.step = "1";
+  const span = param.max - param.min || 1;
+  slider.value = String(Math.round(((param.value - param.min) / span) * 1000));
+
+  const read = document.createElement("span");
+  read.className = "knob-read";
+  const say = () =>
+    param.text || (Math.abs(param.value) >= 100 ? param.value.toFixed(0) : param.value.toFixed(3));
+  read.textContent = say();
+
+  slider.addEventListener("input", () => {
+    let value = param.min + (Number(slider.value) / 1000) * span;
+    // A stepped parameter is a menu or a switch: anything between two of its values is not
+    // one of its values.
+    if (param.stepped) value = Math.round(value);
+    param.value = value;
+    param.text = "";
+    read.textContent = say();
+    setParam(track, param.id, value);
+  });
+
+  row.append(label, slider, read);
+  return row;
+}
+
+/*
+ * The plugin half of the sound editor. The sampler's controls are put away: a synth has its
+ * own envelope, its own tuning and its own panning, and a second set of ours would only
+ * fight them. What is left of ours is how loud the track is, which is about the track.
+ */
+function drawPluginEditor(track) {
+  const params = plugins.params.get(track);
+  const filter = el.paramFilter.value.trim().toLowerCase();
+
+  if (!params) {
+    el.pluginParams.replaceChildren(hint("Asking the plugin what it has…"));
+    return;
+  }
+  if (!params.length) {
+    el.pluginParams.replaceChildren(
+      hint("This plugin has no controls to show. Its own window is stage six."),
+    );
+    return;
+  }
+  const wanted = params.filter((one) =>
+    `${one.module} ${one.name}`.toLowerCase().includes(filter),
+  );
+  const shown = wanted.slice(0, MAX_SHOWN_PARAMS);
+  el.pluginParams.replaceChildren(...shown.map((one) => paramControl(track, one)));
+  if (wanted.length > shown.length) {
+    el.pluginParams.append(
+      hint(`and ${wanted.length - shown.length} more — type above to narrow it down`),
+    );
+  }
+  if (!wanted.length) {
+    el.pluginParams.replaceChildren(hint(`Nothing matching that, out of ${params.length}.`));
+  }
+}
+
+function hint(text) {
+  const line = document.createElement("p");
+  line.className = "small";
+  line.textContent = text;
+  return line;
+}
+
+el.paramFilter.addEventListener("input", () => {
+  if (state.sound !== null && isPlugin(state.sound)) drawPluginEditor(state.sound);
 });
 
 // --- the song -------------------------------------------------------------
@@ -2343,7 +3191,11 @@ window.addEventListener("keydown", (e) => {
     // pattern, and only then the panic button. The rename box keeps escape for itself and
     // stops it reaching here, because there it means "forget the new name".
     if (e.target instanceof HTMLElement) e.target.blur();
-    if (state.roll !== null) {
+    if (!el.picker.classList.contains("hidden")) {
+      closePicker();
+    } else if (state.sound !== null) {
+      closeSound();
+    } else if (state.roll !== null) {
       closeRoll();
     } else if (state.open !== null) {
       closePattern();
@@ -2485,6 +3337,12 @@ function showWarning(text) {
 
 function showSaved(name) {
   note(`<span class="ok">saved ${escapeText(name)}</span>`, 1500);
+}
+
+/* Take a notice down before its time is up, for one that has stopped being true. */
+function clearStatus() {
+  el.status.innerHTML = "";
+  noticeUntil = 0;
 }
 
 function escapeText(value) {
