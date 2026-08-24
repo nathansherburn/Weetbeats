@@ -2436,6 +2436,87 @@ try {
     (await page.locator("#zoomRead").textContent()) === "1×");
   await page.keyboard.press("Escape");
 
+  // --- drag a pattern up or down the panel to reorder it
+  //
+  // Which is also which lane it is in the song, and only the order: the song says which
+  // pattern plays where by id, so not a block moves.
+  const panelOrder = () =>
+    page.$$eval("#patternList .prow .pname", (names) => names.map((n) => n.textContent));
+  const laneOrder = () => page.evaluate(() => window.__weetbeats_state.patterns.map((p) => p.name));
+  await page.locator("#addPattern").click();
+  await page.waitForFunction(() => document.querySelectorAll("#patternList .prow").length === 3);
+  await page.locator("#songMode").click();
+  await page.waitForSelector("#song:visible");
+  const wasOrder = await panelOrder();
+  check("three patterns in the panel", wasOrder.length === 3, wasOrder.join());
+
+  await clearCalls();
+  const songWas = JSON.stringify(await song());
+  const bottomRow = await rows.nth(2).boundingBox();
+  const topRow = await rows.nth(0).boundingBox();
+  // From the middle of the last row up past the middle of the first.
+  await page.mouse.move(bottomRow.x + 90, bottomRow.y + bottomRow.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(topRow.x + 90, topRow.y + 4, { steps: 8 });
+  check("the row being dragged is lifted off the others",
+    await rows.nth(2).evaluate((n) => n.classList.contains("lifting")));
+  await page.mouse.up();
+  await page.waitForFunction(() =>
+    window.__weetbeats_calls.some((c) => c.name === "move_pattern"));
+  const moveTo = (await lastCall("move_pattern")).args;
+  check("dropping it asks Rust to move it there", moveTo.to === 0, JSON.stringify(moveTo));
+  const nowOrder = await panelOrder();
+  check("and the panel shows the new order",
+    nowOrder.join() === [wasOrder[2], wasOrder[0], wasOrder[1]].join(),
+    `${nowOrder.join()} vs ${wasOrder.join()}`);
+  check("which is the song's order too", (await laneOrder()).join() === nowOrder.join(),
+    (await laneOrder()).join());
+  check("and letting go of it did not open the pattern it was",
+    await page.locator("#song").isVisible());
+
+  // Nothing but the order: every block is where it was, under the same pattern.
+  check("no block moved", JSON.stringify(await song()) === songWas, JSON.stringify(await song()));
+
+  // A plain click still opens it, because a press that goes nowhere is a click.
+  await rows.first().click();
+  await page.waitForSelector("#editor:visible");
+  check("a click on a row still opens its pattern", await page.locator("#editor").isVisible());
+
+  // Undo puts the order back, because reordering is an edit like any other.
+  await clearCalls();
+  await page.keyboard.press("Control+z");
+  await page.waitForFunction(
+    (was) => [...document.querySelectorAll("#patternList .prow .pname")]
+      .map((n) => n.textContent).join() === was, wasOrder.join());
+  check("undo puts the order back", (await panelOrder()).join() === wasOrder.join(),
+    (await panelOrder()).join());
+
+  // --- and drag an instrument up or down its column
+  const trackOrder = () =>
+    page.$$eval("#trackHeaders .track .name", (names) => names.map((n) => n.textContent));
+  await page.waitForSelector("#editor:visible");
+  const tracksBefore = await trackOrder();
+  check("two instruments to reorder", tracksBefore.length === 2, tracksBefore.join());
+  await clearCalls();
+  const firstTrack = await page.locator("#trackHeaders .track").nth(0).boundingBox();
+  const secondTrack = await page.locator("#trackHeaders .track").nth(1).boundingBox();
+  await page.mouse.move(firstTrack.x + 40, firstTrack.y + firstTrack.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(secondTrack.x + 40, secondTrack.y + secondTrack.height - 4, { steps: 8 });
+  await page.mouse.up();
+  await page.waitForFunction(() =>
+    window.__weetbeats_calls.some((c) => c.name === "move_track"));
+  check("dragging an instrument down asks Rust to move it",
+    (await lastCall("move_track")).args.to === 1,
+    JSON.stringify((await lastCall("move_track")).args));
+  const tracksAfter = await trackOrder();
+  check("and its row moves", tracksAfter.join() === [...tracksBefore].reverse().join(),
+    `${tracksAfter.join()} vs ${tracksBefore.join()}`);
+  check("its notes went with it, because they were never kept by row",
+    await page.evaluate(() => window.__weetbeats_state.patterns[0].lanes.length > 0));
+  check("and letting go did not play the sound it was over",
+    (await calls("audition")).length === 0);
+
   check("no page errors", errors.length === 0, JSON.stringify(errors));
 
   await browser.close();

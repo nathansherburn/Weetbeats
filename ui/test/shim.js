@@ -386,6 +386,34 @@ const handlers = {
     return true;
   },
 
+  /*
+   * Reordering. Only the order: a pattern's id is what the song refers to and what its slot
+   * in the engine is, so nothing else moves — and every pattern keeps the colour it was
+   * being drawn in, which for one nobody has picked was its place in the list.
+   */
+  move_pattern: ({ id, to }) => {
+    const at = fake.patterns.findIndex((p) => p.id === id);
+    const landing = Math.min(to, fake.patterns.length - 1);
+    if (at < 0 || landing === at) return arrangement();
+    fake.patterns.forEach((p, place) => {
+      if (p.colour === undefined || p.colour === null) p.colour = place;
+    });
+    const [one] = fake.patterns.splice(at, 1);
+    fake.patterns.splice(landing, 0, one);
+    return arrangement();
+  },
+  move_track: ({ id, to }) => {
+    const order = [...fake.tracks.values()];
+    const at = order.findIndex((t) => t.id === id);
+    const landing = Math.min(to, order.length - 1);
+    if (at >= 0 && landing !== at) {
+      const [one] = order.splice(at, 1);
+      order.splice(landing, 0, one);
+      fake.tracks = new Map(order.map((t) => [t.id, t]));
+    }
+    return order.map((t) => t.id);
+  },
+
   add_pattern: () => {
     const id = freeId(fake.patterns.map((p) => p.id));
     if (id === null) throw new Error("that is as many patterns as there is room for");
@@ -609,6 +637,8 @@ const EDITS = {
   add_pattern: "patterns",
   duplicate_pattern: "patterns",
   remove_pattern: "patterns",
+  move_pattern: "order",
+  move_track: "order",
   rename_pattern: "name",
   set_pattern_colour: "colour",
   set_pattern_steps: "length",

@@ -674,6 +674,25 @@ impl Project {
         Some(self.tracks.remove(at))
     }
 
+    /// Move a track to a different place in the list. `to` is where it ends up once it has
+    /// been taken out, so dragging the top one to the bottom is `to == len - 1`.
+    ///
+    /// Nothing but the order changes. A track's id is its slot in the engine and the key its
+    /// notes are kept under in every pattern, so the ids stay where they are and the audio
+    /// thread never has to hear about this at all: it is which row a sound is drawn on.
+    pub fn move_track(&mut self, id: u16, to: usize) -> bool {
+        let Some(at) = self.tracks.iter().position(|t| t.id == id) else {
+            return false;
+        };
+        let to = to.min(self.tracks.len().saturating_sub(1));
+        if to == at {
+            return false;
+        }
+        let one = self.tracks.remove(at);
+        self.tracks.insert(to, one);
+        true
+    }
+
     /// How many tracks play a sample file. Zero means the project folder can let go of it.
     pub fn sample_users(&self, path: &str) -> usize {
         self.tracks
@@ -721,6 +740,33 @@ impl Project {
         copy.name = name;
         self.patterns.insert(at + 1, copy);
         Some(new_id)
+    }
+
+    /// Move a pattern to a different place in the list, which is also which lane it is in
+    /// the song. `to` is where it ends up once it has been taken out.
+    ///
+    /// Ids do not move. The song says which pattern plays where by id, and a pattern's id is
+    /// its slot in the engine, so this is only the order they are shown in.
+    ///
+    /// A pattern nobody has given a colour is drawn in the colour of its place in the list,
+    /// so moving one would otherwise make two patterns swap colours behind your back. Every
+    /// pattern keeps the colour it has right now instead, written down as its own.
+    pub fn move_pattern(&mut self, id: u16, to: usize) -> bool {
+        let Some(at) = self.patterns.iter().position(|p| p.id == id) else {
+            return false;
+        };
+        let to = to.min(self.patterns.len().saturating_sub(1));
+        if to == at {
+            return false;
+        }
+        for (place, pattern) in self.patterns.iter_mut().enumerate() {
+            if pattern.colour.is_none() {
+                pattern.colour = Some(place as u8);
+            }
+        }
+        let one = self.patterns.remove(at);
+        self.patterns.insert(to, one);
+        true
     }
 
     /// Delete a pattern and take it out of the song. Refuses to delete the last one: an
@@ -1026,6 +1072,44 @@ mod tests {
         let text = serde_json::to_string(&project).unwrap();
         let back: Project = serde_json::from_str(&text).unwrap();
         assert!(back.patterns[0].muted);
+    }
+
+    /// Reordering is only the order. A pattern's id is what the song and the engine know it
+    /// by, so dragging one up the list must not move a single block.
+    #[test]
+    fn moving_a_pattern_up_the_list_leaves_the_song_alone() {
+        let mut project = kit();
+        project.add_pattern();
+        project.add_pattern();
+        let ids: Vec<u16> = project.patterns.iter().map(|p| p.id).collect();
+        project.place(ids[2], 32, 16);
+        assert!(project.move_pattern(ids[2], 0));
+        assert_eq!(
+            project.patterns.iter().map(|p| p.id).collect::<Vec<_>>(),
+            vec![ids[2], ids[0], ids[1]]
+        );
+        assert_eq!(project.song.len(), 1);
+        assert_eq!(project.song[0].pattern, ids[2]);
+        assert_eq!(project.song[0].step, 32);
+        // And nothing changes colour under you: the one that moved keeps the colour it was
+        // being drawn in, which was its old place in the list.
+        assert_eq!(project.pattern(ids[2]).unwrap().colour, Some(2));
+        assert_eq!(project.pattern(ids[0]).unwrap().colour, Some(0));
+    }
+
+    #[test]
+    fn moving_a_track_keeps_its_notes_and_its_slot() {
+        let mut project = kit();
+        project.patterns[0].set_step(1, 4, true);
+        assert!(project.move_track(1, 0));
+        assert_eq!(
+            project.tracks.iter().map(|t| t.id).collect::<Vec<_>>(),
+            vec![1, 0]
+        );
+        assert!(project.patterns[0].has_step(1, 4));
+        // Nowhere to move to, and a track that is not there, are both nothing happening.
+        assert!(!project.move_track(1, 0));
+        assert!(!project.move_track(9, 0));
     }
 
     #[test]

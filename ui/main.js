@@ -519,6 +519,120 @@ el.songMode.addEventListener("dblclick", () => {
   input.addEventListener("blur", () => finish(true));
 });
 
+// --- dragging a row up and down its list ----------------------------------
+
+/*
+ * Reordering, for the two lists that have an order: the patterns down the left, which is
+ * also which lane each one is in the song, and the instruments in a pattern.
+ *
+ * Both are a column of rows all the same height, so where a row would land is arithmetic
+ * rather than hit testing, and the rows it passes slide out of its way with a transform —
+ * which is the one thing a browser can move without laying the page out again.
+ *
+ * Neither list's order means anything to the engine. A pattern and a track are both known
+ * everywhere else by their id, which is also their slot on the audio thread, so this is
+ * only about which row a thing is drawn on.
+ */
+const REORDER_GRIP = 4; // pixels of travel before a press is a drag rather than a click
+
+let reordering = null; // { row, kind, from, to, height, rows, startY }
+
+/*
+ * The list in the order it is being shown, which is not the order it is in while one of its
+ * rows is in your hand: the rows have slid out of the way, and what is drawn beside them —
+ * the step grid, the song's lanes — has to agree, or the notes are under somebody else's
+ * name for as long as the drag lasts.
+ */
+function shownIn(list, kind) {
+  const drag = reordering;
+  if (!drag || !drag.moved || drag.kind !== kind || drag.to === drag.from) return list;
+  const order = [...list];
+  const [one] = order.splice(drag.from, 1);
+  order.splice(drag.to, 0, one);
+  return order;
+}
+
+const shownTracks = () => shownIn(state.tracks, "tracks");
+const shownPatterns = () => shownIn(state.patterns, "patterns");
+
+function reorderable(row, { at, kind, height, onDrop }) {
+  row.addEventListener("pointerdown", (e) => {
+    // A button, a fader or the rename box is itself, not a handle for the row.
+    if (e.button !== 0 || e.target.closest("button, input, .rename")) return;
+    const rows = [...row.parentElement.children];
+    reordering = {
+      row,
+      kind,
+      from: at,
+      to: at,
+      height,
+      rows,
+      startY: e.clientY,
+      onDrop,
+      moved: false,
+    };
+    row.setPointerCapture(e.pointerId);
+  });
+
+  row.addEventListener("pointermove", (e) => {
+    const drag = reordering;
+    if (!drag || drag.row !== row) return;
+    const dy = e.clientY - drag.startY;
+    if (!drag.moved && Math.abs(dy) < REORDER_GRIP) return;
+    if (!drag.moved) {
+      drag.moved = true;
+      row.classList.add("lifting");
+    }
+    drag.to = Math.max(0, Math.min(drag.rows.length - 1, drag.from + Math.round(dy / height)));
+    // The row never leaves its list, however far past the ends your hand goes: there is
+    // nowhere above the first row for it to be, and it would be over the heading.
+    const held = Math.max(
+      -drag.from * height,
+      Math.min((drag.rows.length - 1 - drag.from) * height, dy),
+    );
+    row.style.transform = `translateY(${held}px)`;
+    // Everything the row has passed shuffles up or down by one, so the gap it would land in
+    // is where you can see it.
+    for (const [place, other] of drag.rows.entries()) {
+      if (other === row) continue;
+      const shift =
+        place > drag.from && place <= drag.to
+          ? -height
+          : place < drag.from && place >= drag.to
+            ? height
+            : 0;
+      other.style.transform = shift ? `translateY(${shift}px)` : "";
+    }
+    state.needsDraw = true;
+  });
+
+  const drop = () => {
+    const drag = reordering;
+    if (!drag || drag.row !== row) return;
+    reordering = null;
+    row.classList.remove("lifting");
+    for (const other of drag.rows) other.style.transform = "";
+    state.needsDraw = true;
+    if (!drag.moved) return;
+    // The click at the end of a drag is the end of a drag, not a click: without this,
+    // letting go of a pattern would also open it.
+    swallowNextClick();
+    if (drag.to !== drag.from) drag.onDrop(drag.to);
+  };
+  row.addEventListener("pointerup", drop);
+  row.addEventListener("pointercancel", drop);
+}
+
+function swallowNextClick() {
+  const swallow = (e) => {
+    e.stopPropagation();
+    e.preventDefault();
+  };
+  window.addEventListener("click", swallow, { capture: true, once: true });
+  // And if no click follows — a drag out of the window, say — it is not left waiting.
+  setTimeout(() => window.removeEventListener("click", swallow, true), 0);
+}
+
 // --- the patterns panel ---------------------------------------------------
 
 function drawPatternPanel() {
@@ -605,6 +719,17 @@ function drawPatternPanel() {
         togglePattern(pattern.id);
       });
       row.addEventListener("dblclick", () => startRename(row, pattern));
+
+      // Drag it up or down to reorder the patterns, which is also which lane it is in the
+      // song. Nothing moves but the order: the song says which pattern plays where by id.
+      reorderable(row, {
+        at: state.patterns.indexOf(pattern),
+        kind: "patterns",
+        height: LANE,
+        onDrop: (to) => {
+          rearrange("move_pattern", { id: pattern.id, to });
+        },
+      });
       return row;
     }),
   );
@@ -1016,6 +1141,15 @@ function drawTrackHeaders() {
       kill.addEventListener("click", () => removeTrack(track.id));
 
       row.append(roll, mute, solo, gain, kill);
+
+      // And the same for the instruments: drag one up or down to move its row. Its notes go
+      // with it, because they were never kept by row — a track is known by its id.
+      reorderable(row, {
+        at: state.tracks.indexOf(track),
+        kind: "tracks",
+        height: ROW,
+        onDrop: (to) => moveTrack(track.id, to),
+      });
       return row;
     }),
   );
@@ -1047,6 +1181,21 @@ function beaten(solo, muted) {
     ? "Solo in this pattern — the mute wins while it is on"
     : "Solo in this pattern";
   solo.setAttribute("aria-label", solo.title);
+}
+
+/*
+ * Move an instrument's row. Rust hands back the ids in the order they are now in, which is
+ * all this needs: the rows are already here, with the waveforms they were drawn with.
+ */
+async function moveTrack(id, to) {
+  try {
+    const order = await invoke("move_track", { id, to });
+    state.tracks.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
+  } catch (e) {
+    showError(e);
+  }
+  drawTrackHeaders();
+  state.needsDraw = true;
 }
 
 /* Deleting a track takes its notes out of every pattern, and its sample out of the folder. */
@@ -1343,8 +1492,9 @@ function drawGrid() {
     ctx.fillRect(state.step * CELL, 0, CELL, height);
   }
 
-  for (let row = 0; row < state.tracks.length; row++) {
-    const track = state.tracks[row];
+  const rows = shownTracks();
+  for (let row = 0; row < rows.length; row++) {
+    const track = rows[row];
     const y = row * ROW;
     // An instrument's row is its notes rather than a line of boxes: boxes cannot say what
     // pitch or how long, which is the whole point of turning it into one.
@@ -3454,14 +3604,15 @@ function drawLanes() {
   ctx.textBaseline = "middle";
 
   // The grid every lane shares: the snap you are working at, with the bars over the top.
+  const lanes = shownPatterns();
   const snapPx = Math.max(3, Math.max(1, state.snap) * step);
   const firstSnap = Math.floor(left / snapPx);
   const firstBar = Math.floor(left / bar);
-  for (let row = 0; row < Math.max(1, state.patterns.length); row++) {
+  for (let row = 0; row < Math.max(1, lanes.length); row++) {
     const y = row * LANE;
     // The picked pattern's lane sits a shade above the rest, so a click in the panel shows
     // you where in the song that pattern lives.
-    const picked = state.patterns[row]?.id === state.selected;
+    const picked = lanes[row]?.id === state.selected;
     for (let n = firstSnap; n * snapPx - left < width; n++) {
       ctx.fillStyle = picked
         ? n % 2 === 0
@@ -3480,9 +3631,9 @@ function drawLanes() {
 
   // And the blocks on top, each as wide as it is long.
   for (const one of state.song) {
-    const row = state.patterns.findIndex((pattern) => pattern.id === one.pattern);
+    const row = lanes.findIndex((pattern) => pattern.id === one.pattern);
     if (row < 0) continue;
-    const pattern = state.patterns[row];
+    const pattern = lanes[row];
     const y = row * LANE;
     const x = one.step * step - left;
     const w = Math.max(3, Math.max(1, one.length) * step - 2);

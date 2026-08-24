@@ -70,6 +70,8 @@ fn main() {
             commands::add_pattern,
             commands::duplicate_pattern,
             commands::remove_pattern,
+            commands::move_pattern,
+            commands::move_track,
             commands::rename_pattern,
             commands::set_pattern_steps,
             commands::open_pattern,

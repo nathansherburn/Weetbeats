@@ -935,6 +935,36 @@ pub fn duplicate_pattern(id: u16, state: State<'_, Arc<AppState>>) -> Result<Arr
     Ok(arrangement(&state))
 }
 
+/// Drag a pattern up or down the panel, which is also which lane it is in the song.
+///
+/// Only the order: a pattern's id is what the song refers to and what its slot in the engine
+/// is, so the audio thread hears nothing about this. Hands the patterns and the song back
+/// whole, the same as everything else that rearranges the list.
+#[tauri::command]
+pub fn move_pattern(id: u16, to: usize, state: State<'_, Arc<AppState>>) -> Arrangement {
+    state.remember("order");
+    let moved = state.project.lock().unwrap().move_pattern(id, to);
+    if moved {
+        state.touch();
+    }
+    arrangement(&state)
+}
+
+/// And the same for an instrument's row. Hands back the ids in the order they are now in,
+/// which is all the front end needs: it has the rows already, with the waveforms it drew.
+#[tauri::command]
+pub fn move_track(id: u16, to: usize, state: State<'_, Arc<AppState>>) -> Vec<u16> {
+    state.remember("order");
+    let mut project = state.project.lock().unwrap();
+    let moved = project.move_track(id, to);
+    let order: Vec<u16> = project.tracks.iter().map(|track| track.id).collect();
+    drop(project);
+    if moved {
+        state.touch();
+    }
+    order
+}
+
 #[tauri::command]
 pub fn remove_pattern(id: u16, state: State<'_, Arc<AppState>>) -> Result<Arrangement, String> {
     state.remember("patterns");

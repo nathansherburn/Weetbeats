@@ -601,6 +601,28 @@ body.drop-target::after {
   outline-offset: 1px;
 }
 
+/*
+ * Dragging a row up or down its list to reorder it.
+ *
+ * The rows it passes slide out of its way — a transform, which is the one thing a browser
+ * can move without laying the page out again — and the one in your hand is lifted off them
+ * so it is plainly the thing you are moving. A filter rather than a shadow of its own,
+ * because the rows already have shadows saying which pattern is open.
+ */
+.prow,
+.track {
+  transition: transform 0.12s;
+}
+
+.prow.lifting,
+.track.lifting {
+  position: relative;
+  z-index: 5;
+  cursor: grabbing;
+  transition: none;
+  filter: brightness(1.18) drop-shadow(0 6px 10px rgba(0, 0, 0, 0.5));
+}
+
 /* Duplicate and delete stay out of the way until you go looking for them. */
 .prow .tick {
   opacity: 0;

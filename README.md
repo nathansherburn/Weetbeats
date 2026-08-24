@@ -19,6 +19,7 @@ with. Stage 6 has started early: CLAP instruments play alongside the sampler, wi
 - Click or drag across the boxes to paint a beat; right click rubs one out
 - Set how many boxes a pattern has, one step at a time
 - Patterns down the left: click one to pick it out, double click a block to edit it
+- Drag a pattern's row, or an instrument's, to move it up or down the list
 - A speaker on a pattern's row silences it wherever it plays, without deleting anything
 - Song view: draw a pattern anywhere, drag it about, drag its ends to say how long it plays
 - Snap, zoom (buttons or a trackpad pinch) in the song and in the piano roll
@@ -50,6 +51,11 @@ of a four step pattern, thirty two of a thirty two step one, nothing padded out 
 it did not ask for — and then it is its own length: drag its right hand end out and the
 pattern **repeats** to fill it, drag it in and the pattern is **cut off** part way through.
 Drag the middle to slide it along, drag the left hand end to change where it comes in.
+
+**Drag a pattern's row** up or down the panel to move it, which is also which lane it is in
+the song. Only the order moves: the song says which pattern plays where by id, so not a
+block shifts, and a pattern nobody has given a colour keeps the one it was being drawn in
+rather than swapping with its new neighbours.
 
 The speaker on a pattern's row in the panel **silences that pattern**, wherever it plays: turn
 the hats off and every block of them in the song goes quiet at once, and its blocks go faint
@@ -95,6 +101,10 @@ A track is a drum until you say otherwise: hit it and the whole sample plays, ho
 the note is. Press the little keyboard on a track and it becomes an instrument instead — the sample is
 pitched across the keyboard, faster for higher notes and slower for lower ones, and a note
 **stops when it ends**. Press it again and it is a drum again.
+
+Instruments can be **dragged up and down their column** too, and the boxes beside them move
+with them: a track's notes are kept under its id rather than its row, so reordering is only
+which row a sound is drawn on.
 
 That switch belongs to the **pattern**, not to the track — and so does the rest of the row:
 how loud, muted, soloed. All four are decisions about the part, not about the sound. The same
