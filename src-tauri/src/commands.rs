@@ -109,6 +109,14 @@ pub struct NoteIn {
     pub length: u32,
 }
 
+/// Where a block is: which pattern, and anywhere along it.
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaceAt {
+    pub pattern: u16,
+    pub step: u32,
+}
+
 /// Polled every frame while playing. Kept small on purpose.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1102,6 +1110,38 @@ pub fn clear_song_bar(bar: u32, state: State<'_, Arc<AppState>>) -> Vec<Placemen
     state.project.lock().unwrap().song.clone()
 }
 
+/// Take some blocks out of the song and put some in, in that order and in one go.
+///
+/// The song's answer to [`edit_notes`], and there for the same reasons: moving a set of
+/// blocks is the old places out and the new ones in, duplicating one is blocks in, and
+/// rubbing a set out is blocks out. Out before in, so a block sliding onto where another one
+/// has just left is not taken out by the one that left — and the whole thing is one step of
+/// the history rather than one per block.
+#[tauri::command]
+pub fn edit_placements(
+    remove: Vec<PlaceAt>,
+    add: Vec<Placement>,
+    state: State<'_, Arc<AppState>>,
+) -> Vec<Placement> {
+    state.remember("song");
+    {
+        let mut project = state.project.lock().unwrap();
+        for one in &remove {
+            if let Some(found) = project.placement_at(one.pattern, one.step) {
+                project.unplace(one.pattern, found.step);
+            }
+        }
+        for one in &add {
+            project.place(one.pattern, one.step, one.length);
+        }
+    }
+    // The whole song rather than a block at a time: it is a few hundred placements at most,
+    // and it means neither side has to describe what moved.
+    state.push_song();
+    state.touch();
+    state.project.lock().unwrap().song.clone()
+}
+
 /// Drag the scrubber: play the song from this step.
 #[tauri::command]
 pub fn seek_song(step: u32, state: State<'_, Arc<AppState>>) {
@@ -1209,6 +1249,19 @@ pub const SAVED_EVENT: &str = "saved";
 pub const STEPPED_EVENT: &str = "stepped";
 /// Something went wrong, in words fit for the status line.
 pub const TROUBLE_EVENT: &str = "trouble";
+/// One of the Edit menu's own items: cut, copy, paste, duplicate, select all.
+pub const EDIT_EVENT: &str = "edit";
+
+/// An Edit menu item, handed to the window to be done there.
+///
+/// They cannot be the standard ones. On macOS a menu item's key equivalent is handled before
+/// the window sees the key, so standard items would swallow cmd-C and cmd-V and give them to
+/// the webview — which is the same trap undo falls into, and it would mean the piano roll
+/// could never have them. So these are ours, and what each one means depends on what has the
+/// focus, which only the window knows.
+pub fn edit_by_menu(app: &AppHandle, what: &str) {
+    let _ = app.emit(EDIT_EVENT, what.to_string());
+}
 
 fn app_state(app: &AppHandle) -> Arc<AppState> {
     Arc::clone(app.state::<Arc<AppState>>().inner())

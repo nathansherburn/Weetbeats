@@ -2139,6 +2139,303 @@ try {
     JSON.stringify(across.add));
   check("and the part it came from is still where it was", (await rollLaneNow()).length === 3);
 
+  // --- a part copied out of one instrument's roll goes into another's
+  //
+  // The clipboard remembers the notes, not the instrument they came out of, so the roll you
+  // are looking at when you press v is where they land.
+  await page.keyboard.press("a");
+  await page.keyboard.press("Backspace");
+  await page.waitForFunction(() =>
+    window.__weetbeats_state.patterns[0].lanes.every((l) => l.notes.length === 0));
+  const rollFor = async (row) => {
+    const grid = await page.locator("#grid").boundingBox();
+    await page.mouse.click(grid.x + 2 * CELL + CELL / 2, grid.y + row * ROW + ROW / 2);
+    await page.waitForSelector("#roll:visible");
+    await page.evaluate(
+      ([high, semitone]) => {
+        const roll = document.getElementById("rollScroll");
+        roll.scrollLeft = 0;
+        roll.scrollTop = (high - 66) * semitone - 60;
+      },
+      [HIGH_PITCH, SEMITONE],
+    );
+  };
+
+  await page.locator("#trackHeaders .track").nth(0).locator(".tick.keys-on").click();
+  await page.waitForFunction(() =>
+    document.querySelector("#trackHeaders .track .tick.keys-on").classList.contains("on"));
+  await rollFor(0);
+  for (const [step, pitch] of [[2, 64], [6, 62]]) {
+    const at = await noteAt(step, pitch);
+    await page.mouse.click(at.x, at.y);
+  }
+  await page.waitForFunction((id) => {
+    const l = window.__weetbeats_state.patterns[0].lanes.find((one) => one.track === id);
+    return l && l.notes.length === 2;
+  }, trackIds[0]);
+  const roundFrom = await noteAt(2, 66);
+  const roundTo = await noteAt(10, 60);
+  await page.keyboard.down("Shift");
+  await page.mouse.move(roundFrom.x, roundFrom.y);
+  await page.mouse.down();
+  await page.mouse.move(roundTo.x, roundTo.y, { steps: 5 });
+  await page.mouse.up();
+  await page.keyboard.up("Shift");
+  await page.waitForFunction(() =>
+    document.getElementById("status").textContent.includes("2 notes picked out"));
+  await page.keyboard.press("c");
+  await page.waitForFunction(() =>
+    document.getElementById("status").textContent.includes("copied"));
+  check("copying in a roll says where it can go",
+    (await page.locator("#status").textContent()).includes("another instrument's roll"),
+    await page.locator("#status").textContent());
+
+  // Out of this roll and into the other instrument's.
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Escape");
+  await page.waitForSelector("#editor:visible");
+  await page.locator("#trackHeaders .track").nth(1).locator(".tick.keys-on").click();
+  await page.waitForFunction(() =>
+    document.querySelectorAll("#trackHeaders .track .tick.keys-on.on").length === 2);
+  await rollFor(1);
+  check("the other instrument's roll is open",
+    (await page.locator("#rollName").textContent()) ===
+      (await page.locator("#trackHeaders .track").nth(1).locator(".name").textContent()),
+    await page.locator("#rollName").textContent());
+  await clearCalls();
+  await page.keyboard.press("v");
+  await page.waitForFunction((id) => {
+    const l = window.__weetbeats_state.patterns[0].lanes.find((one) => one.track === id);
+    return l && l.notes.length === 2;
+  }, trackIds[1]);
+  const intoRoll = (await lastCall("edit_notes")).args;
+  check("pasting in another instrument's roll puts the notes in that instrument",
+    intoRoll.track === trackIds[1], JSON.stringify(intoRoll));
+  check("at the same pitches and places in the bar",
+    intoRoll.add.map((n) => `${n.step}:${n.pitch}`).sort().join() === "2:64,6:62",
+    JSON.stringify(intoRoll.add));
+  check("and the instrument they came from still has them",
+    (await laneOf(trackIds[0])).length === 2);
+
+  // --- the Edit menu's own items, which is how the keys really arrive on a Mac
+  await clearCalls();
+  await menu("select_all");
+  await page.waitForFunction(() =>
+    document.getElementById("status").textContent.includes("picked out"));
+  check("select all from the menu takes every note in the roll",
+    (await page.locator("#status").textContent()).startsWith("2 notes picked out"),
+    await page.locator("#status").textContent());
+  await menu("duplicate");
+  await page.waitForFunction((id) => {
+    const l = window.__weetbeats_state.patterns[0].lanes.find((one) => one.track === id);
+    return l && l.notes.length === 4;
+  }, trackIds[1]);
+  check("duplicate from the menu puts a copy after itself",
+    (await laneOf(trackIds[1])).length === 4, JSON.stringify(await laneOf(trackIds[1])));
+  await menu("cut");
+  await page.waitForFunction((id) => {
+    const l = window.__weetbeats_state.patterns[0].lanes.find((one) => one.track === id);
+    return !l || l.notes.length === 2;
+  }, trackIds[1]);
+  check("and cut takes what is picked out away", (await laneOf(trackIds[1])).length === 2);
+
+  // ctrl-A does the same from the keyboard, for the platforms where the key reaches the
+  // window at all: cmd on a Mac, ctrl everywhere else.
+  await page.keyboard.press("Control+a");
+  await page.waitForFunction(() =>
+    document.getElementById("status").textContent.includes("picked out"));
+  check("and so does ctrl-A",
+    (await page.locator("#status").textContent()).startsWith("2 notes picked out"),
+    await page.locator("#status").textContent());
+
+  // --- arrows nudge whatever is picked out
+  await clearCalls();
+  const wasSteps = (await laneOf(trackIds[1])).map((n) => n.step).sort((a, b) => a - b);
+  await page.keyboard.press("ArrowRight");
+  await page.waitForFunction(() =>
+    window.__weetbeats_calls.some((c) => c.name === "edit_notes"));
+  const nudged = (await laneOf(trackIds[1])).map((n) => n.step).sort((a, b) => a - b);
+  check("right arrow moves the picked notes along a step",
+    nudged.join() === wasSteps.map((s) => s + 1).join(),
+    `${nudged.join()} vs ${wasSteps.join()}`);
+  await page.keyboard.press("ArrowUp");
+  await page.waitForTimeout(150);
+  check("and up moves them a semitone",
+    (await laneOf(trackIds[1])).every((n) => [63, 65].includes(n.pitch)),
+    JSON.stringify(await laneOf(trackIds[1])));
+
+  // --- and in a text field the same keys mean the text
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Escape");
+  await page.waitForSelector("#editor:visible");
+  await rows.first().dblclick();
+  await page.waitForSelector("#patternList .rename");
+  await page.locator("#patternList .rename").fill("Bangers");
+  await menu("select_all");
+  check("select all in a text field takes the text, not the notes",
+    await page.locator("#patternList .rename").evaluate((n) =>
+      n.selectionStart === 0 && n.selectionEnd === n.value.length));
+  await page.locator("#patternList .rename").press("Escape");
+  await page.waitForFunction(() => !document.querySelector("#patternList .rename"));
+
+  // --- shift drag a box round blocks in the song, and move them together
+  //
+  // Both patterns a bar long, so every block below is one bar and the numbers say what they
+  // look like. The rename above was a double click on the pattern's row, and the first of
+  // those two clicks put the pattern away, so this is back in it.
+  if (!(await page.locator("#editor").isVisible())) {
+    await rows.first().click();
+    await page.waitForSelector("#editor:visible");
+  }
+  await page.locator("#steps").click();
+  await page.locator("#steps").fill("16");
+  await page.locator("#steps").press("Enter");
+  await page.waitForFunction(() => document.getElementById("steps").value === "16");
+  await page.locator("#addPattern").click();
+  await page.waitForFunction(() => document.querySelectorAll("#patternList .prow").length === 2);
+  await page.locator("#songMode").click();
+  await page.waitForSelector("#song:visible");
+  await page.locator("#snap").click();
+  await page.locator("#snap").fill("16");
+  await page.locator("#snap").press("Enter");
+  await page.waitForFunction(() => document.getElementById("snap").value === "16");
+  await page.locator("#zoomRead").click();
+  await page.waitForFunction(() => document.getElementById("zoomRead").textContent === "1×");
+  await page.evaluate(() => {
+    document.getElementById("songScroll").scrollLeft = 0;
+  });
+  // A clean song: the one long block from the stretch check goes, and three go down across
+  // the two patterns in its place.
+  await rubOutBlock(0, 0);
+  await page.waitForFunction(() => window.__weetbeats_state.song.length === 0);
+  for (const [row, bar] of [[0, 0], [0, 4], [1, 2]]) {
+    const at = await laneCell(bar * 16 + 2, row);
+    await page.mouse.click(at.x, at.y);
+  }
+  await page.waitForFunction(() => window.__weetbeats_state.song.length === 3);
+  check("three blocks to work with",
+    (await song()).map((one) => one.step).sort((a, b) => a - b).join() === "0,32,64",
+    JSON.stringify(await song()));
+
+  // The box starts on an empty lane, because a shift press on a block puts that one block
+  // in or out of the set instead.
+  const songBoxFrom = await laneCell(6 * 16, 1);
+  const songBoxTo = await laneCell(0, 0);
+  await page.keyboard.down("Shift");
+  await page.mouse.move(songBoxFrom.x, songBoxFrom.y);
+  await page.mouse.down();
+  await page.mouse.move(songBoxTo.x, songBoxTo.y - LANE / 3, { steps: 5 });
+  await page.mouse.up();
+  await page.keyboard.up("Shift");
+  await page.waitForFunction(() =>
+    document.getElementById("status").textContent.includes("picked out"));
+  check("a box dragged round blocks picks them out",
+    (await page.locator("#status").textContent()).startsWith("3 blocks picked out"),
+    await page.locator("#status").textContent());
+  check("and it drew no new blocks", (await song()).length === 3);
+
+  // Dragging one of them takes the whole set.
+  await clearCalls();
+  const grabBlock = await laneCell(8, 0);
+  const dropBlockAt = await laneCell(24, 0);
+  await page.mouse.move(grabBlock.x, grabBlock.y);
+  await page.mouse.down();
+  await page.mouse.move(dropBlockAt.x, dropBlockAt.y, { steps: 6 });
+  await page.mouse.up();
+  await page.waitForFunction(() =>
+    window.__weetbeats_calls.some((c) => c.name === "edit_placements"));
+  check("dragging one of a picked set of blocks moves the lot",
+    (await song()).map((one) => one.step).sort((a, b) => a - b).join() === "16,48,80",
+    JSON.stringify(await song()));
+  check("in one trip, so nothing is taken out by a block that has just left",
+    (await calls("edit_placements")).length === 1,
+    `${(await calls("edit_placements")).length} trips`);
+
+  // The arrows move them too, by the snap, which also shows they are still picked out.
+  await clearCalls();
+  await page.keyboard.press("ArrowLeft");
+  await page.waitForFunction(() =>
+    window.__weetbeats_calls.some((c) => c.name === "edit_placements"));
+  check("left arrow moves the picked blocks back by the snap",
+    (await song()).map((one) => one.step).sort((a, b) => a - b).join() === "0,32,64",
+    JSON.stringify(await song()));
+
+  // Copy them, point somewhere else, and paste.
+  await clearCalls();
+  await page.keyboard.press("c");
+  await page.waitForFunction(() =>
+    document.getElementById("status").textContent.includes("copied"));
+  const pasteAt = await laneCell(8 * 16 + 2, 0);
+  await page.mouse.move(pasteAt.x, pasteAt.y);
+  await page.keyboard.press("v");
+  await page.waitForFunction(() => window.__weetbeats_state.song.length === 6);
+  check("v puts the copied blocks down where you are pointing",
+    (await song()).filter((one) => one.step >= 128).map((one) => one.step)
+      .sort((a, b) => a - b).join() === "128,160,192",
+    JSON.stringify(await song()));
+
+  // And delete takes a set out in one go.
+  await clearCalls();
+  await page.keyboard.press("Backspace");
+  await page.waitForFunction(() => window.__weetbeats_state.song.length === 3);
+  check("delete rubs out every block picked out", (await song()).length === 3);
+  check("in one trip rather than one each",
+    (await lastCall("edit_placements")).args.remove.length === 3,
+    JSON.stringify((await lastCall("edit_placements")).args));
+
+  // Select all from the menu, in the song, means every block in it.
+  await menu("select_all");
+  await page.waitForFunction(() =>
+    document.getElementById("status").textContent.includes("blocks picked out"));
+  check("select all in the song takes every block",
+    (await page.locator("#status").textContent()).startsWith("3 blocks picked out"),
+    await page.locator("#status").textContent());
+
+  // Duplicate lays the set down again straight after itself, and what has just landed is
+  // what is picked out, so backspace takes the copies back off.
+  await clearCalls();
+  await menu("duplicate");
+  await page.waitForFunction(() => window.__weetbeats_state.song.length === 6);
+  check("duplicate in the song lays the set down after itself",
+    (await song()).filter((one) => one.step >= 80).length === 3, JSON.stringify(await song()));
+  await page.keyboard.press("Backspace");
+  await page.waitForFunction(() => window.__weetbeats_state.song.length === 3);
+
+  // Alt dragging leaves the originals and drags copies away, the same as it does with notes.
+  await menu("select_all");
+  await page.waitForFunction(() =>
+    document.getElementById("status").textContent.includes("3 blocks picked out"));
+  await clearCalls();
+  const altGrab = await laneCell(8, 0);
+  const altDrop = await laneCell(24, 0);
+  await page.keyboard.down("Alt");
+  await page.mouse.move(altGrab.x, altGrab.y);
+  await page.mouse.down();
+  await page.mouse.move(altDrop.x, altDrop.y, { steps: 6 });
+  await page.mouse.up();
+  await page.keyboard.up("Alt");
+  await page.waitForFunction(() => window.__weetbeats_state.song.length === 6);
+  const altSong = (await lastCall("edit_placements")).args;
+  check("alt dragging a picked set of blocks drags copies off the originals",
+    altSong.remove.length === 0 && altSong.add.length === 3, JSON.stringify(altSong));
+  check("and the originals are still where they were",
+    (await song()).filter((one) => [0, 32, 64].includes(one.step)).length === 3,
+    JSON.stringify(await song()));
+
+  // The zoom is on the keys too, for whichever of the two views has one.
+  const zoomWas = await page.locator("#zoomRead").textContent();
+  await page.keyboard.press("=");
+  await page.waitForFunction(
+    (was) => document.getElementById("zoomRead").textContent !== was, zoomWas);
+  check("the zoom keys zoom the song",
+    (await page.locator("#zoomRead").textContent()) !== zoomWas,
+    await page.locator("#zoomRead").textContent());
+  await page.keyboard.press("0");
+  await page.waitForFunction(() => document.getElementById("zoomRead").textContent === "1×");
+  check("and nought puts it back to life size",
+    (await page.locator("#zoomRead").textContent()) === "1×");
+  await page.keyboard.press("Escape");
+
   check("no page errors", errors.length === 0, JSON.stringify(errors));
 
   await browser.close();

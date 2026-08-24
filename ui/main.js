@@ -171,6 +171,9 @@ const state = {
   picked: [], // the notes picked out, as { track, note }: what a drag, a copy or a delete has
   marquee: null, // the box being dragged round some notes: { where, from, to }
   clip: null, // what was copied: { rows: [{ down, notes }], base }
+  blocks: [], // the blocks picked out in the song, as entries of state.song
+  clipBlocks: null, // and what was copied out of the song: { blocks, base }
+  overStep: null, // the step the pointer is over in the song, which is where a paste goes
   overRow: null, // the row the pointer is over in the step grid, which is where a paste goes
   snap: STEPS_PER_BAR, // what blocks in the song snap to, in steps
   zoom: 1, // how wide a step of the song is drawn, as a multiple of SONG_STEP
@@ -2228,6 +2231,7 @@ function pickNotes(picked, quietly) {
 function forgetPicked() {
   state.marquee = null;
   clearPicked();
+  clearPickedBlocks();
 }
 
 function clearPicked() {
@@ -2391,10 +2395,25 @@ function pasteNotes() {
     if (!together.has(track)) together.set(track, []);
     together.get(track).push(...row.notes.map((note) => ({ ...note, step: note.step + along })));
   }
-  if (!together.size) return;
+  const { put, hidden } = putNotes(together);
+  if (!put) return;
+  showNote(
+    hidden
+      ? `${count(put, "note")} pasted — ${hidden} of them only show in the piano roll`
+      : `${count(put, "note")} pasted`,
+  );
+}
 
+/*
+ * Put notes into lanes, and pick out what has just landed: what you have just put down is
+ * what you are working on. Says how many of them a row of boxes cannot show, because a note
+ * off middle C in a row of boxes is silent and invisible and that is worth knowing.
+ */
+function putNotes(together) {
+  const open = openPatternNow();
+  if (!open) return { put: 0, hidden: 0 };
   let hidden = 0;
-  const put = [];
+  const landed = [];
   for (const [track, notes] of together) {
     const lane = notesFor(open, track);
     const fresh = notes.filter(
@@ -2407,27 +2426,39 @@ function pasteNotes() {
     const made = [];
     for (const one of notes) {
       const copy = { ...one };
-      const at = lane.findIndex(
-        (note) => note.step === copy.step && note.pitch === copy.pitch,
-      );
-      // A note pasted where one already is takes its place, the same as drawing one there.
+      const at = lane.findIndex((note) => note.step === copy.step && note.pitch === copy.pitch);
+      // A note put where one already is takes its place, the same as drawing one there.
       if (at >= 0) lane[at] = copy;
       else lane.push(copy);
       made.push(copy);
       if (!isPitched(track) && copy.pitch !== DEFAULT_PITCH) hidden += 1;
     }
     sendNoteEdit(track, [], made);
-    put.push(...made.map((note) => ({ track, note })));
+    landed.push(...made.map((note) => ({ track, note })));
   }
-  if (!put.length) return;
-  // What has just landed is what you are working on, so it is what is picked out: drag it
-  // somewhere, or point at the next row and press v again.
-  pickNotes(put, true);
-  showNote(
-    hidden
-      ? `${count(put.length, "note")} pasted — ${hidden} of them only show in the piano roll`
-      : `${count(put.length, "note")} pasted`,
+  if (!landed.length) return { put: 0, hidden: 0 };
+  pickNotes(landed, true);
+  return { put: landed.length, hidden };
+}
+
+/* Copies of the picked notes, straight after themselves. */
+function duplicatePicked() {
+  if (!openPatternNow() || !state.picked.length) return;
+  const notes = state.picked.map((one) => one.note);
+  const from = Math.min(...notes.map((note) => note.step));
+  const along = Math.max(
+    1,
+    Math.max(...notes.map((note) => note.step + Math.max(1, note.length))) - from,
   );
+  const together = new Map();
+  for (const [track, lot] of pickedByTrack()) {
+    together.set(
+      track,
+      lot.map((note) => ({ ...note, step: note.step + along })),
+    );
+  }
+  const { put } = putNotes(together);
+  if (put) showNote(`${count(put, "note")} duplicated`);
 }
 
 /*
@@ -2512,8 +2543,8 @@ function grewTo(pattern, steps) {
 }
 
 /* The box being dragged round some notes, in either editor. */
-function drawMarquee(ctx, box) {
-  const x = Math.min(box.from.x, box.to.x);
+function drawMarquee(ctx, box, scrolled = 0) {
+  const x = Math.min(box.from.x, box.to.x) - scrolled;
   const y = Math.min(box.from.y, box.to.y);
   const w = Math.abs(box.to.x - box.from.x);
   const h = Math.abs(box.to.y - box.from.y);
@@ -3470,6 +3501,9 @@ function drawLanes() {
     ctx.fillStyle = live ? lighten(base, 0.5) : base;
     roundRect(ctx, x + 1, y + 3, w, h, 4);
     ctx.fill();
+    if (isBlockPicked(one)) {
+      outlinePicked(ctx, () => roundRect(ctx, x + 1, y + 3, w, h, 4));
+    }
 
     // The right hand edge is the handle for how long it is, so it is marked, the same way
     // a note in the piano roll is.
@@ -3499,6 +3533,186 @@ function drawLanes() {
 
   ctx.fillStyle = state.playing ? PALETTE.lit : "rgba(139,131,153,0.6)";
   ctx.fillRect(songPlayheadX() - left, 0, 1, height);
+
+  if (state.marquee && state.marquee.where === "song") {
+    drawMarquee(ctx, state.marquee, left);
+  }
+}
+
+// --- picking blocks out ---------------------------------------------------
+
+/*
+ * The same idea as picking notes out, one magnification up: shift drag a box round some
+ * blocks and then move them, copy them, or rub them out together.
+ *
+ * Held as the entries of `state.song` themselves, the way notes are held. Rust hands the
+ * whole song back after every edit, so the set is looked up again by where each block is
+ * whenever that happens — see `songCommand`.
+ */
+
+function isBlockPicked(block) {
+  return state.blocks.includes(block);
+}
+
+function pickBlocks(blocks, quietly) {
+  state.blocks = blocks;
+  state.needsDraw = true;
+  if (!quietly) sayPickedBlocks();
+}
+
+function clearPickedBlocks() {
+  if (!state.blocks.length) return;
+  state.blocks = [];
+  state.needsDraw = true;
+}
+
+function toggleBlockPicked(block) {
+  const at = state.blocks.indexOf(block);
+  if (at >= 0) state.blocks.splice(at, 1);
+  else state.blocks.push(block);
+  state.needsDraw = true;
+  sayPickedBlocks();
+}
+
+function sayPickedBlocks() {
+  if (!state.blocks.length) return;
+  showNote(
+    `${count(state.blocks.length, "block")} picked out — c to copy, v to paste, delete to rub out`,
+  );
+}
+
+/* Which block is which, for finding the same ones again in a song Rust has handed back. */
+const blockKey = (block) => ({ pattern: block.pattern, step: block.step });
+
+function repickBlocks(keys) {
+  if (!keys.length) return;
+  state.blocks = keys
+    .map((key) => state.song.find((one) => one.pattern === key.pattern && one.step === key.step))
+    .filter(Boolean);
+}
+
+/* Every block a box dragged over the song touches. */
+function blocksInBox(box) {
+  const left = Math.min(box.from.x, box.to.x);
+  const right = Math.max(box.from.x, box.to.x);
+  const top = Math.min(box.from.y, box.to.y);
+  const bottom = Math.max(box.from.y, box.to.y);
+  const found = [];
+  for (const one of state.song) {
+    const row = state.patterns.findIndex((pattern) => pattern.id === one.pattern);
+    if (row < 0) continue;
+    if (row * LANE + LANE < top || row * LANE > bottom) continue;
+    const x = one.step * songStep();
+    const w = Math.max(1, one.length) * songStep();
+    if (x + w < left || x > right) continue;
+    found.push(one);
+  }
+  return found;
+}
+
+/* Every block in the song, which is what select all means when you are looking at it. */
+function pickEveryBlock() {
+  pickBlocks([...state.song]);
+}
+
+/* Rub the picked blocks out, in one step of the history. */
+function removePickedBlocks() {
+  if (!state.blocks.length) return;
+  const many = state.blocks.length;
+  const remove = state.blocks.map(blockKey);
+  state.song = state.song.filter((one) => !state.blocks.includes(one));
+  state.blocks = [];
+  songChanged();
+  songCommand("edit_placements", { remove, add: [] });
+  showNote(`${count(many, "block")} rubbed out`);
+}
+
+/*
+ * Copy the picked blocks. What is remembered is which pattern each one is and how far along
+ * it sat from the first of them, so the set can be put down anywhere.
+ */
+function copyPickedBlocks(cut) {
+  if (!state.blocks.length) return;
+  const base = Math.min(...state.blocks.map((one) => one.step));
+  const many = state.blocks.length;
+  state.clipBlocks = {
+    base,
+    blocks: state.blocks.map((one) => ({
+      pattern: one.pattern,
+      along: one.step - base,
+      length: Math.max(1, one.length),
+    })),
+  };
+  if (cut) removePickedBlocks();
+  showNote(`${count(many, "block")} copied — point along the song and press v`);
+}
+
+/* How much song the copied blocks take, from the first of them to the end of the last. */
+function clipBlockSpan(clip) {
+  return Math.max(1, ...clip.blocks.map((one) => one.along + one.length));
+}
+
+/*
+ * Put the copy down, at the bar the pointer is over. With the pointer somewhere else it
+ * lands after itself, so pressing v twice lays a phrase out twice.
+ */
+function pasteBlocks() {
+  const clip = state.clipBlocks;
+  if (!clip) return;
+  const at =
+    state.overStep !== null ? snapFloor(state.overStep) : clip.base + clipBlockSpan(clip);
+  putBlocks(
+    clip.blocks.map((one) => ({
+      pattern: one.pattern,
+      step: at + one.along,
+      length: one.length,
+    })),
+  );
+  showNote(`${count(clip.blocks.length, "block")} pasted`);
+}
+
+/* Duplicate the picked blocks, straight after themselves. */
+function duplicatePickedBlocks() {
+  if (!state.blocks.length) return;
+  const base = Math.min(...state.blocks.map((one) => one.step));
+  const along = Math.max(
+    1,
+    ...state.blocks.map((one) => one.step - base + Math.max(1, one.length)),
+  );
+  putBlocks(
+    state.blocks.map((one) => ({
+      pattern: one.pattern,
+      step: one.step + along,
+      length: Math.max(1, one.length),
+    })),
+  );
+  showNote(`${count(state.blocks.length, "block")} duplicated`);
+}
+
+/*
+ * Put a set of blocks in the song, and pick out what has just landed. Anything of the same
+ * pattern they land on makes way for them, the same as dropping one block on another.
+ */
+function putBlocks(blocks) {
+  const wanted = blocks.filter((one) => patternById(one.pattern) !== null && one.step >= 0);
+  if (!wanted.length) return;
+  for (const one of wanted) {
+    state.song = state.song.filter(
+      (was) =>
+        !(
+          was.pattern === one.pattern &&
+          was.step < one.step + Math.max(1, one.length) &&
+          one.step < was.step + Math.max(1, was.length)
+        ),
+    );
+    state.song.push({ ...one });
+  }
+  state.song.sort((a, b) => a.step - b.step || a.pattern - b.pattern);
+  state.blocks = state.song.filter((one) =>
+    wanted.some((made) => made.pattern === one.pattern && made.step === one.step),
+  );
+  songChanged();
+  songCommand("edit_placements", { remove: [], add: wanted });
 }
 
 // --- putting blocks in the song -------------------------------------------
@@ -3530,13 +3744,31 @@ function songAt(event) {
   return { row, pattern: pattern.id, step, x, block, zone };
 }
 
-/* Rust owns the song, so what it hands back is what gets drawn. */
+/*
+ * Where a pointer is in the song as a plain point: across in song pixels rather than window
+ * ones, so a box keeps its corner where you started it however far the song is scrolled.
+ */
+function songPoint(event) {
+  const rect = el.lanes.getBoundingClientRect();
+  return {
+    x: Math.max(0, event.clientX - rect.left + songLeft()),
+    y: Math.max(0, Math.min(state.patterns.length * LANE, event.clientY - rect.top)),
+  };
+}
+
+/*
+ * Rust owns the song, so what it hands back is what gets drawn — which means every entry in
+ * `state.song` is a new object afterwards. Anything picked out is found again by where it
+ * is, so a set of blocks survives its own move.
+ */
 async function songCommand(command, args) {
+  const keys = state.blocks.map(blockKey);
   try {
     state.song = (await invoke(command, args)).map((one) => ({ ...one }));
   } catch (e) {
     showError(e);
   }
+  repickBlocks(keys);
   songChanged();
 }
 
@@ -3547,14 +3779,36 @@ el.lanes.addEventListener("pointerdown", (e) => {
   if (!at) return;
 
   // The right button rubs out, all the way along a drag, the same as it does in a pattern.
+  // A block that is one of a set picked out takes the set with it.
   if (erasing(e)) {
     el.lanes.setPointerCapture(e.pointerId);
+    if (at.block && isBlockPicked(at.block)) {
+      removePickedBlocks();
+      return;
+    }
     songDrag = { mode: "erase" };
     if (at.block) rubOut(at.block);
     return;
   }
 
   el.lanes.setPointerCapture(e.pointerId);
+
+  /*
+   * Shift drags a box round blocks rather than drawing one, the same as it does round notes.
+   * A press on an empty lane already means "put this pattern here and keep painting", which
+   * is how a song gets written and not something to give up for a selection box.
+   */
+  if (e.shiftKey) {
+    if (at.block) {
+      toggleBlockPicked(at.block);
+      return;
+    }
+    const corner = songPoint(e);
+    songDrag = { mode: "box" };
+    state.marquee = { where: "song", from: corner, to: corner };
+    state.needsDraw = true;
+    return;
+  }
 
   if (at.block && at.zone === "end") {
     songDrag = { mode: "end", block: at.block, was: { ...at.block } };
@@ -3565,20 +3819,40 @@ el.lanes.addEventListener("pointerdown", (e) => {
     return;
   }
   if (at.block) {
-    songDrag = { mode: "move", block: at.block, was: { ...at.block }, grab: at.step - at.block.step };
+    // A block out of a picked set moves the whole set; one that is not clears the set, so a
+    // plain press is always about the block you pressed on.
+    if (!isBlockPicked(at.block)) clearPickedBlocks();
+    // Alt leaves the originals where they are and drags copies away.
+    const copying = e.altKey;
+    const moving = state.blocks.length ? [...state.blocks] : [at.block];
+    const held = copying ? copyBlocksInPlace(moving) : moving;
+    const grabbed = copying ? (held[moving.indexOf(at.block)] ?? held[0]) : at.block;
+    if (copying) pickBlocks(held, true);
+    songDrag = {
+      mode: "move",
+      block: grabbed,
+      was: { ...grabbed },
+      copying,
+      moving: held.map((block) => ({ block, was: { ...block } })),
+      grab: at.step - grabbed.step,
+    };
     return;
   }
 
   // Nothing there: draw one, as long as its pattern, and keep painting along the drag. The
   // drag stays in the lane it started in, so a diagonal sweep does not scribble in every
   // pattern it passes.
+  clearPickedBlocks();
   songDrag = { mode: "paint", pattern: at.pattern };
   put(at.pattern, snapFloor(at.step));
 });
 
 el.lanes.addEventListener("pointermove", (e) => {
   if (!songDrag) {
-    showSongCursor(songAt(e));
+    const at = songAt(e);
+    // Where along the song the pointer is, which is where a paste goes.
+    state.overStep = at ? at.step : null;
+    showSongCursor(at, e.shiftKey);
     return;
   }
   // Dragging a block's end into the edge of the window scrolls the song along under it, so
@@ -3587,6 +3861,13 @@ el.lanes.addEventListener("pointermove", (e) => {
   songDragTo(e);
 });
 
+/* Copies of some blocks, put in the song on top of the originals, ready to be dragged off. */
+function copyBlocksInPlace(blocks) {
+  const made = blocks.map((one) => ({ ...one }));
+  state.song.push(...made);
+  return made;
+}
+
 /*
  * Where the drag has got to. Taken apart from the event so that scrolling the song under a
  * still hand can put the drag through again: the pointer has not moved, but the step it is
@@ -3594,8 +3875,16 @@ el.lanes.addEventListener("pointermove", (e) => {
  */
 function songDragTo(point) {
   if (!songDrag) return;
+
+  if (songDrag.mode === "box") {
+    state.marquee.to = songPoint(point);
+    pickBlocks(blocksInBox(state.marquee), true);
+    return;
+  }
+
   const at = songAt(point);
   if (!at) return;
+  state.overStep = at.step;
 
   if (songDrag.mode === "erase") {
     if (at.block) rubOut(at.block);
@@ -3632,12 +3921,17 @@ function songDragTo(point) {
     }
     return;
   }
-  // Moving: the block keeps its length and follows wherever you grabbed it.
+  // Moving, one block or a whole set of them: the one you grabbed follows the pointer and
+  // the rest keep their places around it, so the shape of what you picked out is kept.
+  const held = songDrag.moving ?? [{ block, was: songDrag.was }];
   const start = Math.max(0, snapNear(at.step - songDrag.grab));
-  if (start !== block.step) {
-    block.step = start;
-    songChanged();
-  }
+  let by = start - songDrag.was.step;
+  // Nothing in the set may be pushed off the front, so the whole set stops where the first
+  // of them would have.
+  for (const one of held) by = Math.max(by, -one.was.step);
+  if (by === block.step - songDrag.was.step) return;
+  for (const one of held) one.block.step = one.was.step + by;
+  songChanged();
 }
 
 /* True when a block of this pattern would sit here without landing on another of its own. */
@@ -3683,9 +3977,38 @@ const dropBlock = () => {
   const drag = songDrag;
   songDrag = null;
   stopFollowing();
+
+  if (drag && drag.mode === "box") {
+    state.marquee = null;
+    state.needsDraw = true;
+    sayPickedBlocks();
+    return;
+  }
   if (!drag || !drag.block) return;
   const { block, was } = drag;
-  if (block.step === was.step && block.length === was.length) return;
+  const held = drag.moving ?? [{ block, was }];
+  if (block.step === was.step && block.length === was.length) {
+    // Copies dropped where they were made are the blocks that are already there.
+    if (drag.copying) {
+      state.song = state.song.filter((one) => !held.some((copy) => copy.block === one));
+      state.blocks = [];
+      songChanged();
+    }
+    return;
+  }
+  if (drag.copying || held.length > 1) {
+    // The old places out and the new ones in, in one go, so a block sliding onto where
+    // another has just left is not taken out by the one that left. A copy takes nothing out.
+    songCommand("edit_placements", {
+      remove: drag.copying ? [] : held.map((one) => blockKey(one.was)),
+      add: held.map((one) => ({
+        pattern: one.block.pattern,
+        step: one.block.step,
+        length: Math.max(1, one.block.length),
+      })),
+    });
+    return;
+  }
   if (block.step === was.step) {
     songCommand("resize_placement", {
       pattern: block.pattern,
@@ -3725,20 +4048,23 @@ el.lanes.addEventListener("dblclick", (e) => {
 });
 
 /* The pointer says what a press would do before you press it. */
-function showSongCursor(at) {
+function showSongCursor(at, boxing) {
   const cursor =
     at === null
       ? "default"
-      : at.zone === "end" || at.zone === "start"
-        ? "ew-resize"
-        : at.zone === "body"
-          ? "grab"
-          : "cell";
+      : boxing
+        ? "crosshair"
+        : at.zone === "end" || at.zone === "start"
+          ? "ew-resize"
+          : at.zone === "body"
+            ? "grab"
+            : "cell";
   if (el.lanes.style.cursor !== cursor) el.lanes.style.cursor = cursor;
 }
 
 el.lanes.addEventListener("pointerleave", () => {
   el.lanes.style.cursor = "default";
+  if (!songDrag) state.overStep = null;
 });
 
 // --- snap and zoom --------------------------------------------------------
@@ -3919,6 +4245,16 @@ numberField(el.bpm, {
   },
 });
 
+/* The keys the Edit menu's items answer to, and the two that only exist here. */
+const EDIT_KEYS = { a: "select_all", c: "copy", x: "cut", v: "paste", d: "duplicate" };
+const NUDGE_KEYS = {
+  ArrowLeft: [-1, 0],
+  ArrowRight: [1, 0],
+  ArrowUp: [0, 1],
+  ArrowDown: [0, -1],
+};
+const ZOOM_KEYS = { "=": 1, "+": 1, "-": -1, _: -1, 0: 0 };
+
 window.addEventListener("keydown", (e) => {
   // Only a text field has any use for a space. A focused number does not, and having it
   // swallow the play key after you nudge the tempo is maddening.
@@ -3931,38 +4267,36 @@ window.addEventListener("keydown", (e) => {
   }
 
   /*
-   * What to do with the notes picked out. Plain letters, and the cmd or ctrl versions as
-   * well for wherever those arrive: on a Mac the menu bar's own Copy and Paste are handled
-   * before the window sees cmd-C and cmd-V, the same trap cmd-Z falls into, and taking them
-   * off the menu would break copying and pasting in the one text field there is.
+   * The Edit menu's keys. On a Mac these are handled by the menu bar before the window sees
+   * them and arrive as an event instead, so most of the time this does not run — but it is
+   * what makes them work everywhere else, and delete has no menu item of its own.
+   *
+   * The bare letters do the same, which is what the roll had before the menu could: they
+   * only count when nothing is being typed in, and having them means a hand already on the
+   * canvas does not have to reach for a modifier.
    */
-  if (!typing && state.open !== null && state.sound === null && !e.altKey) {
-    const key = e.key.toLowerCase();
-    if (key === "c") {
-      e.preventDefault();
-      copyPicked(false);
-      return;
-    }
-    if (key === "x") {
-      e.preventDefault();
-      copyPicked(true);
-      return;
-    }
-    if (key === "v") {
-      e.preventDefault();
-      pasteNotes();
-      return;
-    }
-    if (key === "a") {
-      e.preventDefault();
-      pickEverything();
-      return;
-    }
-    if ((e.key === "Backspace" || e.key === "Delete") && state.picked.length) {
-      e.preventDefault();
-      removePicked();
-      return;
-    }
+  const combo = (e.metaKey || e.ctrlKey) && !e.altKey;
+  const pressed = EDIT_KEYS[e.key.toLowerCase()];
+  if (pressed && (combo || (!typedIn() && !e.altKey))) {
+    e.preventDefault();
+    editCommand(pressed);
+    return;
+  }
+  if ((e.key === "Backspace" || e.key === "Delete") && !typedIn()) {
+    e.preventDefault();
+    editCommand("delete");
+    return;
+  }
+  // Arrows nudge whatever is picked out, and do nothing at all when nothing is.
+  const push = NUDGE_KEYS[e.key];
+  if (push && !typedIn() && nudge(push[0], push[1], e.shiftKey)) {
+    e.preventDefault();
+    return;
+  }
+  const zoom = ZOOM_KEYS[e.key];
+  if (zoom !== undefined && !typedIn() && zoomBy(zoom)) {
+    e.preventDefault();
+    return;
   }
 
   if (e.code === "Space" && !typing) {
@@ -3976,9 +4310,10 @@ window.addEventListener("keydown", (e) => {
     if (e.target instanceof HTMLElement) e.target.blur();
     if (!el.picker.classList.contains("hidden")) {
       closePicker();
-    } else if (state.picked.length) {
-      // Notes picked out are a thing to be out of, and the nearest one, so they go first.
-      clearPicked();
+    } else if (state.picked.length || state.blocks.length) {
+      // Whatever is picked out is a thing to be out of, and the nearest one, so it goes
+      // first: escape again closes the view.
+      forgetPicked();
     } else if (state.sound !== null) {
       closeSound();
     } else if (state.roll !== null) {
@@ -3991,6 +4326,215 @@ window.addEventListener("keydown", (e) => {
     }
   }
 });
+
+// --- cut, copy, paste, and the rest of the Edit menu ------------------------
+
+/*
+ * One place that says what cut, copy, paste, duplicate, select all and delete mean.
+ *
+ * They arrive two ways and mean the same thing either way. From the Edit menu, because on a
+ * Mac the menu bar gets a key equivalent before the window ever sees the key — which is the
+ * whole reason those items are ours rather than the standard ones — and from the keyboard
+ * here, for the platforms where the keys do reach the window and for delete, which no menu
+ * item has.
+ *
+ * What each one acts on is whatever you are looking at: the text you are typing in, the
+ * blocks in the song, or the notes in a pattern.
+ */
+listen("edit", (event) => editCommand(event.payload));
+
+/*
+ * The same press can arrive twice — once as a menu event and once as a key the menu did not
+ * take — and which of those happens is the platform's business, not ours. A second one this
+ * close behind the first is that press, not another: nobody pastes twice in a sixteenth of a
+ * second, and a double paste would be a real edit to take back.
+ */
+const SAME_PRESS = 60; // milliseconds
+let lastEdit = { what: null, at: -SAME_PRESS };
+
+function editCommand(what) {
+  const now = performance.now();
+  if (what === lastEdit.what && now - lastEdit.at < SAME_PRESS) return;
+  lastEdit = { what, at: now };
+  const field = typedIn();
+  if (field) {
+    editText(field, what);
+    return;
+  }
+  // The sound editor is one track's instrument rather than anybody's notes, so there is
+  // nothing in it to cut or paste.
+  if (state.sound !== null) return;
+  if (state.open === null) editBlocks(what);
+  else editNotes(what);
+}
+
+function editNotes(what) {
+  if (what === "copy") copyPicked(false);
+  else if (what === "cut") copyPicked(true);
+  else if (what === "paste") pasteNotes();
+  else if (what === "duplicate") duplicatePicked();
+  else if (what === "select_all") pickEverything();
+  else if (what === "delete") removePicked();
+}
+
+function editBlocks(what) {
+  if (what === "copy") copyPickedBlocks(false);
+  else if (what === "cut") copyPickedBlocks(true);
+  else if (what === "paste") pasteBlocks();
+  else if (what === "duplicate") duplicatePickedBlocks();
+  else if (what === "select_all") pickEveryBlock();
+  else if (what === "delete") removePickedBlocks();
+}
+
+/*
+ * The field being typed in, or null for none. Which is what decides where an edit goes.
+ *
+ * Only fields with text in them. A slider is an input too, and a track's fader keeps the
+ * focus after you drag it — copy would stop working for the rest of the session if that
+ * counted as typing.
+ */
+const TEXT_FIELDS = ["text", "search", "url", "tel", "email", "password", "number"];
+
+function typedIn() {
+  const at = document.activeElement;
+  if (!(at instanceof HTMLElement)) return null;
+  if (at.isContentEditable || at.matches("textarea")) return at;
+  return at instanceof HTMLInputElement && TEXT_FIELDS.includes(at.type) ? at : null;
+}
+
+/*
+ * And the same six things in a text field.
+ *
+ * Ours to do, because the standard menu items that would have done them are not there any
+ * more. Selecting and deleting are the field's own business and always work; the clipboard
+ * is the webview's and may say no, which is worth saying out loud rather than looking
+ * like a key that did nothing.
+ */
+async function editText(field, what) {
+  if (what === "select_all") {
+    field.select?.();
+    return;
+  }
+  if (what === "duplicate") return;
+  const value = String(field.value ?? "");
+  const from = field.selectionStart ?? 0;
+  const to = field.selectionEnd ?? 0;
+  if (what === "delete") {
+    replaceInField(field, from, to === from ? Math.min(value.length, from + 1) : to, "");
+    return;
+  }
+  if (what === "copy" || what === "cut") {
+    const taken = value.slice(from, to);
+    if (!taken) return;
+    if (!(await putOnClipboard(taken))) {
+      showWarning("could not reach the clipboard");
+      return;
+    }
+    if (what === "cut") replaceInField(field, from, to, "");
+    return;
+  }
+  if (what === "paste") {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) replaceInField(field, from, to, text);
+    } catch {
+      showWarning("could not reach the clipboard");
+    }
+  }
+}
+
+async function putOnClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    // The older way, which works off whatever is selected rather than off a string.
+    return document.execCommand("copy");
+  }
+}
+
+/* Put text in a field where the caret is, as typing it would. */
+function replaceInField(field, from, to, text) {
+  const value = String(field.value ?? "");
+  field.value = value.slice(0, from) + text + value.slice(to);
+  const caret = from + text.length;
+  field.setSelectionRange?.(caret, caret);
+  // The filters and the number fields listen for this, so a paste has to look like typing.
+  field.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+/*
+ * Arrow keys nudge whatever is picked out: a step or a semitone at a time, a bar or an
+ * octave with shift held. Nothing picked out and the arrows do nothing, so they are never
+ * in the way.
+ */
+function nudge(along, up, big) {
+  if (state.open === null) {
+    return nudgeBlocks(along * (big ? STEPS_PER_BAR : Math.max(1, state.snap)));
+  }
+  if (state.sound !== null) return false;
+  // The step grid has no pitch to move a note up: that is what the roll is for.
+  const semitones = state.roll === null ? 0 : up * (big ? 12 : 1);
+  return nudgeNotes(along * (big ? STEPS_PER_BAR : 1), semitones);
+}
+
+function nudgeNotes(bySteps, byPitch) {
+  const open = openPatternNow();
+  if (!open || !state.picked.length) return false;
+  // Nothing may be pushed off an end, so the whole set stops where the first of them would.
+  let along = bySteps;
+  let up = byPitch;
+  for (const { note } of state.picked) {
+    along = Math.max(along, -note.step);
+    along = Math.min(along, MAX_STEPS - Math.max(1, note.length) - note.step);
+    up = Math.max(up, LOW_PITCH - note.pitch);
+    up = Math.min(up, HIGH_PITCH - note.pitch);
+  }
+  if (!along && !up) return true;
+  for (const [track, notes] of pickedByTrack()) {
+    const was = notes.map(placeOf);
+    for (const note of notes) {
+      note.step += along;
+      note.pitch += up;
+    }
+    tidyLane(track, notes);
+    sendNoteEdit(track, was, notes);
+  }
+  state.needsDraw = true;
+  return true;
+}
+
+function nudgeBlocks(bySteps) {
+  if (!state.blocks.length) return false;
+  let along = bySteps;
+  for (const one of state.blocks) along = Math.max(along, -one.step);
+  if (!along) return true;
+  const remove = state.blocks.map(blockKey);
+  for (const one of state.blocks) one.step += along;
+  songChanged();
+  songCommand("edit_placements", {
+    remove,
+    add: state.blocks.map((one) => ({
+      pattern: one.pattern,
+      step: one.step,
+      length: Math.max(1, one.length),
+    })),
+  });
+  return true;
+}
+
+/* And the zoom keys, for whichever of the two views has a zoom. */
+function zoomBy(how) {
+  if (state.open === null) {
+    if (how === 0) setZoom(1);
+    else setZoom(how > 0 ? state.zoom * ZOOM_STEP : state.zoom / ZOOM_STEP);
+    return true;
+  }
+  if (state.roll === null || state.sound !== null) return false;
+  if (how === 0) setRollZoom(1);
+  else setRollZoom(how > 0 ? state.rollZoom * ZOOM_STEP : state.rollZoom / ZOOM_STEP);
+  return true;
+}
 
 // --- undo and redo --------------------------------------------------------
 

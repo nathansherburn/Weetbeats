@@ -82,6 +82,7 @@ fn main() {
             commands::move_placement,
             commands::resize_placement,
             commands::clear_song_bar,
+            commands::edit_placements,
             commands::seek_song,
             commands::set_bpm,
             commands::set_playing,

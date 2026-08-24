@@ -27,7 +27,8 @@ with. Stage 6 has started early: CLAP instruments play alongside the sampler, wi
 - Undo and redo, with a drag counted as one step
 - Any track can be a pitched instrument instead of a drum, with a piano roll to write in
 - An instrument's row in a pattern shows its notes instead of boxes; click it for the roll
-- Shift drag a box round notes in either editor, then move them, copy them or rub them out
+- Shift drag a box round notes in either editor, or round blocks in the song, then move
+  them, copy them or rub them out together — cmd-C, cmd-V, cmd-D, cmd-A and the arrows
 - Copy a part off one instrument and paste it onto another, in the same pattern or another
 - Click a track's name to hear it, or a key in the roll to hear that note
 - Play, stop, tempo, and a playhead you can drag whether or not it is playing
@@ -132,19 +133,22 @@ picked out. Shift clicking one note puts it in or takes it out. Then:
 
 - Drag any one of them and they all move, keeping the shape they were picked out in
 - Hold alt and drag to leave the originals and pull copies off them
-- `c` copies, `x` cuts, `v` pastes, `a` takes the lot, delete rubs them out
+- The arrows nudge them, a step or a semitone at a time, a bar or an octave with shift
+- cmd-C copies, cmd-X cuts, cmd-V pastes, cmd-D duplicates, cmd-A takes the lot, delete
+  rubs them out — or the bare letters `c`, `x`, `v`, `d` and `a`, for a hand already on the
+  canvas
 - Escape lets go of them
 
-Plain letters, not cmd-C and cmd-V, and that is not laziness: on a Mac the menu bar's own Copy
-and Paste are handled before the window sees those keys — the same trap cmd-Z falls into,
-which is why undo is a menu item — and taking them off the menu would break copying and
-pasting in the one text field in the app.
+The same box works in the **song**: shift drag round some blocks and then move them together,
+alt drag copies off them, nudge them along with the arrows, and cut, copy, paste, duplicate
+and delete them the same way. Paste puts them down at the bar you are pointing at.
 
 Pasting is how a part gets from one instrument to another. What is copied is the notes and
-how far down the rows they sat, not which instrument they came out of, so **v drops them on
-whichever row you are pointing at**: copy a drum pattern, point at the bass and paste, and the
-bass plays that rhythm at middle C. It works into another pattern too, since the clipboard
-outlives the pattern it came from. Pasting straight back where it came from would do nothing
+how far down the rows they sat, not which instrument they came out of, so it lands wherever
+you are: **in the roll you have open**, or on **whichever row you are pointing at** in the
+step grid. Copy a drum part, point at the bass and paste, and the bass plays that rhythm at
+middle C; copy a line out of one instrument's roll, open another instrument's roll, and press
+v. It works into another pattern too, since the clipboard outlives the pattern it came from. Pasting straight back where it came from would do nothing
 at all, so there it lands after itself instead — copy a bar, press v, and there is the next
 one.
 
@@ -405,10 +409,18 @@ Renaming the project is the one edit outside the history: the name is the folder
 `project.json`'s, and a step back that left the folder where it was would be a step back in
 name only.
 
+### The whole Edit menu is ours
+
 Undo and redo are in the Edit menu, and that is not a detail — on macOS a menu item's key
 equivalent is handled before the window sees the key, so a standard Edit menu would swallow
-cmd-Z and hand it to the webview, which would undo typing and nothing else. Ours emit an
-event; cut, copy, paste and select all are still the standard items.
+cmd-Z and hand it to the webview, which would undo typing and nothing else.
+
+The same is true of cut, copy, paste and select all, and for the same reason they are ours
+too: cmd-C and cmd-V have to reach the piano roll, and the standard items would eat them
+first. Every item emits an event instead, and the window decides what it means from what has
+the focus — the notes or blocks picked out, or the text field being typed in. The cost is
+that copying and pasting *text* is then ours to do as well, which is a thing the webview may
+refuse; when it does, the status line says so rather than leaving a key that did nothing.
 
 ### The meter is in decibels, and it is a transform
 

@@ -481,6 +481,35 @@ const handlers = {
       on: true,
     });
   },
+  /*
+   * Blocks out and blocks in, in one trip: what moving, duplicating, pasting and rubbing out
+   * a whole set of them all arrive as. Out before in, the same as the notes.
+   */
+  edit_placements: ({ remove, add }) => {
+    for (const one of remove) {
+      const found = fake.song.find(
+        (was) => was.pattern === one.pattern && one.step >= was.step && one.step < was.step + Math.max(1, was.length),
+      );
+      if (found) fake.song = fake.song.filter((was) => was !== found);
+    }
+    for (const one of add) {
+      if (!pattern(one.pattern)) continue;
+      const length = Math.max(1, one.length);
+      if (one.step + length > MAX_SONG_BARS * 16 || fake.song.length >= 1024) continue;
+      // Anything of the same pattern it lands on makes way for it.
+      fake.song = fake.song.filter(
+        (was) =>
+          !(
+            was.pattern === one.pattern &&
+            was.step < one.step + length &&
+            one.step < was.step + Math.max(1, was.length)
+          ),
+      );
+      fake.song.push({ step: one.step, pattern: one.pattern, length });
+    }
+    sortSong();
+    return fake.song;
+  },
   clear_song_bar: ({ bar }) => {
     const from = bar * 16;
     fake.song = fake.song.filter((one) => one.step < from || one.step >= from + 16);
@@ -587,6 +616,7 @@ const EDITS = {
   move_placement: "song",
   resize_placement: "song",
   clear_song_bar: "song",
+  edit_placements: "song",
   set_bpm: "tempo",
   // Renaming the project is not in here, because it is not in Rust either: the name is the
   // folder's, and a step back that did not rename the folder would be a step back in name
@@ -658,6 +688,12 @@ window.__weetbeats_menu = (what) => {
   }
   if (what === "trouble") {
     listeners.get("trouble")?.({ payload: "the disk said no" });
+    return;
+  }
+  // The Edit menu's own items. On a Mac the menu bar gets their keys before the window
+  // does, so this is how they really arrive: as an event, not as a keydown.
+  if (["cut", "copy", "paste", "duplicate", "select_all"].includes(what)) {
+    listeners.get("edit")?.({ payload: what });
   }
 };
 
