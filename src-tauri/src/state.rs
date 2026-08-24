@@ -289,8 +289,8 @@ impl AppState {
         self.loaded.lock().unwrap().remove(&track);
     }
 
-    /// Open or shut the plugin's own window — Surge XT's actual interface, floating above
-    /// ours. `Ok` with whether it is now up.
+    /// Open or shut the plugin's window — Surge XT's actual interface, in a window of the
+    /// plugin's own or one of ours for it to draw into. `Ok` with whether it is now up.
     pub fn plugin_window(&self, track: u16, open: bool) -> Result<bool, String> {
         let desk = self
             .desk()
@@ -312,7 +312,7 @@ impl AppState {
     }
 
     /// Whether it has one up. Ours to remember: CLAP has no way of asking a plugin, and the
-    /// user can close a floating window without going anywhere near us.
+    /// window can be closed by its own close box without going anywhere near us.
     pub fn plugin_window_open(&self, track: u16) -> bool {
         self.desk().is_some_and(|desk| desk.window_open(track))
     }

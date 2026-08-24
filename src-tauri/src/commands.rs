@@ -444,10 +444,10 @@ pub fn set_plugin_param(id: u16, param: u32, value: f64, state: State<'_, Arc<Ap
 
 /// Open the plugin's own window, or shut it. Answers with whether it is now up.
 ///
-/// Surge XT's real interface, floating above ours, drawn and owned by the plugin: we say
-/// which window it should stay above and what to call itself, and everything after that is
-/// its own business. Not a command that can be hurried — making a window is main thread work
-/// on every platform, and this is where the main thread is.
+/// Surge XT's real interface, in whichever kind of window the plugin will have: its own,
+/// floating above ours, or one of ours for it to draw into, which is what most plugins want.
+/// Not a command that can be hurried — making a window is main thread work on every platform,
+/// and this is where the main thread is.
 #[tauri::command]
 pub fn set_plugin_window(
     id: u16,
@@ -459,8 +459,8 @@ pub fn set_plugin_window(
 
 /// Whether it has one up.
 ///
-/// Asked when the sound editor opens, because a floating window can be closed by its own
-/// close box without anything reaching us until the next time round.
+/// Asked when the sound editor opens, because the window has a close box of its own and using
+/// it need not reach us until the next time round.
 #[tauri::command]
 pub fn plugin_window_open(id: u16, state: State<'_, Arc<AppState>>) -> bool {
     state.plugin_window_open(id)

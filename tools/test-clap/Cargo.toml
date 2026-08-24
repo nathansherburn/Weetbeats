@@ -22,4 +22,6 @@ clack-extensions = { version = "0.1", features = [
     "params",
     "state",
     "timer",
+    # A window made of nothing, so the host's side of embedding one can be tested.
+    "gui",
 ] }

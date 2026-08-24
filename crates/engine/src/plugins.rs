@@ -33,10 +33,15 @@
 //!
 //! ## The plugin's own window
 //!
-//! Floating, not embedded: the plugin makes its own window, sizes it, draws it and closes it,
-//! and all the host does is say which window it should stay above and what to call itself.
-//! Embedding would mean handing it a view of ours to draw into and answering its resize
-//! requests, for a window that would look the same.
+//! Whichever of the two ways the plugin will have. A floating window is the plugin's own —
+//! it makes it, sizes it, draws it and closes it, and all the host does is say which window
+//! it should stay above and what to call itself. An embedded one is drawn into a window the
+//! host makes, which then has to be sized to fit and resized when the plugin asks.
+//!
+//! Floating is preferred because it is the plugin doing all of it, but preference is as far
+//! as it goes: a plugin says which it supports and a great many support only embedding.
+//! Anything built with JUCE — Surge XT among them — has a view and no window, so embedding is
+//! not the exotic case, it is the usual one.
 //!
 //! A window is what pins the studio to a particular thread. CLAP lets a host pick which thread
 //! it calls the main thread — but a window is made of the platform's own widgets, and macOS
@@ -55,7 +60,7 @@
 
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -122,6 +127,9 @@ pub struct Shared {
     /// Its window has gone, and whether it took the window with it.
     window_gone: AtomicBool,
     window_destroyed: AtomicBool,
+    /// The size an embedded window has been asked to become, both halves in the one atomic so
+    /// a width can never be read against somebody else's height. Zero for nothing asked.
+    wanted_size: AtomicU64,
 }
 
 impl Shared {
@@ -134,6 +142,14 @@ impl Shared {
             true => WindowNews::Destroyed,
             false => WindowNews::Closed,
         })
+    }
+
+    /// The size the plugin last asked its window to be, once.
+    fn take_wanted_size(&self) -> Option<GuiSize> {
+        match self.wanted_size.swap(0, Ordering::Relaxed) {
+            0 => None,
+            packed => Some(GuiSize::unpack_from_u64(packed)),
+        }
     }
 }
 
@@ -153,24 +169,28 @@ impl SharedHandler<'_> for Shared {
 
 /// The host's half of the window arrangement.
 ///
-/// Almost all of it is about windows we embed, which we do not do: a floating window is the
-/// plugin's own, so it sizes itself and there is nothing for us to agree to. The one that
-/// matters is [`closed`](HostGuiImpl::closed), which is how we hear that somebody clicked the
-/// close box on a window we did not draw.
+/// Two of these matter. [`closed`](HostGuiImpl::closed) is how we hear that somebody clicked
+/// the close box on a window the plugin drew; [`request_resize`](HostGuiImpl::request_resize)
+/// is how an embedded plugin asks for the window it is drawing into to change size, which is
+/// what Surge XT's zoom menu does. Both are noted rather than acted on: they arrive from
+/// whichever thread the plugin felt like, and both are jobs for the main one.
 impl HostGuiImpl for Shared {
     fn resize_hints_changed(&self) {
-        // Only means anything for an embedded window, and ours float.
+        // Its aspect ratio and step size, which only matter while a window is being dragged
+        // to a new size — and ours are not draggable yet.
     }
 
-    fn request_resize(&self, _new_size: GuiSize) -> Result<(), HostError> {
-        // The plugin owns its window, so it can resize it without asking.
-        Err(HostError::Message(
-            "this window is the plugin's own to size",
-        ))
+    fn request_resize(&self, new_size: GuiSize) -> Result<(), HostError> {
+        // Accepted here and done on the next trip round the main thread: the window is ours
+        // to resize, and this is not the thread that can.
+        self.wanted_size
+            .store(new_size.pack_to_u64(), Ordering::Relaxed);
+        Ok(())
     }
 
     fn request_show(&self) -> Result<(), HostError> {
-        // Showing a floating window is the plugin's to do; it does not need us.
+        // Showing a floating window is the plugin's own to do; an embedded one is already up
+        // by the time it can ask, because we open the window before we hand it over.
         Ok(())
     }
 
@@ -395,11 +415,11 @@ pub struct Loaded {
 }
 
 /// What the app thread asks the plugin thread to do.
-/// Where the host's own window lives, as the platform's windowing API names one.
+/// One of the host's windows, as the platform's windowing API names it.
 ///
-/// Handed to a plugin so its floating window can be told to stay above ours. Kept as a plain
-/// pointer rather than anything from a windowing crate, so this module stays about CLAP: the
-/// app hands one over, and what it means is the app's business.
+/// Handed to a plugin either to stay above — a floating window — or to draw into, which is an
+/// embedded one. Kept as a plain pointer rather than anything from a windowing crate, so this
+/// module stays about CLAP: the app hands one over, and what it means is the app's business.
 #[derive(Clone, Copy, Debug)]
 pub enum ParentWindow {
     /// An `NSView *`, which is what macOS calls a window's contents.
@@ -421,6 +441,43 @@ impl ParentWindow {
             ParentWindow::Cocoa(view) => Window::from_cocoa_nsview(view),
             ParentWindow::Win32(hwnd) => Window::from_win32_hwnd(hwnd),
             ParentWindow::X11(handle) => Window::from_x11_handle(handle),
+        }
+    }
+}
+
+/// Which of the two kinds of window a plugin will have.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WindowStyle {
+    /// The plugin's own window. It needs nothing from the host but somebody to float above.
+    Floating,
+    /// A window the host makes, which the plugin draws into. The host has to make it the right
+    /// size and change that size when the plugin asks.
+    Embedded {
+        /// Whether the sizes either side quotes are logical pixels rather than physical ones.
+        /// True on macOS, false everywhere else, and CLAP's rule rather than ours.
+        logical: bool,
+    },
+}
+
+/// A window size, in whichever pixels [`WindowStyle::Embedded`] said.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct WindowSize {
+    pub width: u32,
+    pub height: u32,
+}
+
+impl WindowSize {
+    fn from_gui(size: GuiSize) -> WindowSize {
+        WindowSize {
+            width: size.width,
+            height: size.height,
+        }
+    }
+
+    fn as_gui(self) -> GuiSize {
+        GuiSize {
+            width: self.width,
+            height: self.height,
         }
     }
 }
@@ -511,29 +568,16 @@ impl Studio {
 
     // --- the plugin's own window -------------------------------------------
 
-    /// Open the plugin's own window, floating above `parent`.
+    /// Which kind of window this plugin will have, so the app knows whether it has to make
+    /// one. Ask this before [`open_window`](Studio::open_window), which wants the answer.
     ///
-    /// Floating rather than embedded: the plugin makes the window, owns it, sizes it and
-    /// closes it, and all we do is say which window it should stay above and what to call
-    /// itself. Embedding would mean giving it a view of ours to draw into and answering its
-    /// resize requests, which is a great deal more code for a window that would look the same.
-    ///
-    /// # Safety
-    ///
-    /// `parent` has to still exist for as long as the plugin's window does. It is the app's
-    /// main window, which outlives everything here.
-    pub unsafe fn open_window(
-        &mut self,
-        track: u16,
-        parent: Option<ParentWindow>,
-        title: &str,
-    ) -> Result<(), String> {
+    /// Floating is preferred: it is the plugin doing all the work, and there is no host window
+    /// to size, resize or close. Most plugins do not offer it, so most of the time this comes
+    /// back embedded.
+    pub fn window_style(&mut self, track: u16) -> Result<WindowStyle, String> {
         let Some(live) = self.at(track) else {
             return Err("there is no plugin on that track".into());
         };
-        if live.window {
-            return Ok(());
-        }
         let Some(gui) = live
             .instance
             .plugin_shared_handle()
@@ -544,26 +588,114 @@ impl Studio {
         let Some(api) = GuiApiType::default_for_current_platform() else {
             return Err("we have no way to show a window on this system".into());
         };
-        let wanted = GuiConfiguration {
-            api_type: api,
-            is_floating: true,
+        let mut handle = live.instance.plugin_handle();
+        let mut supported = |is_floating| {
+            gui.is_api_supported(
+                &mut handle,
+                GuiConfiguration {
+                    api_type: api,
+                    is_floating,
+                },
+            )
         };
+        if supported(true) {
+            return Ok(WindowStyle::Floating);
+        }
+        if supported(false) && api.supports_embedding() {
+            return Ok(WindowStyle::Embedded {
+                logical: api.uses_logical_size(),
+            });
+        }
+        Err("this plugin will not open a window of its own here".into())
+    }
+
+    /// Open the plugin's window.
+    ///
+    /// `window` is asked for the window to use once there is something to say about it: which
+    /// kind it is going to be, and — for one the host makes — how big the plugin wants it. It
+    /// hands back the window a floating one should stay above, or the one an embedded one is to
+    /// be drawn into. `None` from it is fine for a floating window and fatal for an embedded
+    /// one, because a plugin with nowhere to draw has no window.
+    ///
+    /// The order is CLAP's and it matters: a plugin is asked what size it wants *before* it is
+    /// given the window, so the window can be made that size to begin with. Handing over a
+    /// window of the wrong size and resizing it afterwards leaves the plugin's view where the
+    /// old size put it.
+    ///
+    /// # Safety
+    ///
+    /// Whatever `window` hands back has to still exist for as long as the plugin's window
+    /// does, which is until [`close_window`](Studio::close_window) or the plugin going.
+    pub unsafe fn open_window<F>(
+        &mut self,
+        track: u16,
+        title: &str,
+        window: F,
+    ) -> Result<WindowStyle, String>
+    where
+        F: FnOnce(WindowStyle, Option<WindowSize>) -> Option<ParentWindow>,
+    {
+        let style = self.window_style(track)?;
+        let api = GuiApiType::default_for_current_platform()
+            .ok_or_else(|| "we have no way to show a window on this system".to_string())?;
+        let live = self
+            .at(track)
+            .ok_or_else(|| "there is no plugin on that track".to_string())?;
+        let gui = live
+            .instance
+            .plugin_shared_handle()
+            .get_extension::<PluginGui>()
+            .ok_or_else(|| "this plugin has no window of its own".to_string())?;
+        if live.window {
+            return Ok(style);
+        }
 
         let mut handle = live.instance.plugin_handle();
-        if !gui.is_api_supported(&mut handle, wanted) {
-            return Err("this plugin will not open a window of its own here".into());
-        }
-        gui.create(&mut handle, wanted)
-            .map_err(|e| format!("its window would not open: {e}"))?;
+        gui.create(
+            &mut handle,
+            GuiConfiguration {
+                api_type: api,
+                is_floating: matches!(style, WindowStyle::Floating),
+            },
+        )
+        .map_err(|e| format!("its window would not open: {e}"))?;
 
-        // Both of these are hints a plugin is allowed to ignore, so neither is worth failing
-        // over: a window in the wrong place with the wrong name still beats no window.
-        if let Some(parent) = parent {
-            // SAFETY: the caller promises the window outlives the plugin's GUI.
-            let _ = unsafe { gui.set_transient(&mut handle, parent.as_clap()) };
-        }
-        if let Ok(title) = CString::new(title) {
-            gui.suggest_title(&mut handle, &title);
+        // What the plugin would like the window to be, asked before there is one. A plugin
+        // that will not say gets whatever the caller makes.
+        let wanted = match style {
+            WindowStyle::Floating => None,
+            WindowStyle::Embedded { .. } => gui.get_size(&mut handle).map(WindowSize::from_gui),
+        };
+        let parent = window(style, wanted);
+
+        match style {
+            WindowStyle::Floating => {
+                // Both of these are hints a plugin is allowed to ignore, so neither is worth
+                // failing over: a window in the wrong place with the wrong name still beats no
+                // window.
+                if let Some(parent) = parent {
+                    // SAFETY: the caller promises the window outlives the plugin's GUI.
+                    let _ = unsafe { gui.set_transient(&mut handle, parent.as_clap()) };
+                }
+                if let Ok(title) = CString::new(title) {
+                    gui.suggest_title(&mut handle, &title);
+                }
+            }
+            WindowStyle::Embedded { .. } => {
+                // This one is not a hint. A plugin that will not take the window it is given
+                // has nowhere to draw, so there is nothing to show and the GUI goes back.
+                let Some(parent) = parent else {
+                    gui.destroy(&mut handle);
+                    return Err(
+                        "this plugin draws into a window, and there is none to draw into".into(),
+                    );
+                };
+                // SAFETY: the caller promises the window outlives the plugin's GUI.
+                if let Err(e) = unsafe { gui.set_parent(&mut handle, parent.as_clap()) } {
+                    gui.destroy(&mut handle);
+                    return Err(format!("it would not draw into our window: {e}"));
+                }
+            }
         }
 
         if let Err(e) = gui.show(&mut handle) {
@@ -571,7 +703,42 @@ impl Studio {
             return Err(format!("its window would not come up: {e}"));
         }
         live.window = true;
-        Ok(())
+        Ok(style)
+    }
+
+    /// The size an embedded plugin has asked its window to become, once, or `None` for a
+    /// plugin that has not asked since we last looked.
+    ///
+    /// Asked every time round the main thread. Surge XT's zoom menu is this: the plugin asks,
+    /// the app resizes the window it made and tells the plugin what it now is with
+    /// [`resize_window`](Studio::resize_window).
+    pub fn wanted_size(&mut self, track: u16) -> Option<WindowSize> {
+        let live = self.at(track)?;
+        if !live.window {
+            return None;
+        }
+        live.instance
+            .access_shared_handler(|shared| shared.take_wanted_size())
+            .map(WindowSize::from_gui)
+    }
+
+    /// Tell the plugin how big the window it is drawing into now is, so it can lay itself out
+    /// to fit. For an embedded window only; a floating one sizes itself.
+    pub fn resize_window(&mut self, track: u16, size: WindowSize) {
+        let Some(live) = self.at(track) else { return };
+        if !live.window {
+            return;
+        }
+        let Some(gui) = live
+            .instance
+            .plugin_shared_handle()
+            .get_extension::<PluginGui>()
+        else {
+            return;
+        };
+        // Nothing to be done about a plugin that refuses the size its own window is, beyond
+        // not pretending otherwise: what it draws is its business.
+        let _ = gui.set_size(&mut live.instance.plugin_handle(), size.as_gui());
     }
 
     /// Shut it again.

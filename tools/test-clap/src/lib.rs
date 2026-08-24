@@ -11,6 +11,12 @@
 //! What it does: one sine wave a note, at the pitch of the note, at a level set by its one
 //! parameter. That is enough to tell "the note reached the plugin" from "it did not", "the
 //! note stopped" from "it hung", and "the parameter arrived" from "it did not".
+//!
+//! It also has a window made of nothing: a GUI extension that goes through the whole
+//! embedded-window conversation — this is the API, this is the size I want, that is the window
+//! I will draw into, make it bigger please — and never draws a pixel. A test cannot look at a
+//! window, but it can check that the host held up its end, and what the host did is reported
+//! back out as parameters.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -18,6 +24,7 @@ use clack_extensions::audio_ports::{
     AudioPortFlags, AudioPortInfo, AudioPortInfoWriter, AudioPortType, PluginAudioPorts,
     PluginAudioPortsImpl,
 };
+use clack_extensions::gui::{GuiConfiguration, GuiSize, HostGui, PluginGui, PluginGuiImpl, Window};
 use clack_extensions::note_ports::{
     NoteDialect, NoteDialects, NotePortInfo, NotePortInfoWriter, PluginNotePorts,
     PluginNotePortsImpl,
@@ -41,6 +48,10 @@ pub struct Shared {
     /// How many times the host has called our timer. Read back out as a parameter, so a test
     /// can watch it climb without needing a window to look at.
     ticks: AtomicU32,
+    /// How wide the host last said our window is, or zero if it has never said. Also a
+    /// parameter, and the only way a test can see that the host answered the resize we asked
+    /// for.
+    width: AtomicU32,
 }
 
 impl Default for Shared {
@@ -48,6 +59,7 @@ impl Default for Shared {
         Shared {
             level: AtomicU32::new(DEFAULT_LEVEL.to_bits()),
             ticks: AtomicU32::new(0),
+            width: AtomicU32::new(0),
         }
     }
 }
@@ -61,6 +73,21 @@ const TICKS_PARAM: u32 = 1;
 /// How often we ask to be called. Faster than the host's own round, on purpose: a host is
 /// allowed to slow a timer down, and this is how the test finds out that ours does.
 const TIMER_MILLIS: u32 = 5;
+/// How wide the host last made our window, as a read-only parameter. The other half of the
+/// window conversation a test can see: the host is told what size we want and this is what it
+/// came back and said the window is.
+const WIDTH_PARAM: u32 = 2;
+/// The size we say our window wants to be, the first time the host asks.
+const PAPER_SIZE: GuiSize = GuiSize {
+    width: 320,
+    height: 240,
+};
+/// And the size we ask for once the window is up, which is what a plugin's own zoom control
+/// does. Different from [`PAPER_SIZE`] so a test can tell which of the two it is looking at.
+const ZOOMED_SIZE: GuiSize = GuiSize {
+    width: 480,
+    height: 360,
+};
 
 impl Shared {
     fn level(&self) -> f32 {
@@ -88,7 +115,8 @@ impl Plugin for TestTone {
             .register::<PluginNotePorts>()
             .register::<PluginParams>()
             .register::<PluginState>()
-            .register::<PluginTimer>();
+            .register::<PluginTimer>()
+            .register::<PluginGui>();
     }
 }
 
@@ -117,6 +145,8 @@ impl DefaultPluginFactory for TestTone {
             shared,
             host,
             timer,
+            made: false,
+            parented: false,
         })
     }
 }
@@ -125,6 +155,11 @@ pub struct MainThread<'a> {
     shared: &'a Shared,
     host: HostMainThreadHandle<'a>,
     timer: Option<TimerId>,
+    /// Whether the host has asked us to make a window, and whether it has given us one to
+    /// draw into yet. Nothing is drawn either way; what matters is that a plugin is not
+    /// allowed to be shown before it has somewhere to be.
+    made: bool,
+    parented: bool,
 }
 
 impl<'a> PluginMainThread<'a, Shared> for MainThread<'a> {}
@@ -143,6 +178,89 @@ impl Drop for MainThread<'_> {
             return;
         };
         let _ = timer.unregister_timer(&mut self.host, id);
+    }
+}
+
+/// A window made of nothing.
+///
+/// Embedded only, and deliberately: a plugin with a view and no window of its own is the usual
+/// case — everything built with JUCE is one — and it is the case that asks the most of a host.
+/// Every step is checked rather than waved through, so a host that does them out of order or
+/// leaves one out fails here instead of in front of somebody's synth.
+impl PluginGuiImpl for MainThread<'_> {
+    fn is_api_supported(&mut self, configuration: GuiConfiguration) -> bool {
+        // Any windowing API, so long as the host makes the window.
+        !configuration.is_floating
+    }
+
+    fn get_preferred_api(&mut self) -> Option<GuiConfiguration<'_>> {
+        None
+    }
+
+    fn create(&mut self, configuration: GuiConfiguration) -> Result<(), PluginError> {
+        if configuration.is_floating {
+            return Err(PluginError::Message("we have no window to float"));
+        }
+        self.made = true;
+        self.parented = false;
+        Ok(())
+    }
+
+    fn destroy(&mut self) {
+        self.made = false;
+        self.parented = false;
+    }
+
+    fn set_scale(&mut self, _scale: f64) -> Result<(), PluginError> {
+        Ok(())
+    }
+
+    fn get_size(&mut self) -> Option<GuiSize> {
+        Some(PAPER_SIZE)
+    }
+
+    fn can_resize(&mut self) -> bool {
+        true
+    }
+
+    fn set_size(&mut self, size: GuiSize) -> Result<(), PluginError> {
+        self.shared.width.store(size.width, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn set_parent(&mut self, window: Window) -> Result<(), PluginError> {
+        if !self.made {
+            return Err(PluginError::Message("we were not asked for a window first"));
+        }
+        // A host that hands over nothing has handed over nothing, whatever it thinks it did.
+        // SAFETY: every window CLAP names is a pointer or a handle the same size as one, so
+        // reading the union as a pointer is reading the bytes that are there either way. This
+        // is a fixture looking for zero, not a plugin using the window.
+        if unsafe { window.as_raw().specific.ptr }.is_null() {
+            return Err(PluginError::Message("that is not a window"));
+        }
+        self.parented = true;
+        Ok(())
+    }
+
+    fn set_transient(&mut self, _window: Window) -> Result<(), PluginError> {
+        Err(PluginError::Message("we have no window to float"))
+    }
+
+    fn show(&mut self) -> Result<(), PluginError> {
+        if !self.parented {
+            return Err(PluginError::Message("we have nowhere to draw yet"));
+        }
+        // What a zoom control does: now that there is a window, ask for a bigger one. The
+        // host is allowed to take its time over it, so nothing here waits for an answer.
+        if let Some(gui) = self.host.shared().get_extension::<HostGui>() {
+            let _ = gui.request_resize(&self.host.shared(), ZOOMED_SIZE.width, ZOOMED_SIZE.height);
+        }
+        Ok(())
+    }
+
+    fn hide(&mut self) -> Result<(), PluginError> {
+        Ok(())
     }
 }
 
@@ -329,7 +447,7 @@ impl PluginNotePortsImpl for MainThread<'_> {
 
 impl PluginMainThreadParams for MainThread<'_> {
     fn count(&mut self) -> u32 {
-        2
+        3
     }
 
     fn get_info(&mut self, index: u32, writer: &mut ParamInfoWriter) {
@@ -354,6 +472,16 @@ impl PluginMainThreadParams for MainThread<'_> {
                 max_value: 1_000_000.0,
                 default_value: 0.0,
             }),
+            2 => writer.set(&ParamInfo {
+                id: ClapId::new(WIDTH_PARAM),
+                flags: ParamInfoFlags::IS_READONLY,
+                cookie: Default::default(),
+                name: b"Width",
+                module: b"Window",
+                min_value: 0.0,
+                max_value: 100_000.0,
+                default_value: 0.0,
+            }),
             _ => {}
         }
     }
@@ -362,6 +490,7 @@ impl PluginMainThreadParams for MainThread<'_> {
         match u32::from(param_id) {
             LEVEL_PARAM => Some(self.shared.level() as f64),
             TICKS_PARAM => Some(self.shared.ticks.load(Ordering::Relaxed) as f64),
+            WIDTH_PARAM => Some(self.shared.width.load(Ordering::Relaxed) as f64),
             _ => None,
         }
     }
@@ -376,6 +505,7 @@ impl PluginMainThreadParams for MainThread<'_> {
         match u32::from(param_id) {
             LEVEL_PARAM => write!(writer, "{}%", (value * 100.0).round() as i32),
             TICKS_PARAM => write!(writer, "{} ticks", value as u32),
+            WIDTH_PARAM => write!(writer, "{} across", value as u32),
             _ => Err(std::fmt::Error),
         }
     }

@@ -161,10 +161,13 @@ is how loud the track is. Surge XT has more controls than fit on a screen, so th
 filter above them.
 
 **Open its window** gives you the plugin's real interface — Surge XT as its own designers drew
-it — floating above Weetbeats. The window belongs to the plugin: it draws it, sizes it and
-closes it, and all we do is say which window it should stay above and what to call itself.
-Close it from either end and the button says so. Not every plugin has one, and the only way to
-find out is to ask, so the button is always there and tells you when the answer is no.
+it. Which window that is depends on the plugin. A few make their own, and then all we do is
+say which window it should stay above and what to call itself. Most, Surge XT among them, have
+a view and no window: everything built with JUCE is one. Those get a window of ours, made the
+size the plugin asks for, resized when its own zoom control asks again, and taken down when
+either end closes it. Either way the button says whether it is up. Not every plugin has an
+interface at all, and the only way to find out is to ask, so the button is always there and
+tells you when the answer is no.
 
 What a plugin is set to is the plugin's business: it is asked for its settings when the
 project is saved, and they go in `plugins/` inside the project folder beside the samples. The

@@ -2374,11 +2374,11 @@ async function addPlugin(one) {
 const isPlugin = (track) => Boolean(trackById(track)?.plugin);
 
 /*
- * The plugin's own window: Surge XT's real interface, floating above ours.
+ * The plugin's own window: Surge XT's real interface, in a window of its own.
  *
- * Rust owns whether it is up, because a floating window belongs to the plugin and can be shut
- * by its own close box without anything reaching us until the next time round. So this asks
- * rather than remembers, whenever there is a reason to think the answer may have changed.
+ * Rust owns whether it is up, because the window has a close box of its own — the plugin's or
+ * ours — and clicking it need not reach us until the next time round. So this asks rather than
+ * remembers, whenever there is a reason to think the answer may have changed.
  */
 async function refreshWindow(track) {
   try {
@@ -2410,7 +2410,8 @@ el.pluginWindow.addEventListener("click", async () => {
     showWindowState(track, await invoke("set_plugin_window", { id: track, open: wanted }));
   } catch (e) {
     // "This plugin has no window of its own" is the usual one, and is worth saying plainly
-    // rather than leaving a button that looks like it did nothing.
+    // rather than leaving a button that looks like it did nothing. The window may also be
+    // one of ours, in which case it can fail to be made, which is worth saying too.
     showError(e);
     await refreshWindow(track);
   } finally {

@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use weetbeats_engine::command::{TrashBin, COMMAND_CAPACITY, TRASH_CAPACITY};
-use weetbeats_engine::plugins::{Desk, Studio};
+use weetbeats_engine::plugins::{Desk, ParentWindow, Studio, WindowStyle};
 use weetbeats_engine::{Command, Engine, EngineNote, Shared, Trash};
 
 const RATE: u32 = 48_000;
@@ -510,23 +510,64 @@ fn own_studio() -> Studio {
     Studio::new(RATE as f64)
 }
 
+/// A window to hand a plugin, which is not a window at all.
+///
+/// The test plugin's GUI is made of nothing and never looks at what it is given beyond
+/// checking that it is not nothing, so a pointer to something on this stack is enough to go
+/// through the whole conversation. A real window is the app's to arrange, and the one thing a
+/// test on this side of the line cannot stand in for.
+fn somewhere_to_draw(anything: &mut u8) -> ParentWindow {
+    let pointer = anything as *mut u8 as *mut std::ffi::c_void;
+    #[cfg(target_os = "windows")]
+    return ParentWindow::Win32(pointer);
+    #[cfg(target_os = "macos")]
+    return ParentWindow::Cocoa(pointer);
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = pointer;
+        ParentWindow::X11(1)
+    }
+}
+
 #[test]
-fn a_plugin_with_no_window_says_so_rather_than_pretending() {
+fn a_plugin_that_draws_into_our_window_says_which_it_wants() {
     let mut studio = own_studio();
     studio
         .load(0, &fixture().file, TEST_PLUGIN, None)
         .expect("the test plugin would not load");
 
-    // The test plugin is a synth with no interface at all, which is exactly the case the app
-    // has to have an answer for: the only way to find out is to ask.
-    // SAFETY: no parent window is given, so there is nothing that has to outlive anything.
-    let asked = unsafe { studio.open_window(0, None, "Test Tone") };
+    // The usual case, and the one the app has to make a window for. The only way to find out
+    // is to ask, which is what this is: the plugin supports embedding and not floating.
+    let style = studio
+        .window_style(0)
+        .expect("the test plugin would not say what kind of window it wants");
+    let WindowStyle::Embedded { logical } = style else {
+        panic!("the test plugin claimed a window of its own: {style:?}");
+    };
+    assert_eq!(
+        logical,
+        cfg!(target_os = "macos"),
+        "the pixels a window is measured in are the platform's, not the plugin's"
+    );
+}
+
+#[test]
+fn a_plugin_with_nowhere_to_draw_says_so_rather_than_pretending() {
+    let mut studio = own_studio();
+    studio
+        .load(0, &fixture().file, TEST_PLUGIN, None)
+        .expect("the test plugin would not load");
+
+    // A plugin that draws into somebody else's window and is given no window has nothing to
+    // do, and saying so is better than a plugin holding a GUI nobody can see.
+    // SAFETY: no window is handed over, so there is nothing that has to outlive anything.
+    let asked = unsafe { studio.open_window(0, "Test Tone", |_, _| None) };
     assert!(
         asked.is_err(),
-        "a plugin with no window claimed to have opened one"
+        "a plugin with nowhere to draw claimed to have opened a window"
     );
     assert!(
-        asked.unwrap_err().contains("no window"),
+        asked.unwrap_err().contains("draw"),
         "the reason did not say what was wrong"
     );
     assert!(!studio.window_open(0), "it thinks a window is up");
@@ -537,10 +578,79 @@ fn a_plugin_with_no_window_says_so_rather_than_pretending() {
 }
 
 #[test]
+fn an_embedded_window_is_sized_by_the_plugin_and_resized_when_it_asks() {
+    let mut studio = own_studio();
+    studio
+        .load(0, &fixture().file, TEST_PLUGIN, None)
+        .expect("the test plugin would not load");
+
+    let mut window = 0u8;
+    // The plugin is asked what size it wants before it is given anything, so a window can be
+    // made that size to begin with. What it says arrives here.
+    let mut asked_for = None;
+    // SAFETY: the window outlives the GUI — it is on this stack and the GUI is closed below,
+    // and the plugin's window is made of nothing and never touches it regardless.
+    let style = unsafe {
+        studio.open_window(0, "Test Tone", |_, wanted| {
+            asked_for = wanted;
+            Some(somewhere_to_draw(&mut window))
+        })
+    }
+    .expect("the test plugin would not open a window");
+    assert!(
+        matches!(style, WindowStyle::Embedded { .. }),
+        "the window came up the wrong kind: {style:?}"
+    );
+    assert!(studio.window_open(0), "it does not think the window is up");
+    assert_eq!(
+        asked_for.map(|s| (s.width, s.height)),
+        Some((320, 240)),
+        "the size the plugin wanted did not reach whoever makes the window"
+    );
+
+    // The plugin asked for a bigger window as it came up — a zoom control is this — and the
+    // app hears about it on the next trip round the main thread.
+    studio.tick();
+    let wanted = studio
+        .wanted_size(0)
+        .expect("the plugin's resize request never arrived");
+    assert_eq!(
+        (wanted.width, wanted.height),
+        (480, 360),
+        "the size the plugin asked for is not the size we heard"
+    );
+    assert!(
+        studio.wanted_size(0).is_none(),
+        "the same request came back twice"
+    );
+
+    // Once the window is that size, the plugin is told so it can lay itself out to fit. It
+    // reports the width back as a parameter, which is the only way a test can see it landed.
+    studio.resize_window(0, wanted);
+    let width = studio
+        .params(0)
+        .into_iter()
+        .find(|p| p.name == "Width")
+        .map(|p| p.value as u32)
+        .expect("the test plugin lost its window width");
+    assert_eq!(
+        width, 480,
+        "the plugin was not told what size its window is"
+    );
+
+    studio.close_window(0);
+    assert!(!studio.window_open(0), "the window would not shut");
+    assert!(
+        studio.wanted_size(0).is_none(),
+        "a shut window is still asking to be resized"
+    );
+}
+
+#[test]
 fn a_window_on_a_track_with_no_plugin_is_a_message() {
     let mut studio = own_studio();
-    // SAFETY: no parent window is given.
-    let asked = unsafe { studio.open_window(3, None, "Nothing") };
+    // SAFETY: no window is handed over.
+    let asked = unsafe { studio.open_window(3, "Nothing", |_, _| None) };
     assert!(
         asked.is_err(),
         "opened a window for a plugin that is not there"
