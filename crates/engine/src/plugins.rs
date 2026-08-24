@@ -31,24 +31,41 @@
 //! applied to what comes out. Turning a fader down while a note rings does not change that
 //! note; the next one is quieter.
 //!
+//! ## The plugin's own window
+//!
+//! Floating, not embedded: the plugin makes its own window, sizes it, draws it and closes it,
+//! and all the host does is say which window it should stay above and what to call itself.
+//! Embedding would mean handing it a view of ours to draw into and answering its resize
+//! requests, for a window that would look the same.
+//!
+//! A window is what pins the studio to a particular thread. CLAP lets a host pick which thread
+//! it calls the main thread — but a window is made of the platform's own widgets, and macOS
+//! only makes those on the process's first thread. So a [`Studio`] that will ever open a
+//! window has to live there. [`Desk`] puts one on a thread of its own, which is right for
+//! anything that will not.
+//!
+//! Two of the host's own extensions come with the window. One is how we hear that somebody
+//! closed it; the other keeps the timers a GUI repaints on, fired from [`Studio::tick`].
+//!
 //! ## What is not here yet
 //!
-//! The plugin's own window. Surge XT has a GUI and this does not open it: parameters are
-//! shown in the sound editor instead, which is enough to play and to tweak but not the same
-//! thing. Hosting the GUI means creating a native window for the plugin to draw into and
-//! running its timers on the main thread, which is its own piece of work.
-//!
-//! Plugins also run in this process rather than a child one, so a plugin that crashes takes
-//! the app with it. Out-of-process hosting is the other half of the same piece of work.
+//! Plugins run in this process rather than a child one, so a plugin that crashes takes the app
+//! with it. That is the other half of hosting properly, and a bigger piece of work than the
+//! window was.
 
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::time::{Duration, Instant};
 
 use clack_extensions::audio_ports::{AudioPortInfoBuffer, PluginAudioPorts};
+use clack_extensions::gui::{
+    GuiApiType, GuiConfiguration, GuiSize, HostGui, HostGuiImpl, PluginGui, Window,
+};
 use clack_extensions::params::{ParamInfoBuffer, ParamInfoFlags, PluginParams};
 use clack_extensions::state::PluginState;
+use clack_extensions::timer::{HostTimer, HostTimerImpl, PluginTimer, TimerId};
 use clack_host::events::event_types::{NoteOffEvent, NoteOnEvent, ParamValueEvent};
 use clack_host::events::io::{EventBuffer, InputEvents, OutputEvents};
 use clack_host::events::{Match, Pckn};
@@ -80,8 +97,21 @@ const MAX_PORTS: usize = 8;
 
 // --- what the host says about itself ----------------------------------------
 
-/// What a plugin can ask the host to do, which it can do from any thread. Both are noted
-/// rather than acted on: the desk picks them up next time round.
+/// What a plugin has told us about its window since we last looked.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WindowNews {
+    /// The window has gone and the plugin has already taken it apart. CLAP says we have to
+    /// call `destroy` to say we noticed.
+    Destroyed,
+    /// The window has gone but the plugin is still holding it.
+    Closed,
+}
+
+/// What a plugin can ask the host to do, which it can do from any thread.
+///
+/// All noted rather than acted on. Some of these arrive while the audio thread is inside
+/// `process`, and none of them can be done from there, so every one is a flag the main thread
+/// picks up next time round.
 #[derive(Default)]
 pub struct Shared {
     /// The plugin wants `on_main_thread` called.
@@ -89,6 +119,22 @@ pub struct Shared {
     /// The plugin wants deactivating and activating again. Noted so it can be reported; we
     /// do not restart plugins mid-song.
     wants_restart: AtomicBool,
+    /// Its window has gone, and whether it took the window with it.
+    window_gone: AtomicBool,
+    window_destroyed: AtomicBool,
+}
+
+impl Shared {
+    /// What has happened to the plugin's window since last time, once.
+    fn take_window_news(&self) -> Option<WindowNews> {
+        if !self.window_gone.swap(false, Ordering::Relaxed) {
+            return None;
+        }
+        Some(match self.window_destroyed.swap(false, Ordering::Relaxed) {
+            true => WindowNews::Destroyed,
+            false => WindowNews::Closed,
+        })
+    }
 }
 
 impl SharedHandler<'_> for Shared {
@@ -105,13 +151,129 @@ impl SharedHandler<'_> for Shared {
     }
 }
 
+/// The host's half of the window arrangement.
+///
+/// Almost all of it is about windows we embed, which we do not do: a floating window is the
+/// plugin's own, so it sizes itself and there is nothing for us to agree to. The one that
+/// matters is [`closed`](HostGuiImpl::closed), which is how we hear that somebody clicked the
+/// close box on a window we did not draw.
+impl HostGuiImpl for Shared {
+    fn resize_hints_changed(&self) {
+        // Only means anything for an embedded window, and ours float.
+    }
+
+    fn request_resize(&self, _new_size: GuiSize) -> Result<(), HostError> {
+        // The plugin owns its window, so it can resize it without asking.
+        Err(HostError::Message(
+            "this window is the plugin's own to size",
+        ))
+    }
+
+    fn request_show(&self) -> Result<(), HostError> {
+        // Showing a floating window is the plugin's to do; it does not need us.
+        Ok(())
+    }
+
+    fn request_hide(&self) -> Result<(), HostError> {
+        Ok(())
+    }
+
+    fn closed(&self, was_destroyed: bool) {
+        self.window_destroyed
+            .store(was_destroyed, Ordering::Relaxed);
+        self.window_gone.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Timers one plugin may have running at once. A GUI wants one; a few want two or three.
+const MAX_TIMERS: usize = 8;
+
+/// One timer a plugin has asked us to keep for it.
+#[derive(Clone, Copy)]
+struct Timer {
+    id: TimerId,
+    period: Duration,
+    due: Instant,
+}
+
+/// The host's main thread, which for a plugin means two things: somewhere to keep its timers,
+/// and somebody to call them.
+///
+/// Timers are how a GUI made of somebody else's widgets gets to repaint itself, so a plugin
+/// with a window almost certainly registers one. They are fired from [`Studio::tick`], which
+/// runs about sixty times a second — CLAP asks a host to allow at least thirty, and lets it
+/// slow anything faster down, which this does by simply not being able to fire more often.
+#[derive(Default)]
+pub struct MainThread {
+    timers: Vec<Timer>,
+    next_timer: u32,
+}
+
+impl MainThread {
+    /// Every timer that has come due, written into `due`, and how many there were. Each one is
+    /// wound on from now rather than from when it was meant to fire, so a slow frame does not
+    /// leave a backlog to catch up on.
+    fn timers_due(&mut self, now: Instant, due: &mut [TimerId; MAX_TIMERS]) -> usize {
+        let mut count = 0;
+        for timer in self.timers.iter_mut() {
+            if timer.due > now || count >= due.len() {
+                continue;
+            }
+            due[count] = timer.id;
+            count += 1;
+            timer.due = now + timer.period;
+        }
+        count
+    }
+}
+
+impl MainThreadHandler<'_> for MainThread {}
+
+impl HostTimerImpl for MainThread {
+    fn register_timer(&mut self, period_ms: u32) -> Result<TimerId, HostError> {
+        if self.timers.len() >= MAX_TIMERS {
+            return Err(HostError::Message("that is more timers than we will keep"));
+        }
+        let id = TimerId(self.next_timer);
+        self.next_timer += 1;
+        // Nothing faster than the poll that fires them, because pretending otherwise would
+        // only mean a plugin thinking it was being called more often than it was.
+        let period = Duration::from_millis(period_ms.max(TICK_MILLIS) as u64);
+        self.timers.push(Timer {
+            id,
+            period,
+            due: Instant::now() + period,
+        });
+        Ok(id)
+    }
+
+    fn unregister_timer(&mut self, timer_id: TimerId) -> Result<(), HostError> {
+        let before = self.timers.len();
+        self.timers.retain(|timer| timer.id != timer_id);
+        match self.timers.len() == before {
+            true => Err(HostError::Message("no such timer")),
+            false => Ok(()),
+        }
+    }
+}
+
+/// How often the main thread comes round, which is what sets the floor on a timer's period.
+/// Must match how often the app calls [`Studio::tick`] — it does it from the playhead poll.
+const TICK_MILLIS: u32 = 16;
+
 /// The host, as CLAP wants it: one type per thread specification.
 pub struct Weetbeats;
 
 impl HostHandlers for Weetbeats {
     type Shared<'a> = Shared;
-    type MainThread<'a> = ();
+    type MainThread<'a> = MainThread;
     type AudioProcessor<'a> = ();
+
+    /// What we can do for a plugin that it cannot do for itself. Both of these are about
+    /// windows: one to hear that a window has closed, one to keep the timers a GUI repaints on.
+    fn declare_extensions(builder: &mut HostExtensions<Self>, _shared: &Shared) {
+        builder.register::<HostGui>().register::<HostTimer>();
+    }
 }
 
 /// The audio processor half of a plugin instance, which is the half that is `Send`.
@@ -233,6 +395,311 @@ pub struct Loaded {
 }
 
 /// What the app thread asks the plugin thread to do.
+/// Where the host's own window lives, as the platform's windowing API names one.
+///
+/// Handed to a plugin so its floating window can be told to stay above ours. Kept as a plain
+/// pointer rather than anything from a windowing crate, so this module stays about CLAP: the
+/// app hands one over, and what it means is the app's business.
+#[derive(Clone, Copy, Debug)]
+pub enum ParentWindow {
+    /// An `NSView *`, which is what macOS calls a window's contents.
+    Cocoa(*mut std::ffi::c_void),
+    /// An `HWND`.
+    Win32(*mut std::ffi::c_void),
+    /// An X11 window id.
+    X11(std::os::raw::c_ulong),
+}
+
+impl ParentWindow {
+    /// As CLAP wants it. `None` when the platform's API is not one CLAP has a name for.
+    ///
+    /// # Safety
+    ///
+    /// The window has to still exist for as long as the plugin's GUI does.
+    unsafe fn as_clap(&self) -> Window<'static> {
+        match *self {
+            ParentWindow::Cocoa(view) => Window::from_cocoa_nsview(view),
+            ParentWindow::Win32(hwnd) => Window::from_win32_hwnd(hwnd),
+            ParentWindow::X11(handle) => Window::from_x11_handle(handle),
+        }
+    }
+}
+
+/// Everything the plugin thread owns: the `.clap` files it has opened and the instances it
+/// has made from them.
+///
+/// **Single threaded, and particular about which thread.** CLAP calls one thread the main
+/// thread and wants every instance made, asked about and destroyed on it. A [`PluginInstance`]
+/// is `!Send`, so the type system holds most of that; what it cannot say is *which* thread,
+/// and that matters as soon as windows are involved. A plugin's window is made of the
+/// platform's own widgets, and macOS will only make those on the process's first thread — so
+/// a studio that is ever going to open a window has to live there.
+///
+/// [`Desk`] puts one on a thread of its own, which is right for anything that will not.
+pub struct Studio {
+    /// Kept for the life of the app: unloading a `.clap` while an instance from it is alive is
+    /// how a host crashes, and reloading Surge XT's entry per instance is slow.
+    entries: Vec<(PathBuf, PluginEntry)>,
+    live: Vec<Option<Live>>,
+    sample_rate: f64,
+}
+
+impl Studio {
+    pub fn new(sample_rate: f64) -> Studio {
+        Studio {
+            entries: Vec::new(),
+            live: (0..MAX_TRACKS).map(|_| None).collect(),
+            sample_rate,
+        }
+    }
+
+    /// Every plugin on the machine. Takes a moment: each `.clap` has to be opened to be asked
+    /// what is inside it.
+    pub fn scan(&mut self) -> Vec<Found> {
+        scan_all(&mut self.entries)
+    }
+
+    /// Put a plugin on a track, with its saved settings if it has any.
+    pub fn load(
+        &mut self,
+        track: u16,
+        path: &Path,
+        id: &str,
+        state: Option<Vec<u8>>,
+    ) -> Result<Loaded, String> {
+        // Whatever was there goes first, so a track never has two instances alive.
+        self.unload(track);
+        load_one(
+            &mut self.entries,
+            &mut self.live,
+            track,
+            path,
+            id,
+            state,
+            self.sample_rate,
+        )
+    }
+
+    /// Take it off again, and destroy the instance. Its window goes with it, on the way out.
+    pub fn unload(&mut self, track: u16) {
+        if let Some(slot) = self.live.get_mut(track as usize) {
+            *slot = None;
+        }
+    }
+
+    /// What the plugin's parameters are and where they are now.
+    pub fn params(&mut self, track: u16) -> Vec<Param> {
+        match self.at(track) {
+            Some(live) => read_params(&mut live.instance),
+            None => Vec::new(),
+        }
+    }
+
+    /// The plugin's own settings, as an opaque blob to write into the project folder.
+    pub fn save_state(&mut self, track: u16) -> Option<Vec<u8>> {
+        save_state(&mut self.at(track)?.instance)
+    }
+
+    /// Drop a slot the audio thread has finished with.
+    ///
+    /// A slot holds a share of the plugin instance. Whoever lets go of the last share destroys
+    /// the plugin, and CLAP says that happens on the thread that made it — so it happens here,
+    /// whichever order the two halves come apart in.
+    pub fn bin(&mut self, slot: Box<Slot>) {
+        drop(slot);
+    }
+
+    // --- the plugin's own window -------------------------------------------
+
+    /// Open the plugin's own window, floating above `parent`.
+    ///
+    /// Floating rather than embedded: the plugin makes the window, owns it, sizes it and
+    /// closes it, and all we do is say which window it should stay above and what to call
+    /// itself. Embedding would mean giving it a view of ours to draw into and answering its
+    /// resize requests, which is a great deal more code for a window that would look the same.
+    ///
+    /// # Safety
+    ///
+    /// `parent` has to still exist for as long as the plugin's window does. It is the app's
+    /// main window, which outlives everything here.
+    pub unsafe fn open_window(
+        &mut self,
+        track: u16,
+        parent: Option<ParentWindow>,
+        title: &str,
+    ) -> Result<(), String> {
+        let Some(live) = self.at(track) else {
+            return Err("there is no plugin on that track".into());
+        };
+        if live.window {
+            return Ok(());
+        }
+        let Some(gui) = live
+            .instance
+            .plugin_shared_handle()
+            .get_extension::<PluginGui>()
+        else {
+            return Err("this plugin has no window of its own".into());
+        };
+        let Some(api) = GuiApiType::default_for_current_platform() else {
+            return Err("we have no way to show a window on this system".into());
+        };
+        let wanted = GuiConfiguration {
+            api_type: api,
+            is_floating: true,
+        };
+
+        let mut handle = live.instance.plugin_handle();
+        if !gui.is_api_supported(&mut handle, wanted) {
+            return Err("this plugin will not open a window of its own here".into());
+        }
+        gui.create(&mut handle, wanted)
+            .map_err(|e| format!("its window would not open: {e}"))?;
+
+        // Both of these are hints a plugin is allowed to ignore, so neither is worth failing
+        // over: a window in the wrong place with the wrong name still beats no window.
+        if let Some(parent) = parent {
+            // SAFETY: the caller promises the window outlives the plugin's GUI.
+            let _ = unsafe { gui.set_transient(&mut handle, parent.as_clap()) };
+        }
+        if let Ok(title) = CString::new(title) {
+            gui.suggest_title(&mut handle, &title);
+        }
+
+        if let Err(e) = gui.show(&mut handle) {
+            gui.destroy(&mut handle);
+            return Err(format!("its window would not come up: {e}"));
+        }
+        live.window = true;
+        Ok(())
+    }
+
+    /// Shut it again.
+    pub fn close_window(&mut self, track: u16) {
+        if let Some(live) = self.at(track) {
+            live.shut_window();
+        }
+    }
+
+    /// Whether the plugin on this track has its window up.
+    pub fn window_open(&self, track: u16) -> bool {
+        self.live
+            .get(track as usize)
+            .and_then(|one| one.as_ref())
+            .is_some_and(|live| live.window)
+    }
+
+    /// The main thread coming round, which is where a plugin gets everything it cannot do for
+    /// itself: the callback it asked for, the timers it registered, and the acknowledgement
+    /// that the window it just closed can go.
+    ///
+    /// Called from the same poll that drives the playhead, so about sixty times a second. That
+    /// is also the granularity of the timers, which is enough for a plugin repainting itself
+    /// and is all a plugin gets to assume — CLAP lets the host slow a timer down.
+    pub fn tick(&mut self) {
+        let now = Instant::now();
+        for slot in self.live.iter_mut() {
+            let Some(live) = slot.as_mut() else { continue };
+            live.tick(now);
+        }
+    }
+
+    fn at(&mut self, track: u16) -> Option<&mut Live> {
+        self.live.get_mut(track as usize)?.as_mut()
+    }
+}
+
+/// One loaded plugin, as a [`Studio`] holds it.
+struct Live {
+    instance: PluginInstance<Weetbeats>,
+    /// Whether the plugin currently has its window up. Ours to remember: CLAP has no way of
+    /// asking, and the plugin only tells us when the answer changes.
+    window: bool,
+}
+
+/// A plugin that is going has to have its window taken down first: CLAP says a plugin still
+/// holding a GUI has not finished with it. Here rather than at each of the places a plugin can
+/// go — unloaded, replaced, or the whole studio closing — because a window left open through
+/// one of them is a plugin destroyed mid-repaint.
+impl Drop for Live {
+    fn drop(&mut self) {
+        self.shut_window();
+    }
+}
+
+impl Live {
+    /// Take the plugin's window down, if it has one up.
+    fn shut_window(&mut self) {
+        if !self.window {
+            return;
+        }
+        self.window = false;
+        let Some(gui) = self
+            .instance
+            .plugin_shared_handle()
+            .get_extension::<PluginGui>()
+        else {
+            return;
+        };
+        let mut handle = self.instance.plugin_handle();
+        let _ = gui.hide(&mut handle);
+        gui.destroy(&mut handle);
+    }
+
+    fn tick(&mut self, now: Instant) {
+        // The callback it asked for. Surge XT wants one while it loads a patch.
+        let wants = self
+            .instance
+            .access_shared_handler(|shared| shared.wants_callback.swap(false, Ordering::Relaxed));
+        if wants {
+            self.instance.call_on_main_thread_callback();
+        }
+
+        // Its window has gone: the user clicked the close box on the plugin's own window
+        // rather than ours. `Destroyed` means it has already taken the window apart and is
+        // waiting for us to say we noticed.
+        match self
+            .instance
+            .access_shared_handler(|shared| shared.take_window_news())
+        {
+            Some(WindowNews::Destroyed) => {
+                self.window = false;
+                if let Some(gui) = self
+                    .instance
+                    .plugin_shared_handle()
+                    .get_extension::<PluginGui>()
+                {
+                    gui.destroy(&mut self.instance.plugin_handle());
+                }
+            }
+            Some(WindowNews::Closed) => self.shut_window(),
+            None => {}
+        }
+
+        // And its timers. A plugin with a window almost always has one: it is how a GUI made
+        // of somebody else's widgets gets to repaint.
+        let mut due = [TimerId(0); MAX_TIMERS];
+        let count = self
+            .instance
+            .access_handler_mut(|main| main.timers_due(now, &mut due));
+        if count == 0 {
+            return;
+        }
+        let Some(timers) = self
+            .instance
+            .plugin_shared_handle()
+            .get_extension::<PluginTimer>()
+        else {
+            return;
+        };
+        let mut handle = self.instance.plugin_handle();
+        for id in &due[..count] {
+            timers.on_timer(&mut handle, *id);
+        }
+    }
+}
+
+/// What the app thread asks the plugin thread to do.
 enum Job {
     Scan(Sender<Vec<Found>>),
     Load {
@@ -253,23 +720,26 @@ enum Job {
         reply: Sender<Option<Vec<u8>>>,
     },
     /// A slot the audio thread has finished with, come home to be dropped.
-    ///
-    /// Here rather than wherever it arrived, because letting go of the last piece of a plugin
-    /// destroys the plugin, and CLAP says a plugin is destroyed on the thread that made it.
     Bin(Box<Slot>),
     /// Give any plugin that asked for it its trip round the main thread.
     Tick,
 }
 
-/// The plugin thread, seen from anywhere else. Every method blocks until the plugin thread
-/// answers, which is what makes it safe to call from a Tauri command.
+/// A [`Studio`] on a thread of its own, for anything that is never going to open a window.
+///
+/// The tests use one, because a plugin instance has to stay on one thread and a test is not
+/// running on the app's. The app does not: a window has to be made on the process's first
+/// thread, so the app keeps its studio there and calls it directly.
+///
+/// Every method blocks until the thread answers, which is what makes it safe to call from
+/// anywhere.
 pub struct Desk {
     jobs: Sender<Job>,
     sample_rate: f64,
 }
 
 impl Desk {
-    /// Start the plugin thread. There is one of these for the life of the app.
+    /// Start the plugin thread. Its studio lives and dies with it.
     pub fn start(sample_rate: f64) -> Desk {
         let (jobs, inbox) = channel();
         std::thread::Builder::new()
@@ -283,8 +753,6 @@ impl Desk {
         self.sample_rate
     }
 
-    /// Every plugin on the machine. Takes a moment: each `.clap` has to be opened to be
-    /// asked what is inside it.
     pub fn scan(&self) -> Vec<Found> {
         let (reply, answer) = channel();
         if self.jobs.send(Job::Scan(reply)).is_err() {
@@ -293,7 +761,6 @@ impl Desk {
         answer.recv().unwrap_or_default()
     }
 
-    /// Put a plugin on a track, with its saved settings if it has any.
     pub fn load(
         &self,
         track: u16,
@@ -316,21 +783,14 @@ impl Desk {
             .map_err(|_| "the plugin thread gave up on that one".to_string())?
     }
 
-    /// Take it off again, and destroy the instance.
     pub fn unload(&self, track: u16) {
         let _ = self.jobs.send(Job::Unload(track));
     }
 
-    /// Hand back a slot the audio thread has finished with, so it is dropped here.
-    ///
-    /// A slot holds a share of the plugin instance. Whoever lets go of the last share
-    /// destroys the plugin, and CLAP says that happens on the thread that made it — so it
-    /// happens here, whichever order the two halves come apart in.
     pub fn bin(&self, slot: Box<Slot>) {
         let _ = self.jobs.send(Job::Bin(slot));
     }
 
-    /// What the plugin's parameters are and where they are now.
     pub fn params(&self, track: u16) -> Vec<Param> {
         let (reply, answer) = channel();
         if self.jobs.send(Job::Params { track, reply }).is_err() {
@@ -339,36 +799,23 @@ impl Desk {
         answer.recv().unwrap_or_default()
     }
 
-    /// The plugin's own settings, as an opaque blob to write into the project folder.
     pub fn save_state(&self, track: u16) -> Option<Vec<u8>> {
         let (reply, answer) = channel();
         self.jobs.send(Job::SaveState { track, reply }).ok()?;
         answer.recv().ok().flatten()
     }
 
-    /// Let any plugin that asked for it run its main thread callback. Called from the same
-    /// poll that drives the playhead, so about sixty times a second.
     pub fn tick(&self) {
         let _ = self.jobs.send(Job::Tick);
     }
 }
 
-/// One loaded plugin, as the plugin thread holds it. Nothing else may hold one: a plugin
-/// instance is `!Send` and this thread is the only one CLAP lets touch it.
-struct Live {
-    instance: PluginInstance<Weetbeats>,
-}
-
 fn run(inbox: Receiver<Job>, sample_rate: f64) {
-    // Entries are kept for the life of the app: unloading a `.clap` while an instance from it
-    // is alive is how a host crashes, and reloading Surge XT's entry per instance is slow.
-    let mut entries: Vec<(PathBuf, PluginEntry)> = Vec::new();
-    let mut live: Vec<Option<Live>> = (0..MAX_TRACKS).map(|_| None).collect();
-
+    let mut studio = Studio::new(sample_rate);
     while let Ok(job) = inbox.recv() {
         match job {
             Job::Scan(reply) => {
-                let _ = reply.send(scan_all(&mut entries));
+                let _ = reply.send(studio.scan());
             }
             Job::Load {
                 track,
@@ -377,54 +824,17 @@ fn run(inbox: Receiver<Job>, sample_rate: f64) {
                 state,
                 reply,
             } => {
-                // Whatever was there goes first, so a track never has two instances alive.
-                if let Some(slot) = live.get_mut(track as usize) {
-                    *slot = None;
-                }
-                let _ = reply.send(load_one(
-                    &mut entries,
-                    &mut live,
-                    track,
-                    &path,
-                    &id,
-                    state,
-                    sample_rate,
-                ));
+                let _ = reply.send(studio.load(track, &path, &id, state));
             }
-            Job::Unload(track) => {
-                if let Some(slot) = live.get_mut(track as usize) {
-                    *slot = None;
-                }
-            }
+            Job::Unload(track) => studio.unload(track),
             Job::Params { track, reply } => {
-                let params = live
-                    .get_mut(track as usize)
-                    .and_then(|one| one.as_mut())
-                    .map(|one| read_params(&mut one.instance))
-                    .unwrap_or_default();
-                let _ = reply.send(params);
+                let _ = reply.send(studio.params(track));
             }
             Job::SaveState { track, reply } => {
-                let blob = live
-                    .get_mut(track as usize)
-                    .and_then(|one| one.as_mut())
-                    .and_then(|one| save_state(&mut one.instance));
-                let _ = reply.send(blob);
+                let _ = reply.send(studio.save_state(track));
             }
-            Job::Bin(slot) => {
-                // Dropped right here, on the thread that made whatever is inside it.
-                drop(slot);
-            }
-            Job::Tick => {
-                for one in live.iter_mut().flatten() {
-                    let asked = one.instance.access_shared_handler(|shared| {
-                        shared.wants_callback.swap(false, Ordering::Relaxed)
-                    });
-                    if asked {
-                        one.instance.call_on_main_thread_callback();
-                    }
-                }
-            }
+            Job::Bin(slot) => studio.bin(slot),
+            Job::Tick => studio.tick(),
         }
     }
 }
@@ -534,7 +944,7 @@ fn load_one(
 
     let mut instance = PluginInstance::<Weetbeats>::new(
         |_| Shared::default(),
-        |_| (),
+        |_| MainThread::default(),
         entry,
         wanted.as_c_str(),
         &info,
@@ -574,7 +984,10 @@ fn load_one(
         .map_err(|e| format!("{name} would not start processing: {e}"))?;
 
     let params = read_params(&mut instance);
-    live[track as usize] = Some(Live { instance });
+    live[track as usize] = Some(Live {
+        instance,
+        window: false,
+    });
 
     Ok(Loaded {
         slot: Slot::new(processor.into(), &ports),

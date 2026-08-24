@@ -17,3 +17,6 @@ tauri-plugin-dialog = "2"
 serde.workspace = true
 rtrb.workspace = true
 cpal = "0.18"
+# Only to ask our own window what it is, so a plugin's floating window can be told to stay
+# above it. Must be the version Tauri itself uses, or the handle types will not match.
+raw-window-handle = "0.6"

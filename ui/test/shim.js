@@ -32,6 +32,11 @@ const fake = {
   // What each plugin track's controls are set to, which is the plugin's business and not
   // the project's.
   pluginParams: new Map(),
+  // Which plugin tracks have the plugin's own window up.
+  pluginWindows: new Set(),
+  // And which plugins have no window to open, which is the case the button has to say
+  // something useful about.
+  windowless: ["audio.vital.synth"],
 };
 
 // What the file picker "returns". A test sets this before clicking Add.
@@ -268,6 +273,19 @@ const handlers = {
     return { track, peaks: [] };
   },
   plugin_params: ({ id }) => (fake.pluginParams.get(id) ?? []).map((one) => ({ ...one })),
+  // The plugin's own window. Rust owns whether it is up, because a floating window can be
+  // shut by its own close box; a plugin without a GUI says so rather than doing nothing.
+  set_plugin_window: ({ id, open }) => {
+    const track = fake.tracks.get(id);
+    if (!track?.plugin) throw new Error("there is no plugin on that track");
+    if (fake.windowless.includes(track.plugin.id)) {
+      throw new Error("this plugin has no window of its own");
+    }
+    if (open) fake.pluginWindows.add(id);
+    else fake.pluginWindows.delete(id);
+    return open;
+  },
+  plugin_window_open: ({ id }) => fake.pluginWindows.has(id),
   set_plugin_param: ({ id, param, value }) => {
     const found = (fake.pluginParams.get(id) ?? []).find((one) => one.id === param);
     if (found) {

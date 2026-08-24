@@ -1512,6 +1512,38 @@ try {
   check("moving a control reaches the plugin", turned.param === 0 && turned.value === 1,
     JSON.stringify(turned));
 
+  // The plugin's own window: Surge XT's real interface, floating above ours.
+  await clearCalls();
+  check("the plugin's window starts shut",
+    (await page.locator("#pluginWindow").textContent()).trim() === "open its window",
+    await page.locator("#pluginWindow").textContent());
+  await page.locator("#pluginWindow").click();
+  await page.waitForFunction(() =>
+    document.getElementById("pluginWindow").textContent.includes("close"));
+  check("clicking it asks Rust to open one",
+    (await lastCall("set_plugin_window")).args.open === true,
+    JSON.stringify((await lastCall("set_plugin_window")).args));
+  check("and the button becomes the way to shut it",
+    await page.locator("#pluginWindow").evaluate((n) => n.classList.contains("on")));
+  await page.locator("#pluginWindow").click();
+  await page.waitForFunction(() =>
+    document.getElementById("pluginWindow").textContent.includes("open"));
+  check("and clicking again shuts it",
+    (await lastCall("set_plugin_window")).args.open === false);
+
+  // Rust is asked rather than remembered, because a floating window can be shut by its own
+  // close box without anything reaching us.
+  const pluggedTrack = (await lastCall("set_plugin_window")).args.id;
+  await page.evaluate((id) => window.__weetbeats_state.pluginWindows.add(id), pluggedTrack);
+  await page.locator("body").press("Escape");
+  await page.waitForSelector("#editor:visible");
+  await page.locator("#trackHeaders .track").last().locator(".wave").click();
+  await page.waitForFunction(() =>
+    document.getElementById("pluginWindow").textContent.includes("close"));
+  check("re-opening the editor asks Rust whether the window is still up",
+    await page.locator("#pluginWindow").evaluate((n) => n.classList.contains("on")));
+  await page.evaluate(() => window.__weetbeats_state.pluginWindows.clear());
+
   await page.locator("#paramFilter").fill("cutoff");
   await page.waitForFunction(() =>
     document.querySelectorAll("#pluginParams .knob").length === 1);
@@ -1521,6 +1553,32 @@ try {
 
   await page.locator("body").press("Escape");
   await page.waitForSelector("#editor:visible");
+
+  // --- a plugin with no window of its own says so, rather than doing nothing
+  await page.locator("#addPlugin").click();
+  await page.waitForSelector("#picker:visible");
+  await page.locator(".plugin-row", { hasText: "Vital" }).first().click();
+  await page.waitForFunction((was) =>
+    document.querySelectorAll("#trackHeaders .track").length === was + 2, rowsBefore);
+  await page.locator("#trackHeaders .track").last().locator(".wave").click();
+  await page.waitForSelector("#sound:visible");
+  await page.locator("#pluginWindow").click();
+  await page.waitForFunction(() =>
+    document.getElementById("status").textContent.includes("no window"));
+  check("a plugin with no window says so",
+    (await page.locator("#status").textContent()).includes("no window of its own"),
+    await page.locator("#status").textContent());
+  check("and the button stays the way it was",
+    (await page.locator("#pluginWindow").textContent()).trim() === "open its window");
+  // A complaint holds the status line for a few seconds, and while it is up a passing note
+  // stands aside for it. Let it lapse, or it swallows the notes the checks below wait for.
+  await page.waitForFunction(() => document.getElementById("status").textContent === "");
+  await page.locator("body").press("Escape");
+  await page.waitForSelector("#editor:visible");
+  await page.locator("#trackHeaders .track").last().locator(".tick.kill").click();
+  await page.waitForFunction((was) =>
+    document.querySelectorAll("#trackHeaders .track").length === was + 1, rowsBefore);
+
   await page.locator("#trackHeaders .track").last().locator(".tick.kill").click();
   await page.waitForFunction((was) =>
     document.querySelectorAll("#trackHeaders .track").length === was, rowsBefore);

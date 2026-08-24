@@ -27,6 +27,7 @@ use clack_extensions::params::{
     PluginMainThreadParams, PluginParams,
 };
 use clack_extensions::state::{PluginState, PluginStateImpl};
+use clack_extensions::timer::{HostTimer, PluginTimer, PluginTimerImpl, TimerId};
 use clack_plugin::events::event_types::{NoteOffEvent, NoteOnEvent, ParamValueEvent};
 use clack_plugin::events::Match;
 use clack_plugin::prelude::*;
@@ -37,18 +38,29 @@ use std::io::{Read, Write};
 /// write it and the main thread can read it, which is what a real plugin does too.
 pub struct Shared {
     level: AtomicU32,
+    /// How many times the host has called our timer. Read back out as a parameter, so a test
+    /// can watch it climb without needing a window to look at.
+    ticks: AtomicU32,
 }
 
 impl Default for Shared {
     fn default() -> Self {
         Shared {
             level: AtomicU32::new(DEFAULT_LEVEL.to_bits()),
+            ticks: AtomicU32::new(0),
         }
     }
 }
 
 const DEFAULT_LEVEL: f32 = 0.5;
 const LEVEL_PARAM: u32 = 0;
+/// A read-only parameter reporting how many times our timer has been called. Not a thing a
+/// real plugin would expose; it is how the test sees the host's timers working, which is
+/// otherwise only visible in a window repainting.
+const TICKS_PARAM: u32 = 1;
+/// How often we ask to be called. Faster than the host's own round, on purpose: a host is
+/// allowed to slow a timer down, and this is how the test finds out that ours does.
+const TIMER_MILLIS: u32 = 5;
 
 impl Shared {
     fn level(&self) -> f32 {
@@ -75,7 +87,8 @@ impl Plugin for TestTone {
             .register::<PluginAudioPorts>()
             .register::<PluginNotePorts>()
             .register::<PluginParams>()
-            .register::<PluginState>();
+            .register::<PluginState>()
+            .register::<PluginTimer>();
     }
 }
 
@@ -91,18 +104,47 @@ impl DefaultPluginFactory for TestTone {
     }
 
     fn new_main_thread<'a>(
-        _host: HostMainThreadHandle<'a>,
+        mut host: HostMainThreadHandle<'a>,
         shared: &'a Shared,
     ) -> Result<MainThread<'a>, PluginError> {
-        Ok(MainThread { shared })
+        // Ask the host to call us regularly. A real plugin does this so its window can
+        // repaint; this one does it so a test can check the host is calling.
+        let timer = host
+            .shared()
+            .get_extension::<HostTimer>()
+            .and_then(|timer| timer.register_timer(&mut host, TIMER_MILLIS).ok());
+        Ok(MainThread {
+            shared,
+            host,
+            timer,
+        })
     }
 }
 
 pub struct MainThread<'a> {
     shared: &'a Shared,
+    host: HostMainThreadHandle<'a>,
+    timer: Option<TimerId>,
 }
 
 impl<'a> PluginMainThread<'a, Shared> for MainThread<'a> {}
+
+impl PluginTimerImpl for MainThread<'_> {
+    fn on_timer(&mut self, _timer_id: TimerId) {
+        self.shared.ticks.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+impl Drop for MainThread<'_> {
+    fn drop(&mut self) {
+        // Give the timer back, so the host is not left calling a plugin that has gone.
+        let (Some(id), Some(timer)) = (self.timer, self.host.shared().get_extension::<HostTimer>())
+        else {
+            return;
+        };
+        let _ = timer.unregister_timer(&mut self.host, id);
+    }
+}
 
 /// One sounding note.
 #[derive(Clone, Copy)]
@@ -287,27 +329,41 @@ impl PluginNotePortsImpl for MainThread<'_> {
 
 impl PluginMainThreadParams for MainThread<'_> {
     fn count(&mut self) -> u32 {
-        1
+        2
     }
 
     fn get_info(&mut self, index: u32, writer: &mut ParamInfoWriter) {
-        if index != 0 {
-            return;
+        match index {
+            0 => writer.set(&ParamInfo {
+                id: ClapId::new(LEVEL_PARAM),
+                flags: ParamInfoFlags::IS_AUTOMATABLE,
+                cookie: Default::default(),
+                name: b"Level",
+                module: b"Tone",
+                min_value: 0.0,
+                max_value: 1.0,
+                default_value: DEFAULT_LEVEL as f64,
+            }),
+            1 => writer.set(&ParamInfo {
+                id: ClapId::new(TICKS_PARAM),
+                flags: ParamInfoFlags::IS_READONLY,
+                cookie: Default::default(),
+                name: b"Ticks",
+                module: b"Tone",
+                min_value: 0.0,
+                max_value: 1_000_000.0,
+                default_value: 0.0,
+            }),
+            _ => {}
         }
-        writer.set(&ParamInfo {
-            id: ClapId::new(LEVEL_PARAM),
-            flags: ParamInfoFlags::IS_AUTOMATABLE,
-            cookie: Default::default(),
-            name: b"Level",
-            module: b"Tone",
-            min_value: 0.0,
-            max_value: 1.0,
-            default_value: DEFAULT_LEVEL as f64,
-        });
     }
 
     fn get_value(&mut self, param_id: ClapId) -> Option<f64> {
-        (u32::from(param_id) == LEVEL_PARAM).then(|| self.shared.level() as f64)
+        match u32::from(param_id) {
+            LEVEL_PARAM => Some(self.shared.level() as f64),
+            TICKS_PARAM => Some(self.shared.ticks.load(Ordering::Relaxed) as f64),
+            _ => None,
+        }
     }
 
     fn value_to_text(
@@ -317,10 +373,11 @@ impl PluginMainThreadParams for MainThread<'_> {
         writer: &mut ParamDisplayWriter,
     ) -> std::fmt::Result {
         use std::fmt::Write;
-        if u32::from(param_id) != LEVEL_PARAM {
-            return Err(std::fmt::Error);
+        match u32::from(param_id) {
+            LEVEL_PARAM => write!(writer, "{}%", (value * 100.0).round() as i32),
+            TICKS_PARAM => write!(writer, "{} ticks", value as u32),
+            _ => Err(std::fmt::Error),
         }
-        write!(writer, "{}%", (value * 100.0).round() as i32)
     }
 
     fn text_to_value(&mut self, _param_id: ClapId, text: &std::ffi::CStr) -> Option<f64> {

@@ -18,6 +18,9 @@ clack-extensions = { version = "0.1", features = [
     "note-ports",
     "params",
     "state",
+    # A plugin's own window, and the timers it repaints that window on.
+    "gui",
+    "timer",
 ] }
 serde.workspace = true
 serde_json.workspace = true

@@ -191,7 +191,7 @@ for (const id of [
   "sound", "soundChip", "soundName", "closeSound", "hearSound", "soundBody", "soundWave",
   "soundEnv", "soundTrimKnobs", "soundShapeKnobs", "soundToneKnobs",
   "addPlugin", "picker", "closePicker", "rescan", "pluginFilter", "pluginList", "pickerNote",
-  "pluginBody", "pluginParams", "pluginLevelKnobs", "paramFilter",
+  "pluginBody", "pluginParams", "pluginLevelKnobs", "paramFilter", "pluginWindow",
 ]) {
   el[id] = document.getElementById(id);
 }
@@ -993,6 +993,7 @@ function removeTrack(id) {
   if (state.roll === id) closeRoll();
   if (state.sound === id) closeSound();
   plugins.params.delete(id);
+  plugins.windows.delete(id);
   drawTrackHeaders();
   resize();
 }
@@ -1941,8 +1942,11 @@ function openSound(track) {
   // is the first moment there is a window to measure.
   resize();
   // What a plugin's controls are is the plugin's to say, and it may have moved them since
-  // we last looked.
-  if (isPlugin(track)) refreshParams(track);
+  // we last looked — and so is whether its window is still up.
+  if (isPlugin(track)) {
+    refreshParams(track);
+    refreshWindow(track);
+  }
 }
 
 function closeSound() {
@@ -2062,6 +2066,7 @@ function drawSound() {
       slider.value = String(Math.round(TRACK_LEVEL.toSlider(value) * 1000));
     }
     if (read) read.textContent = TRACK_LEVEL.say(value);
+    drawWindowButton(state.sound);
     drawPluginEditor(state.sound);
     return;
   }
@@ -2265,6 +2270,7 @@ const plugins = {
   loading: false,
   filter: "",
   params: new Map(), // track id -> the plugin's parameters, as Rust last described them
+  windows: new Set(), // tracks whose plugin has its own window up
   settling: null, // the timer waiting for a drag to finish
 };
 
@@ -2368,6 +2374,51 @@ async function addPlugin(one) {
 const isPlugin = (track) => Boolean(trackById(track)?.plugin);
 
 /*
+ * The plugin's own window: Surge XT's real interface, floating above ours.
+ *
+ * Rust owns whether it is up, because a floating window belongs to the plugin and can be shut
+ * by its own close box without anything reaching us until the next time round. So this asks
+ * rather than remembers, whenever there is a reason to think the answer may have changed.
+ */
+async function refreshWindow(track) {
+  try {
+    const open = await invoke("plugin_window_open", { id: track });
+    showWindowState(track, open);
+  } catch (e) {
+    showError(e);
+  }
+}
+
+function showWindowState(track, open) {
+  if (open) plugins.windows.add(track);
+  else plugins.windows.delete(track);
+  if (state.sound === track) drawWindowButton(track);
+}
+
+function drawWindowButton(track) {
+  const open = plugins.windows.has(track);
+  el.pluginWindow.textContent = open ? "close its window" : "open its window";
+  el.pluginWindow.classList.toggle("on", open);
+}
+
+el.pluginWindow.addEventListener("click", async () => {
+  const track = state.sound;
+  if (track === null || !isPlugin(track)) return;
+  const wanted = !plugins.windows.has(track);
+  el.pluginWindow.disabled = true;
+  try {
+    showWindowState(track, await invoke("set_plugin_window", { id: track, open: wanted }));
+  } catch (e) {
+    // "This plugin has no window of its own" is the usual one, and is worth saying plainly
+    // rather than leaving a button that looks like it did nothing.
+    showError(e);
+    await refreshWindow(track);
+  } finally {
+    el.pluginWindow.disabled = false;
+  }
+});
+
+/*
  * A plugin's parameters, from Rust. Asked for when the editor opens and again when a drag
  * has settled, because a plugin can move its own controls — loading a patch moves all of
  * them at once — and what it says they are is the truth.
@@ -2396,7 +2447,10 @@ function setParam(track, param, value) {
     found.text = "";
   }
   clearTimeout(plugins.settling);
-  plugins.settling = setTimeout(() => refreshParams(track), PARAM_SETTLE);
+  plugins.settling = setTimeout(() => {
+    refreshParams(track);
+    refreshWindow(track);
+  }, PARAM_SETTLE);
 }
 
 /* One parameter: what it is called, a slider, and what the plugin calls the value. */

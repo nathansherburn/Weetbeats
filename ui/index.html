@@ -237,6 +237,14 @@
             <section class="sound-panel wide">
               <div class="panel-line">
                 <h2 class="head-label">the plugin</h2>
+                <!--
+                  The plugin's real interface, in a window of its own floating above this one.
+                  Not every plugin has one, and the only way to find out is to ask, so this is
+                  always offered and says so when the answer is no.
+                -->
+                <button id="pluginWindow" class="hear" title="The plugin's own interface">
+                  open its window
+                </button>
                 <input
                   id="paramFilter"
                   class="filter"

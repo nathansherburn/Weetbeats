@@ -4,12 +4,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use rtrb::{Consumer, Producer};
 use weetbeats_engine::command::{TrashBin, COMMAND_CAPACITY, TRASH_CAPACITY};
-use weetbeats_engine::plugins::{Desk, Found, Param};
+use weetbeats_engine::plugins::{Found, Param};
 use weetbeats_engine::sample::decode_file;
 use weetbeats_engine::{
     folder, Command, EngineNote, Pattern, Project, Sample, Shared, Trash, DEFAULT_STEPS,
@@ -17,6 +17,7 @@ use weetbeats_engine::{
 };
 
 use crate::audio;
+use crate::plugins::MainDesk;
 
 /// Must match the identifier in `tauri.conf.json`: it names the folder the app keeps its
 /// own things in.
@@ -81,7 +82,15 @@ pub struct AppState {
     stream_errors: Arc<AtomicU32>,
     /// The plugin thread. Every CLAP instrument lives on it, because a plugin instance is
     /// `!Send` and CLAP says one thread owns it.
-    desk: Desk,
+    /// The plugin studio, once there is a window to hang it off.
+    ///
+    /// Empty until [`attach`](AppState::attach) is called from Tauri's `setup`, because the
+    /// studio has to be pinned to the main thread and there is no way to name that thread —
+    /// or to reach it — before the app has started. Nothing plugin-shaped happens before then.
+    desk: OnceLock<MainDesk>,
+    /// What the audio device turned out to be running at, which is what a plugin is activated
+    /// for.
+    sample_rate: f64,
     /// What a scan turned up last, so the picker does not have to open every `.clap` on the
     /// machine each time it is asked. Cleared by asking for a fresh scan.
     plugins: Mutex<Option<Vec<Found>>>,
@@ -138,7 +147,8 @@ impl AppState {
             cache: Mutex::new(HashMap::new()),
             shared,
             stream_errors,
-            desk: Desk::start(audio.sample_rate as f64),
+            desk: OnceLock::new(),
+            sample_rate: audio.sample_rate as f64,
             plugins: Mutex::new(None),
             loaded: Mutex::new(HashMap::new()),
             last_folder: Mutex::new(None),
@@ -194,7 +204,12 @@ impl AppState {
         };
         while let Ok(item) = trash.pop() {
             if let Trash::Plugin(slot) = item {
-                self.desk.bin(slot);
+                match self.desk() {
+                    Some(desk) => desk.bin(slot),
+                    // Before the studio exists there are no plugins, so there is nothing a
+                    // slot could be holding a share of.
+                    None => drop(slot),
+                }
             }
         }
     }
@@ -205,6 +220,24 @@ impl AppState {
 
     // --- plugins -----------------------------------------------------------
 
+    /// Give the plugin studio its thread, and open whatever the project was already using.
+    ///
+    /// Called from Tauri's `setup`, on the main thread, which is the thread the studio has to
+    /// live on: a plugin's window is made of the platform's own widgets and macOS makes those
+    /// nowhere else. Until this runs there is nowhere to put a plugin, so the project's own
+    /// are loaded here rather than when it was opened.
+    pub fn attach(&self, app: tauri::AppHandle) {
+        if self.desk.set(MainDesk::new(app, self.sample_rate)).is_err() {
+            return;
+        }
+        self.push_project();
+    }
+
+    /// The studio, or nothing at all before the app has started.
+    fn desk(&self) -> Option<&MainDesk> {
+        self.desk.get()
+    }
+
     /// Every CLAP plugin on the machine. Scanned once and remembered: opening every `.clap`
     /// takes a moment, and they do not appear while the app is running.
     pub fn plugins(&self, again: bool) -> Vec<Found> {
@@ -212,7 +245,10 @@ impl AppState {
         if again {
             *cached = None;
         }
-        cached.get_or_insert_with(|| self.desk.scan()).clone()
+        let Some(desk) = self.desk() else {
+            return Vec::new();
+        };
+        cached.get_or_insert_with(|| desk.scan()).clone()
     }
 
     /// Put a plugin on a track: load it on the plugin thread, then hand the audio thread the
@@ -229,7 +265,10 @@ impl AppState {
                 .and_then(|p| p.state.as_ref())
                 .and_then(|relative| folder::load_plugin_state(&self.dir(), relative))
         };
-        let loaded = self.desk.load(track, Path::new(path), id, state)?;
+        let desk = self
+            .desk()
+            .ok_or_else(|| "the app is still starting up".to_string())?;
+        let loaded = desk.load(track, Path::new(path), id, state)?;
         self.send(Command::SetTrackPlugin {
             track,
             slot: Some(loaded.slot),
@@ -244,18 +283,53 @@ impl AppState {
     /// Take it off, both halves.
     pub fn unload_plugin(&self, track: u16) {
         self.send(Command::SetTrackPlugin { track, slot: None });
-        self.desk.unload(track);
+        if let Some(desk) = self.desk() {
+            desk.unload(track);
+        }
         self.loaded.lock().unwrap().remove(&track);
     }
 
+    /// Open or shut the plugin's own window — Surge XT's actual interface, floating above
+    /// ours. `Ok` with whether it is now up.
+    pub fn plugin_window(&self, track: u16, open: bool) -> Result<bool, String> {
+        let desk = self
+            .desk()
+            .ok_or_else(|| "the app is still starting up".to_string())?;
+        if !open {
+            desk.close_window(track);
+            return Ok(false);
+        }
+        let title = {
+            let project = self.project.lock().unwrap();
+            project
+                .track(track)
+                .and_then(|t| t.plugin.as_ref())
+                .map(|plugin| format!("{} — {}", plugin.name, self.name()))
+                .unwrap_or_else(|| "Weetbeats".into())
+        };
+        desk.open_window(track, title)?;
+        Ok(true)
+    }
+
+    /// Whether it has one up. Ours to remember: CLAP has no way of asking a plugin, and the
+    /// user can close a floating window without going anywhere near us.
+    pub fn plugin_window_open(&self, track: u16) -> bool {
+        self.desk().is_some_and(|desk| desk.window_open(track))
+    }
+
     pub fn plugin_params(&self, track: u16) -> Vec<Param> {
-        self.desk.params(track)
+        match self.desk() {
+            Some(desk) => desk.params(track),
+            None => Vec::new(),
+        }
     }
 
     /// Let any plugin that asked for it have its turn on the main thread. Called from the
     /// playhead poll, which runs whether or not anything is playing.
     pub fn tick_plugins(&self) {
-        self.desk.tick();
+        if let Some(desk) = self.desk() {
+            desk.tick();
+        }
     }
 
     /// Ask every plugin what it is set to and write it into the project folder.
@@ -279,9 +353,12 @@ impl AppState {
             }
             wanted
         };
+        let Some(desk) = self.desk() else {
+            return;
+        };
         let dir = self.dir();
         for (track, relative) in tracks {
-            if let Some(blob) = self.desk.save_state(track) {
+            if let Some(blob) = desk.save_state(track) {
                 let _ = folder::save_plugin_state(&dir, &relative, &blob);
             }
         }
@@ -320,7 +397,9 @@ impl AppState {
                 // And the desk lets go of anything it was holding for a slot that is not
                 // keeping it, so a plugin taken off by an undo really does go.
                 if self.loaded.lock().unwrap().remove(&track).is_some() {
-                    self.desk.unload(track);
+                    if let Some(desk) = self.desk() {
+                        desk.unload(track);
+                    }
                 }
             }
         }
@@ -358,6 +437,11 @@ impl AppState {
                     // Already there, still playing, keeping its patch. Nothing to do.
                     continue;
                 }
+                let Some(desk) = self.desk() else {
+                    // The app has not started yet, so there is nowhere to put a plugin. The
+                    // track stays silent for a moment; `attach` comes back round for it.
+                    continue;
+                };
                 // Loading Surge XT takes a moment, and a project with several of them takes
                 // several. Nothing else can start until they are in, because the notes have
                 // to have somewhere to go.
@@ -369,10 +453,7 @@ impl AppState {
                     .state
                     .as_ref()
                     .and_then(|relative| folder::load_plugin_state(&dir, relative));
-                match self
-                    .desk
-                    .load(track.id, Path::new(&reference.path), &reference.id, state)
-                {
+                match desk.load(track.id, Path::new(&reference.path), &reference.id, state) {
                     Ok(loaded) => {
                         self.send(Command::SetTrackPlugin {
                             track: track.id,

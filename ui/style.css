@@ -1179,6 +1179,18 @@ input.number.small-number {
   color: var(--text);
 }
 
+/* A plugin whose own window is up. */
+.hear.on {
+  background: var(--ok);
+  border-color: var(--ok);
+  color: #06301c;
+}
+
+.hear:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /*
  * Three panels: the file, the shape, and everything about the sound that is one number. The
  * file gets a row of its own because a waveform squeezed into a third of the window is a
@@ -1443,6 +1455,11 @@ input.number.small-number {
 .panel-line .filter {
   max-width: 240px;
   margin-left: auto;
+}
+
+/* Wide enough that "open" and "close" do not shuffle everything beside them. */
+.panel-line .hear {
+  min-width: 116px;
 }
 
 /*

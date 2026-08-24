@@ -303,6 +303,22 @@ fn test_plugin() -> std::path::PathBuf {
     } else {
         "libweetbeats_test_clap.so"
     };
+    // Built here, because a dev dependency gets compiled but its *dynamic* library is not
+    // refreshed before the tests run — so an edited plugin would quietly go on being the last
+    // one built. `tests/plugins.rs` says more about why.
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tools/test-clap/Cargo.toml");
+    let built = std::process::Command::new(env!("CARGO"))
+        .args(["build", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .expect("could not build the test plugin");
+    assert!(
+        built.status.success(),
+        "the test plugin would not build:\n{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+
     let here = std::env::current_exe().expect("no test binary");
     let built = here
         .parent()

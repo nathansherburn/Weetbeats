@@ -12,8 +12,7 @@ Open source, free forever.
 
 Stages 1 to 4 of [the build plan](docs/BUILD_PLAN.md) are done: a step sequencer, patterns
 strung together into a song, samples played across the keyboard, and a piano roll to write
-with. Stage 6 has started early: CLAP instruments play alongside the sampler, though without
-their own windows yet.
+with. Stage 6 has started early: CLAP instruments play alongside the sampler, windows and all.
 
 - Add instruments from the system file picker, or drop sounds on the window
 - Eight drums ship with it, and the picker opens on them the first time
@@ -30,9 +29,10 @@ their own windows yet.
 - Play, stop, tempo, and a playhead you can drag whether or not it is playing
 - Per track: volume, mute, solo, delete
 - Click a sound's waveform to shape it: envelope, pan, tune, level, and trimming the file
-- A track's sound can be a CLAP instrument — Surge XT and friends — instead of a file
+- A track's sound can be a CLAP instrument — Surge XT and friends — instead of a file, with
+  its own window
 
-Effects are stage 5. Plugins have their own window still to come; see below.
+Effects are stage 5. Plugins still run in this process rather than a child one; see below.
 
 ### Patterns and the song
 
@@ -160,6 +160,12 @@ second set of ours beside them would be two things fighting over one sound. What
 is how loud the track is. Surge XT has more controls than fit on a screen, so there is a
 filter above them.
 
+**Open its window** gives you the plugin's real interface — Surge XT as its own designers drew
+it — floating above Weetbeats. The window belongs to the plugin: it draws it, sizes it and
+closes it, and all we do is say which window it should stay above and what to call itself.
+Close it from either end and the button says so. Not every plugin has one, and the only way to
+find out is to ask, so the button is always there and tells you when the answer is no.
+
 What a plugin is set to is the plugin's business: it is asked for its settings when the
 project is saved, and they go in `plugins/` inside the project folder beside the samples. The
 plugin itself is not copied — it is installed software, often hundreds of megabytes, and the
@@ -174,11 +180,15 @@ pattern's fader and mute are applied to the notes it *sends*: a quieter fader se
 notes, a muted pattern sends none, and muting part way through lets go of what is ringing.
 Turning a fader down while a note sounds does not change that note; the next one is quieter.
 
-**Not there yet.** The plugin's own window — Surge XT's actual interface — is not hosted, so
-a patch is built out of the parameter list rather than by looking at it. And plugins run in
-this process rather than a child one, so a plugin that crashes takes the app with it. Both
-are the same piece of work: a native window for the plugin to draw into, and a process
-boundary to put it behind.
+**Not there yet.** Plugins run in this process rather than a child one, so a plugin that
+crashes takes the app with it. Hosting them in a child process is the rest of doing this
+properly.
+
+Opening a window is also what decides where the plugin studio lives. A window is made of the
+platform's own widgets and macOS only makes those on the process's first thread, so every
+plugin is loaded, asked about and destroyed there — the same thread the window is drawn on.
+The cost is that loading a big synth is a moment when nothing repaints. The alternative was a
+thread of our own that could never open a window at all.
 
 ## Projects
 

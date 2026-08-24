@@ -263,9 +263,13 @@ Plugin state is an opaque blob the plugin gives you. Store it base64 in `project
 
 **Where it got to**
 
-Done: scanning the standard folders plus `$CLAP_PATH`, loading instruments, notes in and audio out, parameters shown in the sound editor, state saved into `plugins/` in the project folder, and a message rather than a crash when a project asks for a plugin the machine does not have.
+Done: scanning the standard folders plus `$CLAP_PATH`, loading instruments, notes in and audio out, parameters shown in the sound editor, the plugin's own window floating above ours, state saved into `plugins/` in the project folder, and a message rather than a crash when a project asks for a plugin the machine does not have.
 
-Not done, and both halves of the same job: the plugin's own window, and the process boundary. Plugins run in-process, so one that crashes takes the app with it, and a patch is built out of the parameter list rather than by looking at the thing.
+Not done: the process boundary. Plugins run in-process, so one that crashes takes the app with it.
+
+The window is floating rather than embedded, as this plan suggested — the plugin makes and owns it, and the host only says which window it should stay above and what to call itself. Two host extensions come with it: `gui`, to hear that somebody closed the window, and `timer`, which is how a GUI made of somebody else's widgets gets to repaint. Timers are fired from the same sixty-a-second poll that drives the playhead, which also sets the floor on how short a period a plugin can actually get.
+
+Where the studio lives is decided by the window and nothing else. CLAP lets a host pick which thread it calls the main thread, but a window is made of the platform's own widgets and macOS only makes those on the process's first thread — so every plugin instance lives on Tauri's main thread. The cost is that loading a big synth is a moment when the window does not repaint. `plugins::Desk` still puts a studio on a thread of its own, which is what the tests use and what anything that will never open a window should.
 
 One design decision worth writing down. A plugin makes one sound for the whole track, so there is nothing on the way out to hang a per-pattern fader on the way a sampler voice can. The pattern's fader and mute are applied to the notes going *in* instead. A note that is already ringing does not follow a fader, which is the one place a plugin track behaves differently from a sampler one. CLAP note expressions would fix it for the plugins that support them; velocity works everywhere.
 
