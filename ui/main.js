@@ -571,16 +571,27 @@ function reorderable(row, { at, kind, height, onDrop }) {
       onDrop,
       moved: false,
     };
-    row.setPointerCapture(e.pointerId);
   });
 
   row.addEventListener("pointermove", (e) => {
     const drag = reordering;
     if (!drag || drag.row !== row) return;
+    // A press that ended somewhere else: there is no drag going on, whatever is still here.
+    if (!(e.buttons & 1)) {
+      reordering = null;
+      return;
+    }
     const dy = e.clientY - drag.startY;
     if (!drag.moved && Math.abs(dy) < REORDER_GRIP) return;
     if (!drag.moved) {
       drag.moved = true;
+      /*
+       * The pointer is caught here rather than on the press, and that is not a detail:
+       * capturing retargets the click at the end of it to whatever holds the capture, so
+       * capturing every press would take the click away from the name inside the row — and
+       * clicking a name is how you hear the sound.
+       */
+      row.setPointerCapture(e.pointerId);
       row.classList.add("lifting");
     }
     drag.to = Math.max(0, Math.min(drag.rows.length - 1, drag.from + Math.round(dy / height)));
@@ -1059,8 +1070,11 @@ function drawTrackHeaders() {
       const name = document.createElement("div");
       name.className = "name";
       name.textContent = track.name;
-      name.title = `${track.name} — click to hear it`;
-      name.addEventListener("click", () => invoke("audition", { id: track.id }));
+      name.title = `${track.name} — click to hear it and pick out its notes`;
+      name.addEventListener("click", () => {
+        invoke("audition", { id: track.id });
+        pickRow(track.id);
+      });
       row.append(name);
 
       // The picture of the sound is the way to the sound: clicking a track's name plays
@@ -2448,6 +2462,31 @@ function pickEverything() {
     }
   }
   pickNotes(all);
+}
+
+/*
+ * Everything one instrument plays in this pattern, picked out — and its row set as where a
+ * paste goes, as though you were pointing at it.
+ *
+ * Clicking a name is the quick way to take a whole part: click one to pick it up, `c`, then
+ * click another name and `v`, and the part has moved instrument. You hear the sound either
+ * way, because clicking a name has always meant "let me hear this".
+ */
+function pickRow(track) {
+  const pattern = openPatternNow();
+  if (!pattern) return;
+  const row = state.tracks.findIndex((one) => one.id === track);
+  if (row >= 0) state.overRow = row;
+  const pitched = Boolean(pattern.mix.get(track)?.pitched);
+  const found = [];
+  for (const note of pattern.notes.get(track) ?? []) {
+    // What plays is what you can see, the same rule a box dragged round them follows.
+    if (!pitched && note.pitch !== DEFAULT_PITCH) continue;
+    found.push({ track, note });
+  }
+  pickNotes(found);
+  // An empty row is a fine thing to have pointed at: it is where a paste is about to land.
+  if (!found.length) showNote(`${trackById(track)?.name ?? "that row"} — v pastes into it`);
 }
 
 /* Rub the lot out, a lane at a time. */
@@ -3903,7 +3942,9 @@ function songPoint(event) {
   const rect = el.lanes.getBoundingClientRect();
   return {
     x: Math.max(0, event.clientX - rect.left + songLeft()),
-    y: Math.max(0, Math.min(state.patterns.length * LANE, event.clientY - rect.top)),
+    // Clamped to the lanes, so a box started in the empty space below them still has its
+    // corner where the last lane ends rather than somewhere there is nothing to pick out.
+    y: Math.max(0, Math.min(Math.max(LANE, state.patterns.length * LANE), event.clientY - rect.top)),
   };
 }
 
@@ -4217,6 +4258,43 @@ el.lanes.addEventListener("pointerleave", () => {
   el.lanes.style.cursor = "default";
   if (!songDrag) state.overStep = null;
 });
+
+/*
+ * A box round some blocks can be started in the empty space under the last lane, which is
+ * where there is room to start one without landing on a block.
+ *
+ * That space is not the canvas — the lanes are only as tall as there are patterns — so the
+ * press lands on the scrolling area behind them and is picked up here instead. Everything
+ * after that is the same drag: `songPoint` clamps a corner to the song, and the box knows
+ * nothing about which element it started on.
+ */
+el.songScroll.addEventListener("pointerdown", (e) => {
+  if (!e.shiftKey || e.button !== 0 || state.open !== null) return;
+  if (e.target === el.lanes || e.target === el.scrubber) return;
+  el.songScroll.setPointerCapture(e.pointerId);
+  const corner = songPoint(e);
+  songDrag = { mode: "box" };
+  state.marquee = { where: "song", from: corner, to: corner };
+  state.needsDraw = true;
+});
+
+el.songScroll.addEventListener("pointermove", (e) => {
+  // Only this drag: one that started on the lanes is captured by the canvas and handled
+  // there, and its moves bubble through here on the way past.
+  if (!el.songScroll.hasPointerCapture(e.pointerId)) {
+    const boxing = e.shiftKey && state.open === null && e.target !== el.lanes;
+    el.songScroll.style.cursor = boxing ? "crosshair" : "";
+    return;
+  }
+  followEdge(el.songScroll, e, "x", songDragTo);
+  songDragTo(e);
+});
+
+const dropFromBelow = (e) => {
+  if (el.songScroll.hasPointerCapture(e.pointerId)) dropBlock();
+};
+el.songScroll.addEventListener("pointerup", dropFromBelow);
+el.songScroll.addEventListener("pointercancel", dropFromBelow);
 
 // --- snap and zoom --------------------------------------------------------
 

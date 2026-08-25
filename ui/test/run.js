@@ -2517,6 +2517,97 @@ try {
   check("and letting go did not play the sound it was over",
     (await calls("audition")).length === 0);
 
+  // --- clicking an instrument's name takes its whole row
+  //
+  // The quick way to move a part: click a name to pick it up, copy, click another name,
+  // paste. Which also means an empty row is a fine thing to click, because that is where
+  // the paste is about to land.
+  if (!(await page.locator("#editor").isVisible())) {
+    await rows.first().click();
+    await page.waitForSelector("#editor:visible");
+  }
+  await page.keyboard.press("a");
+  await page.keyboard.press("Backspace");
+  await page.waitForFunction(() => {
+    const open = window.__weetbeats_state.patterns.find(
+      (one) => one.name === document.getElementById("patternTab").textContent);
+    return open && open.lanes.every((l) => l.notes.length === 0);
+  });
+  const nowGrid = await page.locator("#grid").boundingBox();
+  const nowIds = await page.evaluate(() => [...window.__weetbeats_state.tracks.keys()]);
+  const laneNow = (track) =>
+    page.evaluate((id) => {
+      const lane = window.__weetbeats_state.patterns
+        .find((p) => p.name === document.getElementById("patternTab").textContent)
+        .lanes.find((l) => l.track === id);
+      return lane ? lane.notes : [];
+    }, track);
+  for (const step of [0, 4, 8]) {
+    await page.mouse.click(nowGrid.x + step * CELL + CELL / 2, nowGrid.y + ROW / 2);
+  }
+  await page.waitForFunction((id) => {
+    const p = window.__weetbeats_state.patterns.find(
+      (one) => one.name === document.getElementById("patternTab").textContent);
+    const lane = p.lanes.find((l) => l.track === id);
+    return lane && lane.notes.length === 3;
+  }, nowIds[0]);
+
+  await clearCalls();
+  await page.locator("#trackHeaders .track").nth(0).locator(".name").click();
+  await page.waitForFunction(() =>
+    document.getElementById("status").textContent.includes("picked out"));
+  check("clicking an instrument's name picks out its whole row",
+    (await page.locator("#status").textContent()).startsWith("3 notes picked out"),
+    await page.locator("#status").textContent());
+  check("and you still hear it, which is what clicking a name has always meant",
+    (await lastCall("audition")).args.id === nowIds[0],
+    JSON.stringify((await lastCall("audition")).args));
+
+  await page.keyboard.press("c");
+  await page.waitForFunction(() =>
+    document.getElementById("status").textContent.includes("copied"));
+  await clearCalls();
+  await page.locator("#trackHeaders .track").nth(1).locator(".name").click();
+  await page.waitForFunction(() =>
+    document.getElementById("status").textContent.includes("pastes into it"));
+  check("clicking an empty row's name says it is where a paste would go",
+    (await page.locator("#status").textContent()).includes("v pastes into it"),
+    await page.locator("#status").textContent());
+  await page.keyboard.press("v");
+  await page.waitForFunction((id) => {
+    const p = window.__weetbeats_state.patterns.find(
+      (one) => one.name === document.getElementById("patternTab").textContent);
+    const lane = p.lanes.find((l) => l.track === id);
+    return lane && lane.notes.length === 3;
+  }, nowIds[1]);
+  check("and pasting after clicking a name lands on that instrument",
+    (await lastCall("edit_notes")).args.track === nowIds[1],
+    JSON.stringify((await lastCall("edit_notes")).args));
+  check("with the part it came from still there", (await laneNow(nowIds[0])).length === 3);
+
+  // --- a box round blocks can start in the empty space below the lanes
+  await page.locator("#songMode").click();
+  await page.waitForSelector("#song:visible");
+  await page.keyboard.press("Escape");
+  const blocksNow = (await song()).length;
+  check("there are blocks to pick out", blocksNow > 0, String(blocksNow));
+  const belowLanes = await page.locator("#lanes").boundingBox();
+  await page.keyboard.down("Shift");
+  // Well below the last lane, where there is room to start a box without landing on a block.
+  await page.mouse.move(belowLanes.x + 400, belowLanes.y + belowLanes.height + 40);
+  await page.mouse.down();
+  await page.mouse.move(belowLanes.x + 2, belowLanes.y + 2, { steps: 6 });
+  await page.mouse.up();
+  await page.keyboard.up("Shift");
+  await page.waitForFunction(() =>
+    document.getElementById("status").textContent.includes("blocks picked out"));
+  check("a box started below the lanes picks the blocks it is dragged over",
+    (await page.locator("#status").textContent()).includes("blocks picked out"),
+    await page.locator("#status").textContent());
+  check("and it drew no blocks on the way", (await song()).length === blocksNow,
+    JSON.stringify(await song()));
+  await page.keyboard.press("Escape");
+
   check("no page errors", errors.length === 0, JSON.stringify(errors));
 
   await browser.close();

@@ -30,6 +30,7 @@ with. Stage 6 has started early: CLAP instruments play alongside the sampler, wi
 - An instrument's row in a pattern shows its notes instead of boxes; click it for the roll
 - Shift drag a box round notes in either editor, or round blocks in the song, then move
   them, copy them or rub them out together — cmd-C, cmd-V, cmd-D, cmd-A and the arrows
+- Or click an instrument's name to take its whole row, and click another name to paste it
 - Copy a part off one instrument and paste it onto another, in the same pattern or another
 - Click a track's name to hear it, or a key in the roll to hear that note
 - Play, stop, tempo, and a playhead you can drag whether or not it is playing
@@ -139,7 +140,10 @@ right hand end, so the moment it reaches the edge there is nowhere left to pull 
 ### Picking notes out
 
 **Shift and drag a box** round some notes, in the roll or in the step grid, and they are
-picked out. Shift clicking one note puts it in or takes it out. Then:
+picked out. Shift clicking one note puts it in or takes it out, and **clicking an
+instrument's name** takes its whole row at once — which is the quick way to move a part:
+click a name, copy, click another name, paste. You hear the sound either way, because
+clicking a name has always meant "let me hear this". Then:
 
 - Drag any one of them and they all move, keeping the shape they were picked out in
 - Hold alt and drag to leave the originals and pull copies off them
@@ -151,7 +155,9 @@ picked out. Shift clicking one note puts it in or takes it out. Then:
 
 The same box works in the **song**: shift drag round some blocks and then move them together,
 alt drag copies off them, nudge them along with the arrows, and cut, copy, paste, duplicate
-and delete them the same way. Paste puts them down at the bar you are pointing at.
+and delete them the same way. Paste puts them down at the bar you are pointing at. It can be
+started in the empty space below the last lane, which is where there is room to start one
+without landing on a block.
 
 Pasting is how a part gets from one instrument to another. What is copied is the notes and
 how far down the rows they sat, not which instrument they came out of, so it lands wherever
@@ -176,7 +182,8 @@ boxes, and comes back the moment you switch it again. Nothing is deleted either 
 
 ### Shaping a sound
 
-Click a track's name and you hear it. Click its **waveform** and you get the sound editor, a
+Click a track's name and you hear it — and its notes in this pattern are picked out, ready
+to be copied onto another instrument. Click its **waveform** and you get the sound editor, a
 fourth view over the pattern:
 
 - **The file**, with the part a note actually reads picked out in the pattern's colour. Drag
