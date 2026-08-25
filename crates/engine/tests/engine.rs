@@ -762,6 +762,83 @@ fn a_fader_moved_mid_note_takes_the_note_with_it() {
     );
 }
 
+/// The pattern's own mute, from the speaker on its row in the panel. A different switch from
+/// the one on a track's row: this one is the pattern, so everything in it goes quiet at once
+/// and the per-track switches have nothing to say about it.
+#[test]
+fn muting_a_pattern_silences_everything_in_it() {
+    fn rig_with(muted: bool) -> f32 {
+        let mut rig = Rig::new(120.0, 16);
+        for id in 0..2u16 {
+            track_with_gain(&mut rig, id, dc_sample(6000), 0.2);
+            rig.send(Command::SetNote {
+                pattern: 0,
+                track: id,
+                note: note(0),
+            });
+        }
+        // One of them soloed, to show the pattern's mute is not something solo can argue
+        // with: a soloed track in a silenced pattern is still silent.
+        rig.send(Command::SetPatternSoloed {
+            pattern: 0,
+            track: 1,
+            soloed: true,
+        });
+        rig.send(Command::MutePattern { pattern: 0, muted });
+        rig.send(Command::SetPlaying(true));
+        // The fader slides rather than jumping, so read the settled level.
+        let out = rig.render(3000);
+        peak(&out[2000 * 2..])
+    }
+
+    assert!(
+        rig_with(false) > 0.1,
+        "the pattern should have been audible"
+    );
+    assert!(
+        rig_with(true) < 0.01,
+        "a silenced pattern was still heard: {}",
+        rig_with(true)
+    );
+}
+
+/// And it takes what is already sounding down with it, the same as any other mute, so
+/// pressing the speaker while the song runs does what it looks like it does.
+#[test]
+fn muting_a_pattern_fades_what_it_is_already_playing() {
+    let mut rig = Rig::new(120.0, 16);
+    track_with_gain(&mut rig, 0, dc_sample(200_000), 1.0);
+    rig.send(Command::SetNote {
+        pattern: 0,
+        track: 0,
+        note: note(0),
+    });
+    rig.send(Command::SetPlaying(true));
+    let out = rig.render_chunked(3000, 256);
+    assert!(peak(&out[2000 * 2..]) > 0.5, "nothing was ringing to mute");
+
+    rig.send(Command::MutePattern {
+        pattern: 0,
+        muted: true,
+    });
+    let out = rig.render_chunked(3000, 256);
+    assert!(
+        peak(&out[2000 * 2..]) < 0.01,
+        "silencing the pattern left what it had already started ringing"
+    );
+
+    // And it comes back, so the speaker is a switch rather than a way of deleting a part.
+    rig.send(Command::MutePattern {
+        pattern: 0,
+        muted: false,
+    });
+    let out = rig.render_chunked(3000, 256);
+    assert!(
+        peak(&out[2000 * 2..]) > 0.5,
+        "the pattern did not come back when it was unmuted"
+    );
+}
+
 /// A mute has to take what is already sounding down with it, or it is not a mute. The fader
 /// slides rather than jumping while the transport is running, for the same reason.
 #[test]

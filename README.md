@@ -19,12 +19,19 @@ with. Stage 6 has started early: CLAP instruments play alongside the sampler, wi
 - Click or drag across the boxes to paint a beat; right click rubs one out
 - Set how many boxes a pattern has, one step at a time
 - Patterns down the left: click one to pick it out, double click a block to edit it
+- Drag a pattern's row, or an instrument's, to move it up or down the list
+- A speaker on a pattern's row silences it wherever it plays, without deleting anything
 - Song view: draw a pattern anywhere, drag it about, drag its ends to say how long it plays
 - Snap, zoom (buttons or a trackpad pinch) in the song and in the piano roll
+- Drag a note or a block into the edge of the window and the view follows
 - A colour per pattern, lighter while it sounds
 - Undo and redo, with a drag counted as one step
 - Any track can be a pitched instrument instead of a drum, with a piano roll to write in
 - An instrument's row in a pattern shows its notes instead of boxes; click it for the roll
+- Shift drag a box round notes in either editor, or round blocks in the song, then move
+  them, copy them or rub them out together — cmd-C, cmd-V, cmd-D, cmd-A and the arrows
+- Or click an instrument's name to take its whole row, and click another name to paste it
+- Copy a part off one instrument and paste it onto another, in the same pattern or another
 - Click a track's name to hear it, or a key in the roll to hear that note
 - Play, stop, tempo, and a playhead you can drag whether or not it is playing
 - Per track: volume, mute, solo, delete
@@ -45,6 +52,17 @@ of a four step pattern, thirty two of a thirty two step one, nothing padded out 
 it did not ask for — and then it is its own length: drag its right hand end out and the
 pattern **repeats** to fill it, drag it in and the pattern is **cut off** part way through.
 Drag the middle to slide it along, drag the left hand end to change where it comes in.
+
+**Drag a pattern's row** up or down the panel to move it, which is also which lane it is in
+the song. Only the order moves: the song says which pattern plays where by id, so not a
+block shifts, and a pattern nobody has given a colour keeps the one it was being drawn in
+rather than swapping with its new neighbours.
+
+The speaker on a pattern's row in the panel **silences that pattern**, wherever it plays: turn
+the hats off and every block of them in the song goes quiet at once, and its blocks go faint
+rather than away so you can still see where the part is. That is a different switch from the
+mute on a track's row inside a pattern, which is one track in one pattern. Nothing is deleted
+either way, which is the point: it is how you listen to a song without a part.
 
 A block starts wherever the **snap** puts it, which is a bar by default and anything from one
 step up. It is not tied to its pattern's own grid, so a thirty two step pattern can start on
@@ -85,6 +103,10 @@ the note is. Press the little keyboard on a track and it becomes an instrument i
 pitched across the keyboard, faster for higher notes and slower for lower ones, and a note
 **stops when it ends**. Press it again and it is a drum again.
 
+Instruments can be **dragged up and down their column** too, and the boxes beside them move
+with them: a track's notes are kept under its id rather than its row, so reordering is only
+which row a sound is drawn on.
+
 That switch belongs to the **pattern**, not to the track — and so does the rest of the row:
 how loud, muted, soloed. All four are decisions about the part, not about the sound. The same
 bass can hold a rhythm down as a row of boxes in one pattern and play a melody in the next,
@@ -111,6 +133,46 @@ right click to rub it out. Everything you touch plays as you touch it. How hard 
 hit is the lane underneath — drag it. Drawing **past the end** of the pattern makes the
 pattern longer, which is how one bar becomes two.
 
+Drag either kind of thing — a note's end, a block's end — into the edge of the window and the
+view **scrolls to follow**. Stretching is the case that needs it: what you are dragging is the
+right hand end, so the moment it reaches the edge there is nowhere left to pull it to.
+
+### Picking notes out
+
+**Shift and drag a box** round some notes, in the roll or in the step grid, and they are
+picked out. Shift clicking one note puts it in or takes it out, and **clicking an
+instrument's name** takes its whole row at once — which is the quick way to move a part:
+click a name, copy, click another name, paste. You hear the sound either way, because
+clicking a name has always meant "let me hear this". Then:
+
+- Drag any one of them and they all move, keeping the shape they were picked out in
+- Hold alt and drag to leave the originals and pull copies off them
+- The arrows nudge them, a step or a semitone at a time, a bar or an octave with shift
+- cmd-C copies, cmd-X cuts, cmd-V pastes, cmd-D duplicates, cmd-A takes the lot, delete
+  rubs them out — or the bare letters `c`, `x`, `v`, `d` and `a`, for a hand already on the
+  canvas
+- Escape lets go of them
+
+The same box works in the **song**: shift drag round some blocks and then move them together,
+alt drag copies off them, nudge them along with the arrows, and cut, copy, paste, duplicate
+and delete them the same way. Paste puts them down at the bar you are pointing at. It can be
+started in the empty space below the last lane, which is where there is room to start one
+without landing on a block.
+
+Pasting is how a part gets from one instrument to another. What is copied is the notes and
+how far down the rows they sat, not which instrument they came out of, so it lands wherever
+you are: **in the roll you have open**, or on **whichever row you are pointing at** in the
+step grid. Copy a drum part, point at the bass and paste, and the bass plays that rhythm at
+middle C; copy a line out of one instrument's roll, open another instrument's roll, and press
+v. It works into another pattern too, since the clipboard outlives the pattern it came from. Pasting straight back where it came from would do nothing
+at all, so there it lands after itself instead — copy a bar, press v, and there is the next
+one.
+
+Notes only show where they can be seen, and picking them out follows the same rule: a box
+dragged over a row of boxes takes the notes a box can mean, and one dragged over a piano roll
+row takes whatever is in it. Paste a melody onto a row of boxes and it says how many of the
+notes it put there are only visible in the roll.
+
 A box in the step grid *is* a note in the roll: middle C, one step long. There is no
 converting between them and nothing to keep in step.
 
@@ -120,7 +182,8 @@ boxes, and comes back the moment you switch it again. Nothing is deleted either 
 
 ### Shaping a sound
 
-Click a track's name and you hear it. Click its **waveform** and you get the sound editor, a
+Click a track's name and you hear it — and its notes in this pattern are picked out, ready
+to be copied onto another instrument. Click its **waveform** and you get the sound editor, a
 fourth view over the pattern:
 
 - **The file**, with the part a note actually reads picked out in the pattern's colour. Drag
@@ -154,19 +217,24 @@ Weetbeats looks in the standard places — `~/Library/Audio/Plug-Ins/CLAP` and
 anything in `$CLAP_PATH`. Effects are listed but greyed out: instruments first, effects with
 stage 5.
 
-Clicking a plugin track's plug opens the sound editor onto **the plugin's own controls**
-rather than ours. A synth has an envelope, a tuning and a panning inside it already, and a
-second set of ours beside them would be two things fighting over one sound. What stays ours
-is how loud the track is. Surge XT has more controls than fit on a screen, so there is a
-filter above them.
+Clicking a plugin track's plug opens **the plugin's own window** — Surge XT as its own
+designers drew it — and leaves you where you were. That is the thing you came for, and a
+screen of ours whose whole job was a button that opens it was a step in the way. The plug is
+lit while the window is up, and the same press puts it away again.
 
-**Open its window** gives you the plugin's real interface — Surge XT as its own designers drew
-it. Which window that is depends on the plugin. A few make their own, and then all we do is
+Shift click it for what *we* have to say about a plugin track: how loud the track is, and the
+plugin's parameters as a list. A synth has an envelope, a tuning and a panning inside it
+already, and a second set of ours beside them would be two things fighting over one sound, so
+what stays ours is the level. Surge XT has more controls than fit on a screen, so there is a
+filter above them. A plugin with **no window of its own** lands you there anyway, because then
+that list is the only way in.
+
+Which window a plugin gets depends on the plugin. A few make their own, and then all we do is
 say which window it should stay above and what to call itself. Most, Surge XT among them, have
 a view and no window: everything built with JUCE is one. Those get a window of ours, made the
 size the plugin asks for, resized when its own zoom control asks again, and taken down when
-either end closes it. Either way the button says whether it is up. Not every plugin has an
-interface at all, and the only way to find out is to ask, so the button is always there and
+either end closes it. Either way the plug says whether it is up. Not every plugin has an
+interface at all, and the only way to find out is to ask, so the plug is always there and
 tells you when the answer is no.
 
 What a plugin is set to is the plugin's business: it is asked for its settings when the
@@ -358,10 +426,18 @@ Renaming the project is the one edit outside the history: the name is the folder
 `project.json`'s, and a step back that left the folder where it was would be a step back in
 name only.
 
+### The whole Edit menu is ours
+
 Undo and redo are in the Edit menu, and that is not a detail — on macOS a menu item's key
 equivalent is handled before the window sees the key, so a standard Edit menu would swallow
-cmd-Z and hand it to the webview, which would undo typing and nothing else. Ours emit an
-event; cut, copy, paste and select all are still the standard items.
+cmd-Z and hand it to the webview, which would undo typing and nothing else.
+
+The same is true of cut, copy, paste and select all, and for the same reason they are ours
+too: cmd-C and cmd-V have to reach the piano roll, and the standard items would eat them
+first. Every item emits an event instead, and the window decides what it means from what has
+the focus — the notes or blocks picked out, or the text field being typed in. The cost is
+that copying and pasting *text* is then ours to do as well, which is a thing the webview may
+refuse; when it does, the status line says so rather than leaving a key that did nothing.
 
 ### The meter is in decibels, and it is a transform
 

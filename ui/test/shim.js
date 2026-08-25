@@ -244,6 +244,13 @@ const handlers = {
   // away again when it is back to how a new pattern starts.
   set_pattern_gain: ({ pattern: id, track, gain }) => setMix(id, track, { gain }),
   set_pattern_muted: ({ pattern: id, track, muted }) => setMix(id, track, { muted }),
+  // The pattern's own mute, which is not one of the mixer's: it belongs to the pattern
+  // rather than to a track in it, so it silences the lot wherever the pattern plays.
+  mute_pattern: ({ id, muted }) => {
+    const p = pattern(id);
+    if (p) p.muted = muted;
+    return null;
+  },
   set_pattern_soloed: ({ pattern: id, track, soloed }) => setMix(id, track, { soloed }),
   set_pattern_pitched: ({ pattern: id, track, pitched }) => setMix(id, track, { pitched }),
 
@@ -334,6 +341,39 @@ const handlers = {
     p.lanes = p.lanes.filter((one) => one.notes.length);
     return null;
   },
+  /*
+   * Notes out and notes in, in one trip: what moving, pasting, cutting and rubbing out a
+   * whole set of them all arrive as. Out before in, which is what makes a move safe.
+   */
+  edit_notes: ({ pattern: id, track, remove, add }) => {
+    const p = pattern(id);
+    if (!p) return { fits: false, steps: 0 };
+    const wanted = add.reduce((most, n) => Math.max(most, n.step + Math.max(1, n.length)), 0);
+    if (wanted > p.steps) p.steps = Math.max(1, Math.min(MAX_STEPS, wanted));
+    const l = lane(p, track);
+    for (const at of remove) {
+      l.notes = l.notes.filter((n) => !(n.step === at.step && n.pitch === at.pitch));
+    }
+    let fits = true;
+    for (const one of add) {
+      if (one.step >= p.steps) {
+        fits = false;
+        continue;
+      }
+      const note = {
+        step: one.step,
+        pitch: one.pitch,
+        velocity: Math.max(1, Math.min(127, one.velocity)),
+        length: Math.max(1, Math.min(one.length, p.steps - one.step)),
+      };
+      const was = l.notes.findIndex((n) => n.step === note.step && n.pitch === note.pitch);
+      if (was >= 0) l.notes[was] = note;
+      else if (l.notes.length >= MAX_NOTES) fits = false;
+      else l.notes.push(note);
+    }
+    p.lanes = p.lanes.filter((one) => one.notes.length);
+    return { fits, steps: p.steps };
+  },
   move_note: ({ pattern: id, track, at, to }) => {
     const p = pattern(id);
     if (!p || to.step >= p.steps) return false;
@@ -344,6 +384,34 @@ const handlers = {
     found.pitch = to.pitch;
     found.length = Math.max(1, Math.min(found.length, p.steps - to.step));
     return true;
+  },
+
+  /*
+   * Reordering. Only the order: a pattern's id is what the song refers to and what its slot
+   * in the engine is, so nothing else moves — and every pattern keeps the colour it was
+   * being drawn in, which for one nobody has picked was its place in the list.
+   */
+  move_pattern: ({ id, to }) => {
+    const at = fake.patterns.findIndex((p) => p.id === id);
+    const landing = Math.min(to, fake.patterns.length - 1);
+    if (at < 0 || landing === at) return arrangement();
+    fake.patterns.forEach((p, place) => {
+      if (p.colour === undefined || p.colour === null) p.colour = place;
+    });
+    const [one] = fake.patterns.splice(at, 1);
+    fake.patterns.splice(landing, 0, one);
+    return arrangement();
+  },
+  move_track: ({ id, to }) => {
+    const order = [...fake.tracks.values()];
+    const at = order.findIndex((t) => t.id === id);
+    const landing = Math.min(to, order.length - 1);
+    if (at >= 0 && landing !== at) {
+      const [one] = order.splice(at, 1);
+      order.splice(landing, 0, one);
+      fake.tracks = new Map(order.map((t) => [t.id, t]));
+    }
+    return order.map((t) => t.id);
   },
 
   add_pattern: () => {
@@ -441,6 +509,35 @@ const handlers = {
       on: true,
     });
   },
+  /*
+   * Blocks out and blocks in, in one trip: what moving, duplicating, pasting and rubbing out
+   * a whole set of them all arrive as. Out before in, the same as the notes.
+   */
+  edit_placements: ({ remove, add }) => {
+    for (const one of remove) {
+      const found = fake.song.find(
+        (was) => was.pattern === one.pattern && one.step >= was.step && one.step < was.step + Math.max(1, was.length),
+      );
+      if (found) fake.song = fake.song.filter((was) => was !== found);
+    }
+    for (const one of add) {
+      if (!pattern(one.pattern)) continue;
+      const length = Math.max(1, one.length);
+      if (one.step + length > MAX_SONG_BARS * 16 || fake.song.length >= 1024) continue;
+      // Anything of the same pattern it lands on makes way for it.
+      fake.song = fake.song.filter(
+        (was) =>
+          !(
+            was.pattern === one.pattern &&
+            was.step < one.step + length &&
+            one.step < was.step + Math.max(1, was.length)
+          ),
+      );
+      fake.song.push({ step: one.step, pattern: one.pattern, length });
+    }
+    sortSong();
+    return fake.song;
+  },
   clear_song_bar: ({ bar }) => {
     const from = bar * 16;
     fake.song = fake.song.filter((one) => one.step < from || one.step >= from + 16);
@@ -527,6 +624,7 @@ const EDITS = {
   remove_track: "tracks",
   set_pattern_gain: "gain",
   set_pattern_muted: "mute",
+  mute_pattern: "pattern mute",
   set_pattern_soloed: "solo",
   set_pattern_pitched: "pitched",
   set_voicing: "voicing",
@@ -535,9 +633,12 @@ const EDITS = {
   set_note: "notes",
   clear_note: "notes",
   move_note: "notes",
+  edit_notes: "notes",
   add_pattern: "patterns",
   duplicate_pattern: "patterns",
   remove_pattern: "patterns",
+  move_pattern: "order",
+  move_track: "order",
   rename_pattern: "name",
   set_pattern_colour: "colour",
   set_pattern_steps: "length",
@@ -545,6 +646,7 @@ const EDITS = {
   move_placement: "song",
   resize_placement: "song",
   clear_song_bar: "song",
+  edit_placements: "song",
   set_bpm: "tempo",
   // Renaming the project is not in here, because it is not in Rust either: the name is the
   // folder's, and a step back that did not rename the folder would be a step back in name
@@ -616,6 +718,12 @@ window.__weetbeats_menu = (what) => {
   }
   if (what === "trouble") {
     listeners.get("trouble")?.({ payload: "the disk said no" });
+    return;
+  }
+  // The Edit menu's own items. On a Mac the menu bar gets their keys before the window
+  // does, so this is how they really arrive: as an event, not as a keydown.
+  if (["cut", "copy", "paste", "duplicate", "select_all"].includes(what)) {
+    listeners.get("edit")?.({ payload: what });
   }
 };
 

@@ -4,11 +4,12 @@
 //! things every Mac app keeps in the same place, and a music app has better uses for the
 //! space along the top.
 //!
-//! Undo and redo are here too, and they have to be: on macOS a menu item's key equivalent
-//! is handled before the window sees the key, so a standard Edit menu would swallow cmd-Z
-//! and give it to the webview, which would undo typing in a text field and nothing else.
-//! Ours emit an event instead, and the cut, copy, paste and select all items are the
-//! standard ones, so the one text field in the app still works.
+//! The whole Edit menu is ours, and it has to be: on macOS a menu item's key equivalent is
+//! handled before the window ever sees the key, so the standard items would swallow cmd-Z,
+//! cmd-C, cmd-V and cmd-A and hand them to the webview — which would undo typing in a text
+//! field and nothing else, and would mean the piano roll could never have them. Every item
+//! here emits an event instead, and the window decides what it means: the notes or blocks
+//! picked out, or the text field with the focus.
 //!
 //! Everything else is Tauri's standard menu.
 
@@ -45,14 +46,35 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         .accelerator("Shift+CmdOrCtrl+Z")
         .build(app)?;
 
+    // Ours rather than the standard cut, copy, paste and select all, so that the keys reach
+    // the window. What each one does depends on what has the focus, which is the window's
+    // business: the notes or blocks picked out, or the text field being typed in.
+    let cut = MenuItemBuilder::with_id("cut", "Cut")
+        .accelerator("CmdOrCtrl+X")
+        .build(app)?;
+    let copy = MenuItemBuilder::with_id("copy", "Copy")
+        .accelerator("CmdOrCtrl+C")
+        .build(app)?;
+    let paste = MenuItemBuilder::with_id("paste", "Paste")
+        .accelerator("CmdOrCtrl+V")
+        .build(app)?;
+    let duplicate = MenuItemBuilder::with_id("duplicate", "Duplicate")
+        .accelerator("CmdOrCtrl+D")
+        .build(app)?;
+    let select_all = MenuItemBuilder::with_id("select_all", "Select All")
+        .accelerator("CmdOrCtrl+A")
+        .build(app)?;
+
     let edit = SubmenuBuilder::new(app, "Edit")
         .item(&undo)
         .item(&redo)
         .separator()
-        .cut()
-        .copy()
-        .paste()
-        .select_all()
+        .item(&cut)
+        .item(&copy)
+        .item(&paste)
+        .item(&duplicate)
+        .separator()
+        .item(&select_all)
         .build()?;
 
     // Start from the standard menu and put ours where its File and Edit submenus were, so
@@ -79,6 +101,9 @@ pub fn handle(app: &AppHandle, event: MenuEvent) {
         // The window does the stepping, because it has to redraw either way.
         "undo" => commands::stepped_by_menu(&app, true),
         "redo" => commands::stepped_by_menu(&app, false),
+        // And the window does the editing, because what these mean depends on what has the
+        // focus and it is the only one that knows.
+        "cut" | "copy" | "paste" | "duplicate" | "select_all" => commands::edit_by_menu(&app, &id),
         // Everything else in the menu bar is Tauri's, and it handles its own.
         _ => {}
     });
