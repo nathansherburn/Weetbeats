@@ -1339,13 +1339,28 @@ function resizeRoll() {
   const height = PITCHES * semitone();
   size(el.notes, width, height);
   size(el.rollRuler, width, HEAD - HEAD_LINE);
-  size(el.keys, KEYS, height);
+  size(el.keys, keysWidth(), height);
   size(el.velocity, width, VELOCITY);
-  // The stylesheet draws a line under every semitone across the whole width, so it has to
-  // be told when a semitone changes size.
+  // The stylesheet draws a line under every semitone across the whole width, and the grid
+  // holds the column the keys sit in, so both have to be told when the zoom changes.
   document.documentElement.style.setProperty("--semitone", `${semitone()}px`);
+  document.documentElement.style.setProperty("--keys", `${keysWidth()}px`);
   el.rollZoomRead.textContent = `${Math.round(state.rollZoom * 100) / 100}×`;
   state.needsDraw = true;
+}
+
+/* How tall the lanes are: a row for each pattern, and never nothing at all. */
+function lanesHeight() {
+  return Math.max(LANE, state.patterns.length * LANE);
+}
+
+/*
+ * The canvas carries on past the last lane to the bottom of the view. Nothing is drawn down
+ * there — the lanes, their lines and the playhead all stop where the patterns do — but a box
+ * dragged into that empty space needs canvas underneath it to be seen on.
+ */
+function songCanvasHeight() {
+  return Math.max(lanesHeight(), el.songScroll.clientHeight - HEAD);
 }
 
 function resizeSong() {
@@ -1353,7 +1368,10 @@ function resizeSong() {
   // real width, which is what makes the zoom cheap however long the song is.
   const window_ = Math.max(1, el.songScroll.clientWidth);
   el.songGrid.style.width = `${songWidth()}px`;
-  size(el.lanes, window_, Math.max(LANE, state.patterns.length * LANE));
+  size(el.lanes, window_, songCanvasHeight());
+  // The stylesheet draws the line under each lane, so it is told how many there are: the
+  // canvas is taller than the lanes now and the lines stop with them.
+  el.songGrid.style.setProperty("--lanes", String(Math.max(1, state.patterns.length)));
   size(el.scrubber, window_, HEAD - 1);
   el.songHint.classList.toggle("hidden", state.song.length > 0);
   el.zoomRead.textContent = `${Math.round(state.zoom * 100) / 100}×`;
@@ -1825,10 +1843,24 @@ function openRoll(track) {
   if (!isPitched(track)) setPitched(track, true);
   showPitched();
   resize();
-  // Land on the sampler's own pitch, which is where the notes will be.
+  centreRoll();
+}
+
+/*
+ * Where to look when the roll opens: on the notes that are already in it, in the middle of
+ * the window. A part written two octaves down used to open a long way above itself, looking
+ * like an empty roll until you scrolled to find it. With nothing to look at yet it lands on
+ * the sampler's own pitch, which is where the notes will be.
+ */
+function centreRoll() {
+  const pitches = rollNotes().map((note) => note.pitch);
+  const middle = pitches.length
+    ? (Math.min(...pitches) + Math.max(...pitches)) / 2
+    : DEFAULT_PITCH;
+  const window_ = el.rollScroll.clientHeight - HEAD - VELOCITY;
   el.rollScroll.scrollTop = Math.max(
     0,
-    (HIGH_PITCH - DEFAULT_PITCH - 6) * semitone(),
+    (pitchRow(middle) + 0.5) * semitone() - window_ / 2,
   );
 }
 
@@ -1887,6 +1919,16 @@ function semitone() {
   return SEMITONE * state.rollZoom;
 }
 
+/*
+ * How long the keys are. A key is a shape, not a strip: zoomed out, a full length one beside
+ * a six pixel semitone stops looking like a keyboard and starts looking like a barcode. So
+ * the column shortens with the zoom, and a key keeps roughly the proportions it has at life
+ * size. It does not grow past that — a keyboard half the window wide is no use to anyone.
+ */
+function keysWidth() {
+  return Math.round(KEYS * Math.min(1, state.rollZoom));
+}
+
 /* Rows run high to low, the way a keyboard stands up. */
 const pitchRow = (pitch) => HIGH_PITCH - pitch;
 const rowPitch = (row) => HIGH_PITCH - row;
@@ -1898,31 +1940,53 @@ function drawRoll() {
   drawVelocity();
 }
 
+/*
+ * The keyboard down the left, drawn the way one is built rather than as a list of rows: the
+ * white keys are one unbroken column the whole width of it, and the black keys are short
+ * bars lying on top of them, stopping well before the far side. What you see beside a black
+ * key is the white keys it sits between, which is what you see on a piano.
+ */
 function drawKeys() {
   const ctx = el.keys.getContext("2d");
   const height = PITCHES * semitone();
-  ctx.clearRect(0, 0, KEYS, height);
-  ctx.font = "10px ui-sans-serif, system-ui, sans-serif";
+  const width = keysWidth();
+  const short = Math.round(width * 0.58);
+  ctx.clearRect(0, 0, width, height);
   ctx.textBaseline = "middle";
+  ctx.textAlign = "right";
+
+  ctx.fillStyle = "#d6cfe3";
+  ctx.fillRect(0, 0, width - 1, height);
 
   for (let row = 0; row < PITCHES; row++) {
     const pitch = rowPitch(row);
     const y = row * semitone();
-    // Black keys are drawn short, so the column reads as a keyboard rather than a list.
     const black = isBlack(pitch);
-    const w = black ? KEYS * 0.62 : KEYS - 1;
-    ctx.fillStyle = black ? "#15121c" : "#2b2636";
-    ctx.fillRect(0, y, w, semitone() - 1);
+    if (black) {
+      ctx.fillStyle = "#0c0a12";
+      ctx.fillRect(0, y + 1, short, Math.max(1, semitone() - 2));
+      // Past its end, the joint between the two white keys it lies across.
+      ctx.fillStyle = "#9f97ad";
+      ctx.fillRect(short, y + Math.round(semitone() / 2), width - 1 - short, 1);
+    } else if (!isBlack(pitch - 1)) {
+      // E and F, B and C: two white keys touching, so the joint runs the whole way across.
+      ctx.fillStyle = "#9f97ad";
+      ctx.fillRect(0, y + semitone() - 1, width - 1, 1);
+    }
     // The sampler's own pitch is the one that plays the sample as it was recorded.
     if (pitch === DEFAULT_PITCH) {
-      ctx.fillStyle = "rgba(255,77,135,0.4)";
-      ctx.fillRect(0, y, w, semitone() - 1);
+      ctx.fillStyle = "rgba(255,77,135,0.45)";
+      ctx.fillRect(0, y, black ? short : width - 1, semitone() - 1);
     }
     if (pitch % 12 === 0 || pitch === DEFAULT_PITCH) {
-      ctx.fillStyle = PALETTE.dim;
-      ctx.fillText(pitchName(pitch), KEYS - 30, y + semitone() / 2);
+      // In dark ink on a pale key, the way the note is written on a keyboard, and in smaller
+      // ink on a short one: what is left of the key past the black ones is all there is.
+      ctx.font = `${width < 96 ? 8 : 10}px ui-sans-serif, system-ui, sans-serif`;
+      ctx.fillStyle = black ? PALETTE.dim : "#17141e";
+      ctx.fillText(pitchName(pitch), width - 6, y + semitone() / 2);
     }
   }
+  ctx.textAlign = "left";
 }
 
 function drawRollRuler() {
@@ -1955,10 +2019,12 @@ function drawNotes() {
   const height = PITCHES * semitone();
   ctx.clearRect(0, 0, width, height);
 
-  // The keyboard's own stripes, so you can tell a C from an F at a glance.
+  // The keyboard's own stripes, so you can tell a C from an F at a glance. Far enough apart
+  // to be read as the black keys and the white ones, which is what the column on the left is
+  // showing at the same height.
   for (let row = 0; row < PITCHES; row++) {
     const pitch = rowPitch(row);
-    ctx.fillStyle = isBlack(pitch) ? "#191621" : "#201c29";
+    ctx.fillStyle = isBlack(pitch) ? "#100d1a" : "#352d49";
     ctx.fillRect(0, row * semitone(), width, semitone() - 1);
     if (pitch % 12 === 0) {
       ctx.fillStyle = "rgba(0,0,0,0.35)";
@@ -2159,7 +2225,7 @@ el.notes.addEventListener("pointerdown", (e) => {
   state.needsDraw = true;
   invoke("audition", { id: state.roll, pitch: note.pitch });
   send(note);
-  dragging = { mode: "length", note, was: { ...note }, fresh: true };
+  dragging = { mode: "length", note, was: { ...note } };
 });
 
 el.notes.addEventListener("pointermove", (e) => {
@@ -2196,7 +2262,17 @@ function rollDragTo(point) {
   const note = dragging.note;
 
   if (dragging.mode === "length") {
-    const length = Math.max(1, Math.min(at.step - note.step + 1, MAX_STEPS - note.step));
+    /*
+     * How long it is, is where its end has got to: the step line nearest the pointer, not
+     * the one it is heading for and not the one it has left. Halfway through a step is where
+     * it takes that step in, so a note drawn with a flick of the wrist comes out the one
+     * step long you drew and one dragged nearly all the way through the next is two.
+     *
+     * The end of a note already there works out the same way, which is what taking hold of
+     * an end should feel like: it stays under the pointer rather than jumping a step.
+     */
+    const end = Math.round(at.x / rollCell());
+    const length = Math.max(1, Math.min(end - note.step, MAX_STEPS - note.step));
     if (length !== note.length) {
       note.length = length;
       state.needsDraw = true;
@@ -3634,11 +3710,13 @@ function drawScrubber() {
 function drawLanes() {
   const ctx = el.lanes.getContext("2d");
   const width = drawnWidth(el.lanes);
-  const height = Math.max(LANE, state.patterns.length * LANE);
+  const height = lanesHeight();
   const step = songStep();
   const bar = barPx();
   const left = songLeft();
-  ctx.clearRect(0, 0, width, height);
+  // Clearing the whole canvas, which is taller than the lanes: the space under the last one
+  // is where a box dragged below the song is drawn.
+  ctx.clearRect(0, 0, width, drawnHeight(el.lanes));
   ctx.font = "11px ui-sans-serif, system-ui, sans-serif";
   ctx.textBaseline = "middle";
 
@@ -3942,9 +4020,9 @@ function songPoint(event) {
   const rect = el.lanes.getBoundingClientRect();
   return {
     x: Math.max(0, event.clientX - rect.left + songLeft()),
-    // Clamped to the lanes, so a box started in the empty space below them still has its
-    // corner where the last lane ends rather than somewhere there is nothing to pick out.
-    y: Math.max(0, Math.min(Math.max(LANE, state.patterns.length * LANE), event.clientY - rect.top)),
+    // Clamped to the canvas rather than to the lanes, and the canvas runs on under the last
+    // one: a box dragged down there follows the pointer instead of stopping at the last row.
+    y: Math.max(0, Math.min(songCanvasHeight(), event.clientY - rect.top)),
   };
 }
 
@@ -3968,6 +4046,24 @@ let songDrag = null;
 
 el.lanes.addEventListener("pointerdown", (e) => {
   const at = songAt(e);
+
+  /*
+   * Shift drags a box round blocks rather than drawing one, the same as it does round notes.
+   * A press on an empty lane already means "put this pattern here and keep painting", which
+   * is how a song gets written and not something to give up for a selection box.
+   *
+   * The empty space under the last lane is part of the canvas and not part of any lane, so
+   * it is where there is room to start a box without landing on a block — which is why this
+   * comes before the press has to be over a lane at all.
+   */
+  if (e.shiftKey && !erasing(e) && !at?.block) {
+    el.lanes.setPointerCapture(e.pointerId);
+    const corner = songPoint(e);
+    songDrag = { mode: "box" };
+    state.marquee = { where: "song", from: corner, to: corner };
+    state.needsDraw = true;
+    return;
+  }
   if (!at) return;
 
   // The right button rubs out, all the way along a drag, the same as it does in a pattern.
@@ -3985,20 +4081,9 @@ el.lanes.addEventListener("pointerdown", (e) => {
 
   el.lanes.setPointerCapture(e.pointerId);
 
-  /*
-   * Shift drags a box round blocks rather than drawing one, the same as it does round notes.
-   * A press on an empty lane already means "put this pattern here and keep painting", which
-   * is how a song gets written and not something to give up for a selection box.
-   */
+  // Shift on a block itself takes it in or out of the set, rather than starting a box.
   if (e.shiftKey) {
-    if (at.block) {
-      toggleBlockPicked(at.block);
-      return;
-    }
-    const corner = songPoint(e);
-    songDrag = { mode: "box" };
-    state.marquee = { where: "song", from: corner, to: corner };
-    state.needsDraw = true;
+    toggleBlockPicked(at.block);
     return;
   }
 
@@ -4242,10 +4327,10 @@ el.lanes.addEventListener("dblclick", (e) => {
 /* The pointer says what a press would do before you press it. */
 function showSongCursor(at, boxing) {
   const cursor =
-    at === null
-      ? "default"
-      : boxing
-        ? "crosshair"
+    boxing
+      ? "crosshair"
+      : at === null
+        ? "default"
         : at.zone === "end" || at.zone === "start"
           ? "ew-resize"
           : at.zone === "body"
@@ -4258,43 +4343,6 @@ el.lanes.addEventListener("pointerleave", () => {
   el.lanes.style.cursor = "default";
   if (!songDrag) state.overStep = null;
 });
-
-/*
- * A box round some blocks can be started in the empty space under the last lane, which is
- * where there is room to start one without landing on a block.
- *
- * That space is not the canvas — the lanes are only as tall as there are patterns — so the
- * press lands on the scrolling area behind them and is picked up here instead. Everything
- * after that is the same drag: `songPoint` clamps a corner to the song, and the box knows
- * nothing about which element it started on.
- */
-el.songScroll.addEventListener("pointerdown", (e) => {
-  if (!e.shiftKey || e.button !== 0 || state.open !== null) return;
-  if (e.target === el.lanes || e.target === el.scrubber) return;
-  el.songScroll.setPointerCapture(e.pointerId);
-  const corner = songPoint(e);
-  songDrag = { mode: "box" };
-  state.marquee = { where: "song", from: corner, to: corner };
-  state.needsDraw = true;
-});
-
-el.songScroll.addEventListener("pointermove", (e) => {
-  // Only this drag: one that started on the lanes is captured by the canvas and handled
-  // there, and its moves bubble through here on the way past.
-  if (!el.songScroll.hasPointerCapture(e.pointerId)) {
-    const boxing = e.shiftKey && state.open === null && e.target !== el.lanes;
-    el.songScroll.style.cursor = boxing ? "crosshair" : "";
-    return;
-  }
-  followEdge(el.songScroll, e, "x", songDragTo);
-  songDragTo(e);
-});
-
-const dropFromBelow = (e) => {
-  if (el.songScroll.hasPointerCapture(e.pointerId)) dropBlock();
-};
-el.songScroll.addEventListener("pointerup", dropFromBelow);
-el.songScroll.addEventListener("pointercancel", dropFromBelow);
 
 // --- snap and zoom --------------------------------------------------------
 
@@ -4340,12 +4388,14 @@ function setRollZoom(zoom, anchorX, anchorY) {
   if (next === was) return;
   const ax = anchorX ?? el.rollScroll.clientWidth / 2;
   const ay = anchorY ?? el.rollScroll.clientHeight / 2;
-  // Where in the notes the point is, in unzoomed pixels.
-  const x = (el.rollScroll.scrollLeft + ax - KEYS) / was;
+  // Where in the notes the point is, in unzoomed pixels. Measured from the end of the keys,
+  // which are a different length before the zoom and after it.
+  const keysWas = keysWidth();
+  const x = (el.rollScroll.scrollLeft + ax - keysWas) / was;
   const y = (el.rollScroll.scrollTop + ay - HEAD) / was;
   state.rollZoom = next;
   resizeRoll();
-  el.rollScroll.scrollLeft = Math.max(0, KEYS + x * next - ax);
+  el.rollScroll.scrollLeft = Math.max(0, keysWidth() + x * next - ax);
   el.rollScroll.scrollTop = Math.max(0, HEAD + y * next - ay);
 }
 
