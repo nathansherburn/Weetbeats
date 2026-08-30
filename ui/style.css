@@ -23,7 +23,8 @@
      stop lining up with the lanes on the right. */
   --head: 34px;
   /* The piano roll: the keyboard column, one semitone, one step, and the velocity lane.
-     Must match KEYS, SEMITONE, ROLL_CELL and VELOCITY in main.js. */
+     Must match KEYS, SEMITONE, ROLL_CELL and VELOCITY in main.js. The first two are life
+     size: main.js sets both from the roll's own zoom, so the keys keep their shape. */
   --keys: 152px;
   --semitone: 15px;
   --velocity: 54px;
@@ -727,13 +728,18 @@ input.number.small-number {
    * below the scrubber, which puts them where the canvas draws its blocks and where the
    * panel on the left puts its rows. The strip above is under the scrubber, which is
    * opaque and sticky.
+   *
+   * They stop after `--lanes` of them, which main.js sets as patterns come and go: the
+   * canvas below carries on to the bottom of the view so that a box can be dragged into the
+   * empty space, and that space is empty rather than lined with lanes that are not there.
    */
-  background-image: linear-gradient(
+  background-image: repeating-linear-gradient(
     to bottom,
-    transparent calc(var(--lane) - 1px),
-    var(--line) calc(var(--lane) - 1px)
+    transparent 0 calc(var(--lane) - 1px),
+    var(--line) calc(var(--lane) - 1px) var(--lane)
   );
-  background-size: 100% var(--lane);
+  background-size: 100% calc(var(--lane) * var(--lanes, 0));
+  background-repeat: no-repeat;
   background-position: 0 var(--head);
 }
 

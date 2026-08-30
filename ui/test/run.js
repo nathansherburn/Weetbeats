@@ -37,6 +37,7 @@ const CELL = 30;
 const GAP = 3;
 const ROW = 46;
 const LANE = 34;
+const HEAD = 34;
 const SONG_STEP = 4;
 const BAR_PX = 16 * SONG_STEP;
 const ZOOM_STEP = 1.3;
@@ -53,6 +54,8 @@ const blockColour = (row) => BLOCK_COLOURS[row % BLOCK_COLOURS.length];
 // The piano roll. Must match main.js.
 const ROLL_CELL = 30;
 const SEMITONE = 15;
+const KEYS = 152;
+const VELOCITY = 54;
 const HIGH_PITCH = 127;
 const MIDDLE_C = 60;
 
@@ -508,6 +511,36 @@ try {
   check("the roll spans the whole of MIDI",
     (await canvasSize("keys")).h === 128 * SEMITONE, `${(await canvasSize("keys")).h}px`);
 
+  /* How light a canvas is in a pitch's row, as one number: the black keys and the white ones
+     have to be told apart at a glance, in the column and in the rows beside it. */
+  const rowInk = (id, pitch, x) =>
+    page.evaluate(
+      ([id, pitch, x, semitone, high]) => {
+        const dpr = window.devicePixelRatio || 1;
+        const [r, g, b] = document
+          .getElementById(id)
+          .getContext("2d")
+          .getImageData(
+            Math.round(x * dpr),
+            Math.round(((high - pitch) * semitone + semitone / 2) * dpr),
+            1,
+            1,
+          ).data;
+        return (r + g + b) / 3;
+      },
+      [id, pitch, x, SEMITONE, HIGH_PITCH],
+    );
+  // C5 and the C sharp above it: a plain white key and a plain black one, away from the
+  // sampler's own pitch, which wears a colour of its own.
+  const whiteKey = await rowInk("keys", MIDDLE_C + 12, 20);
+  const blackKey = await rowInk("keys", MIDDLE_C + 13, 20);
+  check("the keyboard's white keys are plainly lighter than its black ones",
+    whiteKey - blackKey > 40, `${Math.round(whiteKey)} vs ${Math.round(blackKey)}`);
+  const whiteRow = await rowInk("notes", MIDDLE_C + 12, 30);
+  const blackRow = await rowInk("notes", MIDDLE_C + 13, 30);
+  check("and the rows they line up with are told apart the same way",
+    whiteRow - blackRow > 12, `${Math.round(whiteRow)} vs ${Math.round(blackRow)}`);
+
   // The roll wears the same titlebar the boxes do: one band of the pattern's colour across
   // the top, and the way out at the far right of it.
   check("the roll's ruler is underlined in the pattern's colour, level with the chip",
@@ -557,13 +590,35 @@ try {
   const noteEnd = await noteAt(9, 64);
   await page.mouse.move(noteStart.x, noteStart.y);
   await page.mouse.down();
+  // The end of the note goes to the step line nearest the pointer. Just inside the next step
+  // the nearest one is still the step it started in, so the note is the one step drawn.
+  const nextStep = await noteAt(7, 64);
+  await page.mouse.move(nextStep.x, nextStep.y, { steps: 2 });
+  check("dragging into the next step does not stretch the note into it yet",
+    (await settledNote(7, 64, false)) !== ACCENT, await notePixel(7, 64));
+  // Past the middle of it the nearest line is the one after it, and the note takes it in.
+  const pastHalf = await page.evaluate(
+    ([cell, semitone, high]) => {
+      const box = document.getElementById("notes").getBoundingClientRect();
+      return { x: box.left + 7.7 * cell, y: box.top + (high - 64) * semitone + semitone / 2 };
+    },
+    [ROLL_CELL, SEMITONE, HIGH_PITCH],
+  );
+  await page.mouse.move(pastHalf.x, pastHalf.y, { steps: 2 });
+  check("dragging past the middle of it takes the note in",
+    (await settledNote(7, 64, true)) === ACCENT, await notePixel(7, 64));
   await page.mouse.move(noteEnd.x, noteEnd.y, { steps: 4 });
   await page.mouse.up();
   await page.waitForFunction(() =>
     window.__weetbeats_calls.filter((c) => c.name === "set_note").length >= 2);
   const stretched = (await calls("set_note")).at(-1).args;
-  check("dragging out a new note sets how long it is", stretched.length === 4,
+  // Three, not four: the end lands on the step line nearest the pointer, which is where it
+  // looked like it was all the way along the drag.
+  check("dragging out a new note sets how long it is", stretched.length === 3,
     JSON.stringify(stretched));
+  check("and it is drawn as far as the pointer went past", (await notePixel(8, 64)) === ACCENT,
+    await notePixel(8, 64));
+  check("and no further", (await notePixel(9, 64)) !== ACCENT, await notePixel(9, 64));
   // --- dragging a note moves it
   await clearCalls();
   const grab = await noteAt(2, MIDDLE_C);
@@ -629,6 +684,44 @@ try {
   check("right click takes a note out", (await lastCall("clear_note")).args.at.step === 6);
   check("and it goes from the pattern", (await rollLane()).length === 1);
 
+  // --- the roll opens looking at the notes that are in it, not always at middle C
+  await clearCalls();
+  // A note two octaves down, which the old view opened a long way above.
+  await page.evaluate(
+    ([high, semitone]) => {
+      document.getElementById("rollScroll").scrollTop = (high - 40) * semitone - 200;
+    },
+    [HIGH_PITCH, SEMITONE],
+  );
+  await page.waitForTimeout(60);
+  const lowNote = await noteAt(1, 38);
+  await page.mouse.click(lowNote.x, lowNote.y);
+  await page.waitForFunction(() => window.__weetbeats_calls.some((c) => c.name === "set_note"));
+  await page.locator("#closeRoll").click();
+  await page.waitForSelector("#editor:visible");
+  const backToRoll = await page.locator("#grid").boundingBox();
+  await page.mouse.click(backToRoll.x + 2 * CELL + CELL / 2, backToRoll.y + ROW / 2);
+  await page.waitForSelector("#roll:visible");
+  // The notes are now at 38 and 62, so the middle of them is pitch 50.
+  const landed = await page.evaluate(
+    ([head, velocity, semitone, high]) => {
+      const scroll = document.getElementById("rollScroll");
+      return {
+        top: scroll.scrollTop,
+        window: scroll.clientHeight - head - velocity,
+        rowOf: [38, 50, 62].map((pitch) => (high - pitch) * semitone),
+      };
+    },
+    [HEAD, VELOCITY, SEMITONE, HIGH_PITCH],
+  );
+  const inView = (row) => row >= landed.top && row + SEMITONE <= landed.top + landed.window;
+  check("opening the roll shows the notes that are in it",
+    inView(landed.rowOf[0]) && inView(landed.rowOf[2]),
+    `${landed.top} for rows ${landed.rowOf[2]}–${landed.rowOf[0]} of ${landed.window}`);
+  check("with the middle of them in the middle of the window",
+    Math.abs(landed.top + landed.window / 2 - (landed.rowOf[1] + SEMITONE / 2)) <= SEMITONE,
+    `${landed.top + landed.window / 2} vs ${landed.rowOf[1] + SEMITONE / 2}`);
+
   if (process.env.WEETBEATS_SCREENSHOT) {
     await page.screenshot({ path: process.env.WEETBEATS_SCREENSHOT.replace(/\.png$/, "-roll.png") });
   }
@@ -642,6 +735,7 @@ try {
   check("zooming the roll in makes a step wider", after.w > before.w,
     `${after.w} vs ${before.w}`);
   check("and a semitone taller", after.h > before.h, `${after.h} vs ${before.h}`);
+  const zoomedInKeys = (await canvasSize("keys")).w;
   check("the stylesheet's semitone follows, so its lines still line up",
     (await page.evaluate(() =>
       getComputedStyle(document.documentElement).getPropertyValue("--semitone").trim()))
@@ -682,6 +776,17 @@ try {
     parseInt(document.getElementById("notes").style.width) < was, after.w);
   check("pinching the roll zooms it out again",
     (await rollSize()).w < after.w, `${(await rollSize()).w} vs ${after.w}`);
+
+  // The keys shorten with the zoom, so one keeps the shape of a key rather than turning
+  // into a strip beside a six pixel semitone. They never grow past life size.
+  check("zoomed in, the keys are still life size", zoomedInKeys === KEYS,
+    `${zoomedInKeys}px`);
+  const shortKeys = (await canvasSize("keys")).w;
+  check("zoomed out, they get shorter", shortKeys < KEYS, `${shortKeys}px`);
+  check("and the column they sit in goes with them",
+    (await page.evaluate(() =>
+      getComputedStyle(document.documentElement).getPropertyValue("--keys").trim()))
+      === `${shortKeys}px`);
   // Two style writes per resize: the width and the height.
   check("and a burst of pinch events is one zoom, not one each",
     (await page.evaluate(() => window.__resizes)) <= 4,
@@ -971,7 +1076,14 @@ try {
     `${lanes.w}px`);
   check("while the song itself fills it", (await grid()) >= 900, `${await grid()}px`);
   check("and is a whole number of bars wide", (await grid()) % BAR_PX === 0, `${await grid()}px`);
-  check("the song has a lane per pattern", lanes.h === 2 * LANE, `${lanes.h}px`);
+  // Two patterns, so two lanes — and a canvas that carries on past them to the bottom of
+  // the view, which is where a box dragged under the last lane is drawn.
+  const songRoom = await page.evaluate(
+    (head) => document.getElementById("songScroll").clientHeight - head,
+    HEAD,
+  );
+  check("the song canvas fills the view under the lanes",
+    lanes.h === Math.max(2 * LANE, songRoom), `${lanes.h}px of ${songRoom}px`);
 
   const top = await laneCell(0, 0);
   await page.mouse.click(top.x, top.y);
@@ -1115,7 +1227,54 @@ try {
     !window.__weetbeats_state.song.some((one) => one.pattern === 1 && one.step === 40));
   check("right click takes a block out",
     (await lastCall("place_pattern")).args.on === false);
-  check("and the block is gone from there", (await blank(40, 1)) !== blockColour(1));
+  // --- the box round some blocks, drawn under the last lane as well as over them
+
+  /* How solid the lanes canvas is at a point in the window: the box is faint but not nothing. */
+  const inkAt = (x, y) =>
+    page.evaluate(
+      ([x, y]) => {
+        const dpr = window.devicePixelRatio || 1;
+        const canvas = document.getElementById("lanes");
+        const box = canvas.getBoundingClientRect();
+        return canvas
+          .getContext("2d")
+          .getImageData(Math.round((x - box.left) * dpr), Math.round((y - box.top) * dpr), 1, 1)
+          .data[3];
+      },
+      [x, y],
+    );
+  const settledInk = async (x, y, want) => {
+    const deadline = Date.now() + 2000;
+    for (;;) {
+      const got = await inkAt(x, y);
+      if (got > 0 === want || Date.now() > deadline) return got;
+      await page.waitForTimeout(25);
+    }
+  };
+
+  const lanesNow = await page.locator("#lanes").boundingBox();
+  const below = { x: lanesNow.x + 42 * SONG_STEP, y: lanesNow.y + 2 * LANE + 12 };
+  check("the canvas carries on under the last lane", lanesNow.height > 2 * LANE + 12,
+    `${lanesNow.height}px for ${2 * LANE}px of lanes`);
+
+  await page.evaluate(() => { document.getElementById("status").innerHTML = ""; });
+  await page.keyboard.down("Shift");
+  await page.mouse.move(below.x, below.y);
+  await page.mouse.down();
+  // Along and back up a little, but never as high as the last lane: this is the corner that
+  // had nowhere to be drawn, so the box disappeared whenever a drag went below the song.
+  await page.mouse.move(below.x - 60, below.y - 8, { steps: 4 });
+  check("a box dragged under the last lane is drawn there",
+    (await settledInk(below.x - 30, below.y - 6, true)) > 0,
+    `${await inkAt(below.x - 30, below.y - 6)}`);
+  await page.mouse.up();
+  await page.keyboard.up("Shift");
+  check("and it goes when the drag does",
+    (await settledInk(below.x - 30, below.y - 6, false)) === 0,
+    `${await inkAt(below.x - 30, below.y - 6)}`);
+  check("a box that stays under the lanes picks nothing out, which is what it looks like",
+    (await page.locator("#status").textContent()) === "",
+    await page.locator("#status").textContent());
 
   // --- a colour per pattern, picked from the list
   await clearCalls();
@@ -1911,7 +2070,9 @@ try {
   // Two notes, drawn two steps long so nothing below depends on what the last drag left.
   // A couple of steps in: the keyboard down the left is stuck over the start of the notes.
   const drawnFrom = await noteAt(2, 64);
-  const drawnTo = await noteAt(3, 64);
+  // Out to step four, so the note comes out two steps long: its end lands on the step line
+  // nearest the pointer.
+  const drawnTo = await noteAt(4, 64);
   await page.mouse.move(drawnFrom.x, drawnFrom.y);
   await page.mouse.down();
   await page.mouse.move(drawnTo.x, drawnTo.y, { steps: 3 });
@@ -2046,7 +2207,8 @@ try {
     document.getElementById("rollScroll").scrollLeft = 0;
   });
   const stretchFrom = await noteAt(2, 64);
-  const stretchTo = await noteAt(3, 64);
+  // Two steps long, so there is an end at step four to take hold of below.
+  const stretchTo = await noteAt(4, 64);
   await page.mouse.move(stretchFrom.x, stretchFrom.y);
   await page.mouse.down();
   await page.mouse.move(stretchTo.x, stretchTo.y, { steps: 3 });
@@ -2592,9 +2754,11 @@ try {
   const blocksNow = (await song()).length;
   check("there are blocks to pick out", blocksNow > 0, String(blocksNow));
   const belowLanes = await page.locator("#lanes").boundingBox();
+  const laneCount = await page.evaluate(() => window.__weetbeats_state.patterns.length);
   await page.keyboard.down("Shift");
   // Well below the last lane, where there is room to start a box without landing on a block.
-  await page.mouse.move(belowLanes.x + 400, belowLanes.y + belowLanes.height + 40);
+  // Still on the canvas: it goes on past the lanes to the bottom of the view.
+  await page.mouse.move(belowLanes.x + 400, belowLanes.y + laneCount * LANE + 40);
   await page.mouse.down();
   await page.mouse.move(belowLanes.x + 2, belowLanes.y + 2, { steps: 6 });
   await page.mouse.up();

@@ -127,6 +127,14 @@ roll** of its own notes rather than a line of boxes, because boxes cannot say wh
 how long. Click the small one to open the roll proper, and press the keyboard button again to
 go back to boxes. Nothing is lost either way: they are two views of one lane of notes.
 
+The roll opens looking at the notes that are already in it: a part written two octaves down
+is in front of you when it appears rather than off the bottom of the window. An empty one
+lands on middle C, which is where its notes will be. The keyboard down the left is drawn the
+way one is built — white keys the whole width of the column, black keys lying short across
+them — and it shortens as you zoom out, so a key keeps the shape of a key instead of becoming
+a strip. The rows beside it carry the same two shades, so which line you are writing on is
+something you can see rather than count.
+
 In the roll, press to draw a note and keep dragging to set how long it is; the next one you
 draw comes out that long. Grab a note to move it, grab its right hand end to stretch it,
 right click to rub it out. Everything you touch plays as you touch it. How hard each note is
